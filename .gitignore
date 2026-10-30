@@ -1,0 +1,31 @@
+# 依赖与构建
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# 测试产物
+artifacts/test-logs/*.log
+artifacts/test-logs/*.txt
+test-results/
+playwright-report/
+blob-report/
+
+# 存档与备份（绝不提交、绝不外露）
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# 本地环境
+.env
+.env.*
+!.env.example
+
+# 临时
+*.tmp
+*.bak
+Thumbs.db
+desktop.ini
+.DS_Store
