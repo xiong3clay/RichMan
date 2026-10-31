@@ -1,0 +1,24 @@
+单元 01 注意事项
+
+【API 已定，不要改回旧签名】
+- settleDue 必须传 currentRound，并返回 { loan, paidCents }；返回裸 BankLoan 的写法已废弃。
+- repayBankLoan 必须传 currentRound。
+- 单元 03 引擎如果按旧签名调用，会直接编译失败，这是故意的（防止悄悄少扣钱）。
+
+【语义坑】
+- “逾期 = 失信”是超时语义，不是错误：settleDue(currentRound > dueRound) 返回 DEFAULTED，别改成抛错。
+- 计息上限是 dueRound：不要写成“只要 ACTIVE 就计息”，否则逾期贷款会无限涨息。
+- 补轮计息是逐轮复利，不是单次乘一次；漏轮补算时金额必须按每轮累加。
+- DEFAULTED 的三个禁止：不能还款、不能计息、不能转回 ACTIVE。测试里已有 default_no_repay / default_freezes_interest。
+- 全局贷款表可以直接传入 borrowFromBank（内部按 borrowerId 过滤），不要在外面手工过滤后再传，否则容易漏。
+
+【工具链坑（本轮实际踩到）】
+- Trae/Qoder 都靠 CDP 驱动：Trae 9223、Qoder 9224；启动必须用 WMI Win32_Process.Create 带 --remote-debugging-port，
+  用 Start-Process 会被 DSH 的 job 杀掉。
+- Trae 的发送按钮没有 aria，只能按位置点 composer 右下角那个 24×24 图标；点完必须检查输入框是否清空（len===1）才算发出去。
+- Qoder 发送后输入框可能残留草稿（len 不变），需要重复点“发送消息”按钮；本轮第三轮确认因此没发出去。
+- 两者都会消耗各自额度，不要用它们跑纯格式化或重复验证。
+
+【测试约定】
+- 不要改旧测试来迁就实现；本轮 Qoder 抓到的第一个问题就是“测试固化了错误行为”。
+- 金额断言用整数分；边界要测 remaining、remaining-1、0、MAX。

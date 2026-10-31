@@ -1,0 +1,28 @@
+单元 01 → 单元 02 交接
+
+【本单元交付的 API（单元 02/03 直接复用，不要重写）】
+packages/game-core/src/bank.ts：
+- borrowFromBank(input: BorrowFromBankInput): BankLoan
+- accrueInterest(loans, round): BankLoan[]        // 逐轮复利、自动补轮、dueRound 封顶
+- repayBankLoan(loan, cents, currentRound): BankLoan
+- settleDue(loan, decision, availableCents, currentRound): { loan, paidCents }
+- defaultedBankDebtCents(loans): Cents
+- totalDebtCents(loans): Cents
+- 错误：BankRuleError（code 见 BankErrorCode），不要用字符串比较错误信息。
+
+【必须保持的语义】
+- 到期当轮：先 accrueInterest(round=dueRound)，再 settleDue(round=dueRound)。
+- 超过到期轮仍未结算：settleDue 直接失信（超时语义），不抛错；accrueInterest 不再计息。
+- DEFAULTED 永远不能还款、不能计息、金额冻结；错写逻辑时会让“失信欠款随还款递减”的旧行为复活，禁止。
+- 结算返回 paidCents，引擎扣金币只能扣 paidCents，不能扣 availableCents。
+- 金额一律整数分；利息只走 interestFor（money.ts）。
+
+【单元 02 入口】
+新建 packages/game-core/src/private-loans.ts + tests/private-loans.test.ts，实现私人借贷：
+请求生命周期（PENDING/ACCEPTED/REFUSED/EXPIRED/FAILED/CANCELLED）、同意才转账、截止时间、部分还款、催收上限、
+借款人破产记坏账（D3）、出借人破产冻结（D3b 待用户确认，先按冻结实现并标注）。
+复用 bank.ts 的错误风格与“纯函数 + 返回新对象”约定；测试至少覆盖 V1.3.2 单元 02 清单里的 consent_required、
+private_partial_40、collect_partial、approve_deadline、borrower_bankrupt/lender_bankrupt、concurrent_intents。
+
+【当前测试基线】
+全仓 56 条通过。单元 02 完成后必须保持原 56 条继续通过，不允许改旧测试。

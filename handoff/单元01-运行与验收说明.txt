@@ -1,0 +1,21 @@
+单元 01 运行与验收说明
+环境：Node v24.18.0、pnpm 11.7.0、TypeScript 7.0.2、Vitest 5.0.5
+
+【命令】
+cd D:\Lianjunjie\biancheng\RichMan
+pnpm test:core      # 规则与金额测试，应显示 5 文件 / 56 测试通过（bank 31 条）
+pnpm typecheck      # 退出码 0
+pnpm build          # 构建前端
+pnpm test           # 全仓测试
+
+【本单元验收点】
+1. bank.test.ts 覆盖的 13 个 describe 全部通过。
+2. 借 50 金币：第 2/3/4 轮债务为 55 / 60.50 / 66.55；第 4 轮计息后到期，当轮必须 REPAY 或 REFUSE。
+3. 失信后 repayBankLoan 抛 DEFAULTED_NOT_REPAYABLE，remainingCents 恒为失信时的值。
+4. 逾期（currentRound > dueRound）调用 settleDue 直接 DEFAULTED，不抛错；accrueInterest 不再对逾期贷款计息。
+5. 漏轮调用 accrueInterest 会按缺失轮次逐轮补算，不会少收。
+6. 其余借款人名下的贷款不影响本人借款资格（全局贷款表可直接传入）。
+
+【未验证项】
+- 与真实引擎（单元 03）的集成：本单元只验证纯函数，尚未接入 applyCommand。
+- Qoder 第三轮确认（客户端发送失败，见成果报告）。

@@ -1,0 +1,50 @@
+单元 01 成果报告
+日期：2026-11-01
+执行：Trae CN 实现（2 轮修改）→ Qoder CN 独立复核（2 轮）→ Harness 验收
+方案版本：V1.3.2
+
+【结论】
+单元 01 = 完成（代码验证通过）。银行贷款账务内核实现完毕，31 条单元测试、全仓 56 条测试通过，
+类型检查与构建通过。规则层面经两轮独立复核，修掉了到期时序与逾期出口两个实质问题。
+
+【完成项】
+1. 新增 packages/game-core/src/bank.ts（约 260 行）：
+   - 类型 BankLoan（loanId、borrowerId、seatId、principalCents、remainingCents、rateBps、issuedRound、dueRound、lastInterestRound、status、origin）
+   - 状态 ACTIVE/REPAID/DEFAULTED，来源 NORMAL/OVERDRAFT
+   - borrowFromBank：GOOD 信用、金币>0、无本人未结清银行贷款（按 borrowerId 过滤）、金额 ≤ 金币一半向下取整；透支贷款不受这些限制
+   - accrueInterest：逐轮复利，自动补算漏掉的轮次，计息上限为 dueRound，逾期不再计息
+   - repayBankLoan(loan, cents, currentRound)：仅 ACTIVE；DEFAULTED 永久拒绝；早于放款轮、逾期、未计息一律拒绝
+   - settleDue(loan, decision, availableCents, currentRound)：到期当轮决策；超过到期轮按“超时未决策”直接失信并冻结欠款；返回 { loan, paidCents }
+   - defaultedBankDebtCents / totalDebtCents：汇总函数，汇总越界抛错
+   - 错误码 14 个，含 LOAN_OVERDUE、INTEREST_NOT_ACCRUED、INVALID_ORIGIN、INVALID_DECISION
+2. 新增测试 packages/game-core/tests/bank.test.ts（31 条）：覆盖 55/60.50/66.55 复利、0.05 金币半入、5051 分上限向下取整、
+   当轮不计息、到期边界（余额恰好够/差 1 分）、逾期失信、逾期不计息、漏轮补息、失信后禁止还款且金额冻结、
+   多笔贷款互不影响、私人负债不影响资格（D1）、透支不受上限、跨借款人过滤、非法枚举/轮次/金额、不可变性。
+
+【两轮复核发现并修掉的问题】
+第一轮（Qoder）：
+- 到期时序未强制：ACTIVE 贷款可越过 dueRound 继续计息并结清 → 改为当轮精确决策
+- 测试把错误行为固化成期望 → multiple_bank_loans 重写
+- 跳轮静默少收利息 → 改为逐轮补算
+- origin/decision 无运行时校验（乱写 origin 可绕过 50% 上限）→ 补校验
+- existingLoans 未按借款人过滤（会堵死其他玩家）→ 已过滤
+- settleDue 不返回实际扣款额（调用方易多扣）→ 返回 { loan, paidCents }
+- repayBankLoan 无轮次参数（逾期可小额拖回 ACTIVE）→ 已补
+第二轮（Qoder）：
+- 逾期一律抛错，导致“超时 → 该笔失信”没有出口 → 改为 currentRound > dueRound 直接 DEFAULTED
+- accrueInterest 在 map 内抛错会阻断全桌计息 → 改为不抛错、按 dueRound 封顶
+- 还款缺少与结算对称的“先计息”保护 → 已补 INTEREST_NOT_ACCRUED
+
+【验证命令与真实结果】
+pnpm test:core → 5 文件 / 56 测试全部通过（其中 bank.test.ts 31 条）
+pnpm typecheck → 退出码 0
+pnpm build → 通过（web dist 正常）
+
+【未完成 / 说明】
+- Qoder 第三轮“确认 N1/N2/N3 已解决”因 Qoder 客户端发送状态异常没有成功；前两轮的 8+3 条意见已由 Harness 逐条对照代码确认修复。
+- Qoder 无法读取本仓库（其工作树是 tank-battle），复核基于贴出的代码，故 money.ts 的 interestFor/ordinaryLoanCap 前提未能由它核实；这部分由单元 00 的测试覆盖。
+- settleDue/repayBankLoan 的签名在单元 01 内变过一次（增加 currentRound、返回 paidCents），单元 03 的引擎必须按新签名调用。
+
+【提交】
+实现提交：7fb7def（feat(unit01): 银行贷款账务内核，Trae 实现、Qoder 两轮复核）
+交接与文档提交：本文件所在提交
