@@ -153,6 +153,8 @@ export function borrowFromBank(input: BorrowFromBankInput): BankLoan {
  * 为所有 ACTIVE 贷款计息。计息上限为 dueRound：从 lastInterestRound+1 逐轮复利，
  * 最多补算到 min(round, dueRound)，漏轮自动补齐，过期后不再计息。
  * 非 ACTIVE 或未越过放款轮时原样返回；返回新数组，不修改入参。
+ * 若复利后金额越过 MAX_MONEY_CENTS 会抛错（不截断、不造钱）；引擎收到该错误应把房间置 ERROR_PAUSED，
+ * 不要吞掉后继续推进。
  */
 export function accrueInterest(loans: readonly BankLoan[], round: number): BankLoan[] {
   assertRound(round);
@@ -216,6 +218,10 @@ export function settleDue(
   if (loan.status !== "ACTIVE") return { loan, paidCents: 0 };
   if (currentRound < loan.dueRound) return { loan, paidCents: 0 };
   if (currentRound > loan.dueRound) {
+    // 超时分支同样必须先计入到期轮利息，否则会冻结一个少一轮利息的欠款。
+    if (loan.lastInterestRound < loan.dueRound) {
+      throw new BankRuleError("INTEREST_NOT_ACCRUED", "到期轮利息尚未计入，不能按超时结算");
+    }
     return { loan: { ...loan, status: "DEFAULTED" }, paidCents: 0 };
   }
   if (loan.lastInterestRound < loan.dueRound) {

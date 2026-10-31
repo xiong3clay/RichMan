@@ -140,6 +140,12 @@ describe("settleDue 边界与时序", () => {
     expect(result.paidCents).toBe(0);
   });
 
+  it("逾期但到期轮利息未计入时，结算抛 INTEREST_NOT_ACCRUED（防止冻结少一轮利息）", () => {
+    const loan = borrow({ amountCents: 10_000, goldCents: 20_000 });
+    // lastInterestRound 仍停留在 issuedRound，没有计到 dueRound
+    expect(() => settleDue(loan, "REFUSE", 0, 5)).toThrowError(/INTEREST_NOT_ACCRUED|到期轮利息尚未计入/);
+  });
+
   it("逾期 ACTIVE 贷款再计息金额不变、不抛错", () => {
     const loan = dueActiveLoan();
     const accrued = accrueInterest([loan], 6)[0]!;
