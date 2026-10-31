@@ -22,7 +22,7 @@
 
 ## 交付物在哪里
 
-- 代码：单元 00 起在 apps/、packages/、scripts/ 生成（现在没有）
+- 代码：单元 00 已生成 apps/、packages/ 骨架（规则引擎与联机仍在后续单元）
 - 交接：handoff/单元NN-*.txt（四类）
 - 测试证据：artifacts/test-logs/
 - 存档：data/（入 .gitignore）
