@@ -1,0 +1,10 @@
+{
+  "name": "@richman/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@richman/shared": "workspace:*",
+    "@richman/game-core": "workspace:*"
+  }
+}

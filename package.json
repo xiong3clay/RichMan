@@ -1,0 +1,33 @@
+{
+  "name": "richman",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx apps/server/src/http.ts",
+    "build": "vite build",
+    "start": "tsx apps/server/src/http.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:core": "vitest run packages/game-core/tests packages/shared/tests",
+    "test:server": "vitest run apps/server/tests",
+    "test": "vitest run",
+    "test:e2e": "node -e \"console.error('尚未实现：e2e 测试按 V1.3 在单元 05 建立'); process.exit(1)\""
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5",
+    "zod": "^4.6.7"
+  }
+}
