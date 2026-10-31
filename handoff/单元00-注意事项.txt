@@ -1,0 +1,28 @@
+单元 00 注意事项
+
+【环境坑】
+1. pnpm 11 不再读取 package.json 的 pnpm 字段；构建脚本授权写在 pnpm-workspace.yaml 的 allowBuilds / onlyBuiltDependencies。
+   若新装依赖出现 ERR_PNPM_IGNORED_BUILDS：pnpm approve-builds --all。
+2. TypeScript 7 移除了 baseUrl。paths 必须写成 "./packages/..." 形式，新增别名时三处同步：tsconfig.base.json、vitest.config.ts、vite.config.ts。
+3. 服务端用 tsx 跑 .ts，未经 tsc 编译；若将来用 node 直接跑，需要先加编译步骤。
+4. 端口占用只报错退出，不自动换端口（方案要求明确报错，避免误连别人的服务）。
+
+【测试约定】
+- 断言金额用整数分，不要用浮点比较。
+- 区间边界要测：0、1 分、MAX-1、MAX、MAX+1、负数、-0 字符串。
+- 每新增规则先写会失败的测试，再实现。
+- pnpm test:e2e 目前故意失败并提示“单元 05 建立”，不要改成 echo 成功。
+
+【不能做的事】
+- 不能把 applyCommand 的 NotImplementedError 改成空返回，制造“实现好了”的假象。
+- 不能在 web 端重算金币或债务（视图必须来自服务端）。
+- 不能改冻结数值：100 金币、10%、50% 上限、20 金币/3 轮、五组倒计时、2～10 人、8000 端口、4～8 位房间码。
+- 不能在快照里存明文 token/恢复码。
+- 不能为了省事把 /health 扩成返回昵称、房间成员或合同信息。
+
+【待确认】
+D3b：出借人破产后，别人欠他的私人合同是否冻结（默认 FROZEN）。用户尚未表态，单元 02 前要么按默认实现并标注，要么再问一次。
+
+【风险】
+- 本单元只有金额与骨架，规则尚未实现；任何“能玩了”的说法都不成立。
+- 没有独立复核。单元 01 起建议按 AGENTS.md 引入第二个视角复核账务规则，否则错误会进入后续所有单元。

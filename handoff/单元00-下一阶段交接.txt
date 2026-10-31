@@ -1,0 +1,36 @@
+单元 00 → 单元 01 交接
+
+【架构与入口】
+- monorepo：packages/shared（协议/金额/类型/常量）、packages/game-core（规则引擎）、apps/server（HTTP/将来 WS）、apps/web（React）。
+- 入口：game-core/src/engine.ts（createInitialState / applyCommand / getPlayerView / encodeSnapshot / decodeSnapshot）；
+  shared/src/money.ts（金额编解码）；shared/src/protocol.ts（Zod，PROTOCOL_VERSION=1）；server/src/http.ts（startServer）。
+- 别名：@richman/shared、@richman/game-core（tsconfig paths + vitest/vite alias），新增包时必须同步三处。
+
+【数据流】
+浏览器 → HTTP（本单元仅 /health）→ server → （将来）game-core 纯函数 → 返回视图。game-core 不接触 socket/文件/时钟/浏览器，时间通过参数注入。
+
+【规则口径（本版已确认，写测试时必须遵守）】
+- 金额：Cents = number 整数分，上限 10^12，协议字符串最多 13 位，禁止 -0/前导零/正号。
+- 初始：100 金币（10000 分）、信用 GOOD、无贷款无债务。
+- 利息：10%（1000 基点），四舍五入到分；借 50 金币 → 55 / 60.50 / 66.55，第 4 轮计息后到期。
+- 普通贷款上限：金币一半向下取整。
+- 失信（D2）：停息、不可偿还、欠款冻结、永久 DEFAULTED；失信不淘汰，仍可行动/私人借款/催收，赌博仅一倍。
+- 私人负债不影响银行贷款资格（D1）。
+- 借款人破产 → 私人债务记坏账（D3）；出借人破产 → 冻结（D3b 仍待用户确认）。
+- 阶段内所有人完成即提前结束倒计时（D4）。
+- 失信者借钱时，请求卡片必须显示失信提示与欠款金额（D5）。
+
+【单元 01 入口与必测】
+主要文件：game-core/src/bank.ts（新建）、money.ts 复用、shared/src/types.ts（贷款类型）、tests/core/bank.test.ts。
+必测：bank_interest_50（55/60.50/66.55）、rounding_and_limit（0.05 金币→0.01 利息；奇数分 50% 向下取整）、
+default_no_repay（失信后还款被拒、金额恒为 100）、default_freezes_interest（失信后跨轮不再计息）、
+multiple_bank_loans（一笔失信不影响其他笔）、amount_roundtrip（13 位内精确；越界拒绝）、
+bank_ignores_private_debt（D1：私人负债不影响 50% 上限与资格）。
+命令：pnpm test:core、pnpm typecheck、pnpm build。
+
+【不可破坏的不变量】
+1. 所有金额变化必须有事件解释；不得有“凭空加钱”。
+2. game-core 不得访问文件/网络/系统时钟。
+3. 金额乘除只能走 mulDivFloor/mulDivRound，禁止 * 0.1 之类浮点。
+4. 协议与存档金额只用十进制字符串。
+5. 不要把尚未实现的测试标为通过；applyCommand 现在显式抛 NotImplementedError，单元 03 才实现。

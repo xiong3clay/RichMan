@@ -1,0 +1,40 @@
+单元 00 运行与验收说明
+环境：Windows 11 + Node v24.18.0 + pnpm 11.7.0 + git 2.56.0；TypeScript 7.0.2、Vite 8.3.5、Vitest 5.0.5、Zod 4.6.7、React 19.3.1。
+
+【安装】
+cd D:\Lianjunjie\biancheng\RichMan
+pnpm install
+（若提示 ignored builds，执行 pnpm approve-builds --all；本项目已在 pnpm-workspace.yaml 授权 esbuild）
+
+【启动（默认 8000，会打印本机与局域网地址）】
+pnpm start
+或指定端口：PORT=8080 pnpm start
+输出示例：
+  [richman] 服务已启动，监听 0.0.0.0:8000
+  [richman] 本机： http://localhost:8000/
+  [richman] 局域网： http://10.25.205.5:8000/
+
+【构建与检查】
+pnpm build        # 构建前端到 apps/web/dist
+pnpm typecheck    # 全工程类型检查
+pnpm test         # 全部自动化测试（本单元 28 条）
+pnpm test:core    # 规则与金额
+pnpm test:server  # 服务端点
+pnpm test:e2e     # 尚未实现（单元 05 建立），执行会明确报错并退出 1
+
+【本单元验收步骤】
+1) pnpm install 成功，无未处理构建脚本告警。
+2) pnpm typecheck 返回 0。
+3) pnpm test 显示 5 files / 28 tests 全通过。
+4) pnpm build 生成 apps/web/dist/index.html 与 assets/*.js、*.css。
+5) pnpm start 后浏览器打开 http://localhost:8000/，页面显示“RichMan / 服务状态”，服务版本、协议版本 1、连接 0、房间 0。
+6) 浏览器打开 http://localhost:8000/health，返回 JSON 且不含 token、昵称等敏感字段。
+7) 同一局域网另一台设备打开启动日志里打印的 LAN 地址，页面同样可打开（本单元未在真实手机验证，属未验证项）。
+8) 打开不存在的路径 /nope，返回 JSON 404，不是堆栈。
+
+【预期结果】
+页面只是空骨架：没有任何房间、登录或游戏操作；这是单元 00 的预期形态。
+
+【未验证项】
+- 真实手机访问（本单元不要求；单元 05 起要求）。
+- 独立复核（Qorder）。

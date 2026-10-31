@@ -1,40 +1,44 @@
 RichMan 项目当前状态
-更新日期：2026-10-31
-更新者：DeepSeek Harness（文档整理轮）
+更新日期：2026-11-01
+更新者：DeepSeek Harness（单元 00 执行轮）
 
 【版本】
-方案版本：V1.3 精简施工版
-规则版本：未建立（单元 00 生成 handoff/规则决策表.txt）
-协议版本：未建立
-存档 schemaVersion：未建立
-游戏版本：未开始，目标 V1.0
+方案版本：V1.3.2（含 D2 失信不可还款、D4 全员完成即推进、D1/D3/D5 确认）
+规则版本：V1.3.2（RULES_VERSION 常量在 game-core/engine.ts）
+协议版本：1（shared/src/protocol.ts）
+存档 schemaVersion：1（SNAPSHOT_SCHEMA_VERSION）
+游戏版本：未发布，目标 V1.0
 
 【进度】
-已完成单元：无
-当前单元：下一单元为 00（骨架、规则决策表与存储接口）
+已完成单元：00（骨架、金额内核、/health、空页面）
+当前单元：无（下一单元 01）
 当前子任务：无
-代码状态：无任何工程代码，只有指导文档
-提交号：见 git log（本次仅有文档提交）
+代码状态：可安装、可类型检查、可测试（28 条）、可构建、可启动访问
+提交号：7bb2add（实现）；文档与交接为其后一次提交
 
 【验证状态】
-自动化测试：未建立
-类型检查：未建立
-构建：未建立
-真机/真人验收：未进行
+pnpm typecheck：通过（EXIT 0）
+pnpm test：5 文件 / 28 测试通过
+pnpm build：通过（vite 构建 apps/web/dist）
+冒烟：PORT=8124 启动，/health 返回正确 JSON，/ 返回 200（413 字节）
+真机/真人验收：未进行（单元 00 不要求）
 
 【命令】
-安装：尚未建立（单元 00 提供 pnpm install）
-启动：尚未建立
-测试：尚未建立
+安装：pnpm install（构建脚本已通过 allowBuilds 授权 esbuild）
+启动：pnpm start（默认 0.0.0.0:8000，可用 PORT 覆盖）
+构建：pnpm build
+检查：pnpm typecheck / pnpm test / pnpm test:core / pnpm test:server
+未实现：pnpm test:e2e（单元 05 建立，执行会明确失败）
 
 【阻塞】
-无技术阻塞。开工前需用户确认 4 个规则默认值（见 handoff/规则决策表.txt 顶部）。
+无技术阻塞。
 
 【下一入口】
-读 AGENTS.md -> docs/plans/Richman分阶段联机开发方案_V1.3精简施工版.txt 第七节单元 00 -> 第八节启动提示词。
+单元 01：账务内核与银行贷款。读 handoff/单元00-下一阶段交接.txt 的“单元 01 入口与必测”，
+再读 docs/plans/V1.3.2 第三节 R01～R04，实现 game-core/src/bank.ts 并写 bank.test.ts。
 
 【应读文件】
 AGENTS.md
-docs/plans/Richman分阶段联机开发方案_V1.3精简施工版.txt
-docs/reference/大富翁.cpp
+handoff/单元00-下一阶段交接.txt
 handoff/规则决策表.txt
+docs/plans/Richman分阶段联机开发方案_V1.3精简施工版.txt

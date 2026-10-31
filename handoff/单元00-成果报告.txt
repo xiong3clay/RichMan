@@ -1,0 +1,58 @@
+单元 00 成果报告
+日期：2026-11-01
+执行：DeepSeek Harness（单会话，未拆给 Trae/Qorder）
+方案版本：V1.3.2
+
+【结论】
+单元 00 = 完成（代码验证通过）。自动化测试、类型检查、构建、真实启动与 HTTP 冒烟均通过；
+未做独立第三方复核（见“复核”一节），真人/真机验收不属于本单元。
+
+【完成项】
+1. pnpm workspace 骨架：packages/shared、packages/game-core、apps/server、apps/web。
+2. 根配置：package.json（脚本）、pnpm-workspace.yaml（含 allowBuilds: esbuild）、tsconfig.base.json（无 baseUrl，TS7 要求）、
+   tsconfig.json、vitest.config.ts 与 vite.config.ts 的 @richman/* 别名。
+3. shared：金额编解码（规范十进制字符串、13 位、10^12 上限、-0/前导零拒绝）、金币输入与展示、
+   错误码 14 项与中文文案、冻结数值 RULES/TIMERS/SERVER_DEFAULTS、类型与阶段枚举、Zod 协议 schema、/health 响应 schema。
+4. game-core：mulDivFloor/mulDivRound（BigInt 中间量）、interestFor、ordinaryLoanCap；
+   createInitialState（100 金币、信用 GOOD、2～10 人校验）、getPlayerView（本人 + 公开字段）、
+   encodeSnapshot/decodeSnapshot（schemaVersion 拒绝不兼容）、applyCommand 显式抛 NotImplementedError。
+5. server：原生 http；GET /health 返回 ok/service/version/protocolVersion/uptimeSec/connections/rooms/serverNow；
+   静态目录为 apps/web/dist，SPA 回退 index.html；未知路径 JSON 404；非 GET 405；监听 0.0.0.0，支持 PORT，启动打印本机与 LAN 地址。
+6. web：React + Vite 空页面，展示 /health 结果与“后续单元实现”的说明。
+7. 测试 5 个文件 28 条：金额字符串/金币输入/展示、协议 schema、/health schema、mulDiv 与利息（55/60.50/66.55）、
+   50% 上限取整、初始状态、权限视图不含金币、快照往返、applyCommand 未实现。
+
+【未完成（按方案属后续单元，不是缺陷）】
+- 规则引擎实际规则（单元 01～03）、WebSocket/房间/身份（04）、存档（06）、完整 UI（07）、教程/音频/手机（08）、加固与发布（09）。
+- 无 Node 端编译产物：服务通过 tsx 运行 TypeScript；build 只构建前端。原因见“与方案的偏差”。
+
+【与方案的偏差（已知，需在 04 前决定是否补）】
+1. 服务端用 tsx 运行 .ts，未做 tsc 编译产物。单元 04 若需要独立部署，可加 tsc -b 或 bundle。
+2. pnpm build 只构建 apps/web；全工程类型检查由 pnpm typecheck 承担。
+3. 单元 00 只做 HTTP /health，未接 WebSocket（方案本就要求 04 才做）。
+
+【命令与真实结果】
+- pnpm typecheck → EXIT 0
+- pnpm test → 5 files / 28 tests 全通过
+- pnpm build → vite v8.3.5，apps/web/dist 生成 index.html + assets
+- 冒烟（PORT=8124）：/health 返回 {"ok":true,"service":"richman",...}；/ 返回 HTTP 200、413 字节 index.html
+- 启动日志：监听 0.0.0.0:8124，本机 http://localhost:8124/，局域网 http://10.25.205.5:8124/
+
+【日志路径】
+artifacts/test-logs/unit00-typecheck.log、unit00-test.log、unit00-build.log、unit00-smoke.log
+（按 .gitignore 不入库，只有本机留存证据）
+
+【复核】
+自检清单：金额边界、-0、13 位、利息四舍五入、50% 向下取整、/health 不含 token/nickname、404/405 JSON、快照版本拒绝。
+未做：独立第三方（Qorder）逐条复核；未做真实手机访问（本单元不要求）。
+风险提示：下一单元起应按 AGENTS.md 第 4 节引入独立复核，否则规则错误会累积。
+
+【已知问题】
+1. pnpm 11 拒绝执行 esbuild 构建脚本，需 allowBuilds/esbuild 授权（已写进 pnpm-workspace.yaml）。
+2. TypeScript 7 移除了 baseUrl，paths 必须写 ./ 前缀（已在 tsconfig.base.json 修正）。
+3. pnpm run 首次调用曾因依赖状态检查超时，重试后正常；不是代码问题。
+4. 端口被占用时服务只打印启动失败并退出，不自动换端口（方案要求：明确报错，不误认别人的 health）。
+
+【提交】
+实现提交：7bb2add
+交接与文档提交：见下一条提交（本文件写入后提交）。
