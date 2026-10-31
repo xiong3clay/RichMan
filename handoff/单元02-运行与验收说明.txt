@@ -1,0 +1,21 @@
+单元 02 运行与验收说明
+环境：Node v24.18.0、pnpm 11.7.0、TypeScript 7.0.2、Vitest 5.0.5
+
+【命令】
+cd D:\Lianjunjie\biancheng\RichMan
+pnpm test:core      # 应显示 5 文件 / 91 测试通过（private-loans 34 条）
+pnpm typecheck      # 退出码 0
+pnpm build
+
+【本单元验收点】
+1. 未同意不转账、不生成借条；非指定出借人批准被拒。
+2. A 借给 B 40（A=60、B=140），下轮欠款 44；B 还 10 后 A=70、B=130、欠 34。
+3. 催收 20 只转 20；借出当轮不能催；超过可收上限抛 AMOUNT_EXCEEDS_COLLECTIBLE 且金额不变。
+4. nowMs 恰好等于 deadlineMs 的同意不生效；余额不足 → FAILED 且双方余额不变。
+5. 借款人破产 → BAD_DEBT；出借人破产 → FROZEN；两者都不再计息、不计入应收。
+6. 破产时相关 PENDING 请求被关闭。
+7. accept 遇到被篡改的请求（负本金/越界利率/自借）抛 INVALID_REQUEST，双方余额不变。
+
+【未验证项】
+- 与引擎的集成（单元 03）。
+- 阶段限制（非自己行动不能还款/催收）——属引擎层，单元 03 实现。

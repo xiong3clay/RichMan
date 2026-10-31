@@ -1,0 +1,45 @@
+单元 02 成果报告
+日期：2026-11-01
+执行：Trae CN 实现（3 轮修改）→ Qoder CN 独立复核 → Harness 验收
+方案版本：V1.3.2
+
+【结论】
+单元 02 = 完成（代码验证通过）。私人借款与原子账务实现完毕，private-loans.test.ts 34 条、全仓 91 条通过，
+类型检查与构建通过。
+
+【完成项】
+1. packages/game-core/src/private-loans.ts：
+   - 类型 PrivateLoan（ACTIVE/REPAID/BAD_DEBT/FROZEN）、LoanRequest（PENDING/ACCEPTED/REFUSED/EXPIRED/CANCELLED/FAILED）
+   - createLoanRequest：双方存活、不能自借、本金/利率校验、截止时间、同一借款人最多一个 PENDING；创建时快照 borrowerCredit 与失信欠款（D5）
+   - acceptLoanRequest：只有指定出借人能批；过期 → EXPIRED；余额不足 → FAILED 且双方余额不变；成功时扣出借人、加借款人、建借条、请求 ACCEPTED 同一次原子结果；并重校验请求字段（负本金/越界利率/自借 → INVALID_REQUEST）
+   - refuse/cancel/expire：只对 PENDING 生效，不产生借条
+   - accruePrivateInterest：issuedRound+1 首次计息，逐轮复利、漏轮补算，FROZEN/BAD_DEBT/REPAID 不计息
+   - repayPrivateLoan：仅 ACTIVE，金额 ≤ min(剩余, 借款人余额)，部分还款，返回双方余额
+   - collectPrivateDebt：仅 ACTIVE 且出借人匹配，借出当轮不能催，超过可收上限抛 AMOUNT_EXCEEDS_COLLECTIBLE 并带合法上限（不静默封顶），返回双方余额
+   - settleBankruptcy：借款人破产 → BAD_DEBT；出借人破产 → FROZEN；FROZEN 后借款人再破产 → BAD_DEBT
+   - closeRequestsForBankrupt：破产时把相关 PENDING 请求置 CANCELLED
+   - 汇总：privateDebtCents / receivableCents（仅 ACTIVE）/ frozenCents / badDebtCents
+2. 测试 34 条：consent_required、private_partial_40、collect_partial、approve_deadline、borrower_bankrupt、lender_bankrupt、
+   concurrent_intents、request_shows_defaulted_flag、accrue、boundaries、immutability、request_validation、two_sided_balance、bankrupt_requests。
+
+【复核发现并修掉的问题】
+Harness 自查：
+- collectPrivateDebt 原实现“超过上限静默封顶”，与 R06「拒绝该数额并返回合法上限，不默默改金额」冲突 → 改为抛 AMOUNT_EXCEEDS_COLLECTIBLE。
+Qoder 复核：
+- acceptLoanRequest 信任外部请求，未重校验本金/利率/自借 → 负本金会造成资金反向 → 已补 INVALID_REQUEST 校验
+- repay/collect 只返回借款人一侧余额，出借人入账靠调用方手算，易漏记 → 两个函数都改为双向更新并返回双方余额
+- 破产时未关闭相关 PENDING 请求 → 新增 closeRequestsForBankrupt
+- 遗留未处理（不阻塞）：还款/催收未带阶段参数（自己行动/自救）；accept 时不刷新 D5 风险快照；参数风格不统一；loanId 唯一性交给上层
+
+【验证命令与真实结果】
+pnpm test:core → 5 文件 / 91 测试通过（private-loans 34 条）
+pnpm typecheck → 退出码 0
+pnpm build → 通过
+
+【未完成 / 说明】
+- Qoder 只能看贴出的代码（它的工作树是 tank-battle），无法核实 shared 常量。
+- accept 的风险快照刷新与阶段参数留到单元 03 的引擎层统一处理（handoff 里写明）。
+
+【提交】
+实现提交：3a2021c（feat(unit02): 私人借款与原子账务）
+交接与文档提交：本文件所在提交

@@ -1,0 +1,35 @@
+单元 02 → 单元 03 交接
+
+【本单元交付的 API（引擎直接复用）】
+packages/game-core/src/private-loans.ts：
+- createLoanRequest(input): LoanRequest
+- acceptLoanRequest(request, ctx): { request, loan, borrowerCents, lenderCents }
+- refuseLoanRequest / cancelLoanRequest / expireLoanRequest(request): LoanRequest
+- accruePrivateInterest(loans, round): PrivateLoan[]
+- repayPrivateLoan(loan, cents, currentRound, borrowerCents, lenderCents): { loan, paidCents, borrowerCents, lenderCents }
+- collectPrivateDebt(loan, cents, currentRound, borrowerCents, lenderCents, lenderId): { loan, collectedCents, borrowerCents, lenderCents }
+- settleBankruptcy(loans, bankruptPlayerId): PrivateLoan[]
+- closeRequestsForBankrupt(requests, bankruptPlayerId): LoanRequest[]
+- 汇总：privateDebtCents / receivableCents / frozenCents / badDebtCents
+
+【引擎（单元 03）必须负责、bank/private-loans 不负责的事】
+- 阶段限制：只有当前玩家在自己 ACTION（或危险自救）里能借款/还款/催收；BETTING 期间禁止一切经济操作。
+- “发起请求即消耗行动”“拒绝/取消不退行动”“请求截止 = min(请求时限, 当前窗口截止)”。
+- accept 时刷新 D5 风险快照（如果借款人在等待期间新增失信，出借人界面要能看到最新状态）。
+- 命令去重与 version 校验（单元 04 才接网络，但引擎接口要预留 commandId）。
+- 破产判定（金币为负且自救失败）→ 调 settleBankruptcy + closeRequestsForBankrupt + 银行贷款全部转 DEFAULTED。
+
+【必须保持的语义】
+- 同意才转账，且扣出借人/加借款人/建借条是一次原子结果；任何失败不能只改一方。
+- 催收超过上限是拒绝（AMOUNT_EXCEEDS_COLLECTIBLE），不是静默封顶。
+- BAD_DEBT / FROZEN 不再计息、不能还款、不能催收、不计入应收。
+- 私人借款下一轮才首次计息。
+
+【单元 03 入口与必测】
+主要文件：game-core/src/engine.ts（实现 applyCommand）、gamble.ts、tax.ts、views.ts；测试 round.test.ts、gamble.test.ts、tax.test.ts、views.test.ts。
+必测（V1.3 单元 03 清单）：gamble_100、waiting_loan_blocks_next_phase、action_timeout_advances、danger_partial_rescue、tax_all_due_before_win、
+system_once、privacy_views、phase_advance_when_all_done、defaulted_player_still_plays。
+新增：破产时同时调用 settleBankruptcy 与 closeRequestsForBankrupt（单元 02 交付）。
+
+【当前测试基线】
+全仓 91 条通过。单元 03 必须保持全部通过，不允许改旧测试。

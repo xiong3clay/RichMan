@@ -1,6 +1,6 @@
 RichMan 项目当前状态
 更新日期：2026-11-01
-更新者：DeepSeek Harness（单元 01 执行轮）
+更新者：DeepSeek Harness（单元 02 执行轮）
 
 【版本】
 方案版本：V1.3.2
@@ -10,17 +10,17 @@ RichMan 项目当前状态
 游戏版本：未发布，目标 V1.0
 
 【进度】
-已完成单元：00、01
-当前单元：无（下一单元 02）
-代码状态：骨架 + 银行贷款账务内核；可测试、可构建
-提交号：见 git log（单元 00：7bb2add；单元 01 见最新提交）
+已完成单元：00、01、02
+当前单元：无（下一单元 03）
+代码状态：骨架 + 银行账务内核 + 私人借贷内核；规则引擎尚未接通
+提交号：见 git log
 
 【验证状态】
-pnpm test:core：5 文件 / 56 测试通过（bank.test.ts 31 条）
+pnpm test:core：5 文件 / 91 测试通过（bank 32、private-loans 34）
 pnpm typecheck：通过
 pnpm build：通过
-真机/真人验收：未进行（单元 01 不要求）
-独立复核：Qoder 两轮，问题已修复
+真机/真人验收：未进行（单元 02 不要求）
+独立复核：Qoder（单元 01 两轮 + 第三轮确认；单元 02 一轮，高危项已修）
 
 【命令】
 安装：pnpm install
@@ -29,14 +29,14 @@ pnpm build：通过
 未实现：pnpm test:e2e（单元 05 建立）
 
 【阻塞】
-无。D3b（出借人破产后合同是否冻结）仍待用户确认，单元 02 先按冻结实现并标注。
+无。D3b（出借人破产后合同冻结）已按默认实现，用户仍未明确确认。
 
 【下一入口】
-单元 02：私人借款与原子账务。读 handoff/单元01-下一阶段交接.txt 与 handoff/规则决策表.txt，
-新建 private-loans.ts 与测试；实现、复核、验收流程同单元 01。
+单元 03：完整轮次、赌博、税收、自救与胜负。读 handoff/单元02-下一阶段交接.txt 与规则决策表，
+实现 engine.ts 的 applyCommand 并把 bank/private-loans 接进去。
 
 【应读文件】
 AGENTS.md
-handoff/单元01-下一阶段交接.txt
+handoff/单元02-下一阶段交接.txt
 handoff/规则决策表.txt
 docs/plans/Richman分阶段联机开发方案_V1.3精简施工版.txt

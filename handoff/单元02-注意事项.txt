@@ -1,0 +1,22 @@
+单元 02 注意事项
+
+【语义坑】
+- 催收超上限必须抛 AMOUNT_EXCEEDS_COLLECTIBLE（错误里带合法上限），不是静默取 min；否则出借人会以为收到了他输入的金额。
+- repay/collect 现在返回双方余额，引擎必须使用返回值写回，不能自己加减。
+- accept 必须重校验请求字段：请求可能来自存档或网络，负本金会导致“出借人加钱、借款人扣钱”的反向转账。
+- 破产流程是三件事：settleBankruptcy（合同状态）+ closeRequestsForBankrupt（待处理请求）+ 银行贷款转 DEFAULTED，缺一不可。
+- FROZEN 的合同在借款人破产时转 BAD_DEBT，两条规则要按顺序判断。
+
+【留给单元 03 的债】
+- 阶段校验（谁能在什么时候还款/催收）还没做，目前纯函数不校验阶段。
+- accept 时没有刷新 D5 风险快照。
+- 参数风格不统一（create/accept 用对象，repay/collect 用位置参数），单元 03 封装时统一成 command payload。
+- loanId / requestId 唯一性由上层保证。
+
+【工具链坑（本轮实际踩到）】
+- Qoder 的发送状态不稳定：输入框可能残留草稿，len 不归零就是没发出去；发完要检查编辑器长度。
+- Qoder 看不到本仓库（工作树是 tank-battle），只能基于贴出的代码审查；涉及 shared/money.ts 的前提要自己核实。
+- Trae 的发送按钮没有 aria，按位置点 composer 右下角 24×24 图标，点完检查输入框是否清空。
+
+【测试基线】
+全仓 91 条（bank 32 + private-loans 34 + 其它 25）。改旧测试必须说明理由。
