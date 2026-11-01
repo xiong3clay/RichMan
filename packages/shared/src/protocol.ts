@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { MAX_MONEY_DIGITS } from "./money.js";
+import { MAX_MONEY_CENTS, MAX_MONEY_DIGITS } from "./money.js";
 import { PHASES } from "./types.js";
 
 export const PROTOCOL_VERSION = 1;
@@ -8,7 +8,8 @@ const moneyDigits = "0|[1-9][0-9]{0," + String(MAX_MONEY_DIGITS - 1) + "}";
 export const MoneyStringSchema = z
   .string()
   .regex(new RegExp("^-?(" + moneyDigits + ")$"), "money string must be canonical decimal")
-  .refine((s) => s !== "-0", "negative zero is not allowed");
+  .refine((s) => s !== "-0", "negative zero is not allowed")
+  .refine((s) => Math.abs(Number(s)) <= MAX_MONEY_CENTS, "money string exceeds the maximum amount");
 
 export const RoomCodeSchema = z.string().regex(/^[0-9]{4,8}$/);
 

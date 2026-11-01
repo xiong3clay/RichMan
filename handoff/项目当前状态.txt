@@ -1,6 +1,6 @@
 RichMan 项目当前状态
 更新日期：2026-11-01
-更新者：DeepSeek Harness（单元 02 执行轮）
+更新者：DeepSeek Harness（单元 03 收尾轮）
 
 【版本】
 方案版本：V1.3.2
@@ -10,33 +10,33 @@ RichMan 项目当前状态
 游戏版本：未发布，目标 V1.0
 
 【进度】
-已完成单元：00、01、02
-当前单元：无（下一单元 03）
-代码状态：骨架 + 银行账务内核 + 私人借贷内核；规则引擎尚未接通
-提交号：见 git log
+已完成单元：00、01、02、03
+当前单元：无（下一单元 04：同源服务器、房间、身份与重连）
+代码状态：规则引擎完整（阶段机/赌博/税收自救/胜负），尚未接 WebSocket
 
 【验证状态】
-pnpm test:core：6 文件 / 97 测试通过（bank 32、private-loans 40、shared 12、engine 6、money 7）
+pnpm test:core：10 文件 / 134 测试通过
+pnpm test:server：1 文件 / 6 测试通过
 pnpm typecheck：通过
 pnpm build：通过
-真机/真人验收：未进行（单元 02 不要求）
-独立复核：Qoder（单元 01 两轮 + 第三轮确认；单元 02 两轮；第三轮直接在 RichMan 工作区读仓库复跑测试，发现 3 个必须修的 bug 并已修复）
+真人/真机：未进行（单元 03 不要求）
+独立复核：Qoder 三轮（00-02 复核、03A 复核、03 复核），提出的 M1-M6 与 P1-P4 已修；P1-P4 尚未做 Qoder 终审
 
 【命令】
 安装：pnpm install
-启动：pnpm start（默认 0.0.0.0:8000）
-测试：pnpm test:core / pnpm test / pnpm test:server
+启动：pnpm start（当前只有 /health 与静态页）
+测试：pnpm test:core / test:server / test
 未实现：pnpm test:e2e（单元 05 建立）
 
 【阻塞】
-无。D3b（出借人破产后合同冻结）已按默认实现，用户仍未明确确认。
+无。D3b（出借人破产后合同冻结）仍按默认实现，用户未最终表态。
 
 【下一入口】
-单元 03：完整轮次、赌博、税收、自救与胜负。读 handoff/单元02-下一阶段交接.txt 与规则决策表，
-实现 engine.ts 的 applyCommand 并把 bank/private-loans 接进去。
+单元 04：同源服务器、房间、稳定身份与重连。读 handoff/单元03-下一阶段交接.txt。
+必须先接引擎的系统推进入口 advanceSystem（计时器），以及 eventsForPlayer 的受众过滤。
 
 【应读文件】
 AGENTS.md
-handoff/单元02-下一阶段交接.txt
+handoff/单元03-下一阶段交接.txt
 handoff/规则决策表.txt
 docs/plans/Richman分阶段联机开发方案_V1.3精简施工版.txt

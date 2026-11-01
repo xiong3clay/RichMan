@@ -1,0 +1,55 @@
+单元 03 成果报告
+日期：2026-11-01
+执行：Trae CN 实现（03A/03B/03C 三轮）→ Qoder CN 复核（03A + 03 两轮）→ Harness 验收与收尾
+方案版本：V1.3.2
+
+【结论】
+单元 03 = 完成（代码验证通过）。规则引擎已能完整跑完一局：阶段机、赌博、税收/危险自救、胜负结算全部实现，
+core 10 文件 / 134 条测试、server 1 文件 / 6 条测试通过，typecheck 与 build 通过。未做真人/真机验收（本单元不要求）。
+
+【完成项】
+1. packages/game-core/src/engine.ts（约 44KB）：
+   - 阶段机 INTEREST → BANK_DUE → ACTION → BETTING →（每 3 轮）TAX → 轮末/GAME_OVER
+   - BANK_DUE 扫描 dueRound <= round，稳定次序（座位→到期轮→loanId）；余额不足直接失信、不开无效窗口（reason=insufficient_funds）
+   - ACTION：按座位行动、权限校验、行动消耗、失败不消耗；私人请求等待期间全桌冻结；支持取消请求（CANCEL_PRIVATE_LOAN）
+   - 赌博：锁注一次、未开奖隐藏、全员提交或超时补 0 即开奖、ctx.drawResult 注入、透支贷款、失信只能一倍
+   - 税收/自救：按座位扣税、负余额进 DANGER、60/45 秒窗口、补足即结束、请求间隔 >= 2 秒、放弃/超时破产
+   - 胜负：仅剩 1 人获胜；全员破产无获胜者
+   - 系统推进入口 advanceSystem(state, ctx)：服务器计时器无需伪造客户端命令
+   - eventsForPlayer：私人金额事件带 audience，按玩家过滤
+   - eventSeq 连续、version 只在有状态变化或命令成功时 +1、异常回滚到一致状态
+2. packages/game-core/src/gamble.ts：下注结算纯函数（含 OVERDRAFT 生成、不变量校验）
+3. packages/game-core/src/tax.ts：税收/自救相关纯函数
+4. packages/game-core/src/views.ts：按玩家投影（本人完整、公开列表、他人合同与下注不可见）
+5. 测试：engine-round 17、gamble 9、tax 5、full-game 2，加上既有 101 条，共 core 134 条；server 6 条。
+
+【复核发现并已修的问题】
+Qoder 03A 复核（3 阻塞 + 2 收尾）：
+- 无系统推进入口（超时只能靠客户端命令搭车）→ Lead 补 advanceSystem，并加 2 条测试
+- 到期余额不足仍开窗口 → 改为直接失信 reason=insufficient_funds
+- BANK_DUE_DECISION 不校验 payload loanId → 按 pendingDueLoanId 校验
+- 视图缺 phaseInstanceId/currentSeatId → 补充
+- 破产/非存活玩家无统一守卫 → 补 assert
+Qoder 00-02 复核（M1-M6，影响 03 地基）：贷款 ID 覆盖、私人还款/催收缺轮次守卫、协议金额上限、
+http 可打崩、CommandContext 缺 actorId、入账无上限校验 → 全部修复，Qoder 已逐条验收确认。
+Qoder 03 复核（P1-P4）：
+- 到期余额不足仍等窗口 → 修复（同上）
+- 缺 CANCEL_PRIVATE_LOAN → 新增（ACTION/TAX 两种语义）
+- 自救缺 2 秒请求间隔 → LoanRequest 增加 createdAtMs 并在自救校验
+- 私人金额进入无受众事件流 → GameEvent 增加 audience + eventsForPlayer 过滤
+- views 隐私测试假绿 → 用真实 FROZEN/BAD_DEBT/下注数据重写
+
+【未完成 / 需注意】
+- P1-P4 尚未做 Qoder 终审；现有结论基于 Qoder 的原意见 + Harness 逐条代码核对 + 测试。
+- 未做真人/真机验收（单元 05/08 才要求）。
+- Qoder 列出的可延后项（runInterest 事件、换请求/贷款替换的“恰好命中 1 条”守卫、视图缺 actedSeats/eventSeq、
+  请求快照缺私人债务字段、视图对象非深拷贝、重复同意语义等）已写入 单元03-下一阶段交接.txt，不擅自扩写。
+
+【验证命令与真实结果】
+pnpm test:core   → 10 文件 / 134 测试通过
+pnpm test:server → 1 文件 / 6 测试通过
+pnpm typecheck   → 退出码 0
+pnpm build       → 退出码 0
+
+【提交】
+实现提交：见下一条提交

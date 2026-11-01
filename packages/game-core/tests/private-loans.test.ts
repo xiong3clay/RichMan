@@ -145,7 +145,7 @@ describe("private_partial_40", () => {
 
 describe("collect_partial", () => {
   it("催收 20 只转 20、债务只减 20", () => {
-    const loan = activeLoan({ principalCents: 5_000, remainingCents: 5_000 });
+    const loan = activeLoan({ principalCents: 5_000, remainingCents: 5_000, lastInterestRound: 2 });
     const collected = collectPrivateDebt(loan, 2_000, 2, 10_000, "A", 5_000);
     expect(collected.collectedCents).toBe(2_000);
     expect(collected.loan.remainingCents).toBe(3_000);
@@ -159,7 +159,7 @@ describe("collect_partial", () => {
   });
 
   it("催收金额超过可收上限时抛 AMOUNT_EXCEEDS_COLLECTIBLE，金额与余额不变，错误含上限", () => {
-    const loan = activeLoan({ principalCents: 3_000, remainingCents: 3_000 });
+    const loan = activeLoan({ principalCents: 3_000, remainingCents: 3_000, lastInterestRound: 2 });
     const borrowerCents = 1_000;
     const lenderCents = 5_000;
 
@@ -178,7 +178,7 @@ describe("collect_partial", () => {
   });
 
   it("借款人余额为 0 时，任何催收金额都抛 AMOUNT_EXCEEDS_COLLECTIBLE（上限 0）", () => {
-    const loan = activeLoan({ principalCents: 3_000, remainingCents: 3_000 });
+    const loan = activeLoan({ principalCents: 3_000, remainingCents: 3_000, lastInterestRound: 2 });
     for (const cents of [1, 100, 3_000]) {
       try {
         collectPrivateDebt(loan, cents, 2, 0, "A", 5_000);
@@ -193,7 +193,7 @@ describe("collect_partial", () => {
   });
 
   it("借款人余额为负时按 max(0, 余额) 计上限，同样拒绝而非封顶", () => {
-    const loan = activeLoan({ principalCents: 3_000, remainingCents: 3_000 });
+    const loan = activeLoan({ principalCents: 3_000, remainingCents: 3_000, lastInterestRound: 2 });
     try {
       collectPrivateDebt(loan, 1, 2, -500, "A", 5_000);
       throw new Error("expected PrivateLoanRuleError AMOUNT_EXCEEDS_COLLECTIBLE");
@@ -206,7 +206,7 @@ describe("collect_partial", () => {
   });
 
   it("足额催收后置 REPAID，且非指定出借人不能催", () => {
-    const loan = activeLoan({ principalCents: 3_000, remainingCents: 3_000 });
+    const loan = activeLoan({ principalCents: 3_000, remainingCents: 3_000, lastInterestRound: 2 });
     expectCode(() => collectPrivateDebt(loan, 1_000, 2, 10_000, "C", 5_000), "LENDER_MISMATCH");
 
     const collected = collectPrivateDebt(loan, 3_000, 2, 10_000, "A", 5_000);
@@ -467,9 +467,34 @@ describe("accrue", () => {
   });
 });
 
+describe("interest_before_repay_or_collect", () => {
+  it("本轮利息未计入时不能还款/催收，入参不变；计息后同轮可以", () => {
+    const loan = activeLoan();
+    expectCode(() => repayPrivateLoan(loan, 1_000, 2, 10_000, 10_000), "INTEREST_NOT_ACCRUED");
+    expectCode(() => collectPrivateDebt(loan, 1_000, 2, 10_000, "A", 10_000), "INTEREST_NOT_ACCRUED");
+    expect(loan.remainingCents).toBe(4_000);
+    expect(loan.status).toBe("ACTIVE");
+
+    const accrued = accruePrivateInterest([loan], 2)[0]!;
+    expect(accrued.remainingCents).toBe(4_400);
+
+    const repaid = repayPrivateLoan(accrued, 1_000, 2, 10_000, 10_000);
+    expect(repaid.loan.remainingCents).toBe(3_400);
+    const collected = collectPrivateDebt(accrued, 1_000, 2, 10_000, "A", 10_000);
+    expect(collected.loan.remainingCents).toBe(3_400);
+  });
+
+  it("回到借出轮之前还款/催收都抛 INVALID_ROUND", () => {
+    const loan = activeLoan({ issuedRound: 2, lastInterestRound: 2 });
+    expectCode(() => repayPrivateLoan(loan, 1_000, 1, 10_000, 10_000), "INVALID_ROUND");
+    expectCode(() => collectPrivateDebt(loan, 1_000, 1, 10_000, "A", 10_000), "INVALID_ROUND");
+  });
+});
+
 describe("collector_overflow", () => {
   it("出借人余额接近上限时收款越界 -> INVALID_AMOUNT，双方与债务都不变", () => {
     const loan = activeLoan();
+    const collectable = activeLoan({ lastInterestRound: 2 });
     const lenderCents = MAX_MONEY_CENTS;
     const borrowerCents = 10_000;
 
@@ -478,7 +503,7 @@ describe("collector_overflow", () => {
       "INVALID_AMOUNT",
     );
     expectCode(
-      () => collectPrivateDebt(loan, 1_000, 2, borrowerCents, "A", lenderCents),
+      () => collectPrivateDebt(collectable, 1_000, 2, borrowerCents, "A", lenderCents),
       "INVALID_AMOUNT",
     );
 
@@ -544,7 +569,7 @@ describe("boundaries", () => {
   });
 
   it("催收金额与状态边界", () => {
-    const loan = activeLoan();
+    const loan = activeLoan({ lastInterestRound: 2 });
     expectCode(() => collectPrivateDebt(loan, 0, 2, 10_000, "A", 10_000), "INVALID_AMOUNT");
     expectCode(() => collectPrivateDebt(loan, 1, 1, 10_000, "A", 10_000), "INVALID_ROUND");
     expectCode(() => collectPrivateDebt(loan, 1, 2, 10_000, "C", 10_000), "LENDER_MISMATCH");
@@ -571,7 +596,7 @@ describe("immutability", () => {
     expect(frozenLoan.remainingCents).toBe(4_000);
     expect(repaid.loan).not.toBe(frozenLoan);
 
-    const frozenDue = Object.freeze(activeLoan({ principalCents: 5_000, remainingCents: 5_000 })) as PrivateLoan;
+    const frozenDue = Object.freeze(activeLoan({ principalCents: 5_000, remainingCents: 5_000, lastInterestRound: 2 })) as PrivateLoan;
     const collected = collectPrivateDebt(frozenDue, 2_000, 2, 10_000, "A", 5_000);
     expect(collected.loan.remainingCents).toBe(3_000);
     expect(collected.borrowerCents).toBe(8_000);
@@ -598,7 +623,7 @@ describe("rereview_negative_balance_and_deadline", () => {
   });
 
   it("负余额出借人可以催收（R08 危险玩家作为债权人）", () => {
-    const out = collectPrivateDebt(activeLoan({ remainingCents: 3_000 }), 1_000, 2, 5_000, "A", -2_000);
+    const out = collectPrivateDebt(activeLoan({ remainingCents: 3_000, lastInterestRound: 2 }), 1_000, 2, 5_000, "A", -2_000);
     expect(out.collectedCents).toBe(1_000);
     expect(out.lenderCents).toBe(-1_000);
     expect(out.loan.remainingCents).toBe(2_000);

@@ -49,3 +49,7 @@ pnpm build → 通过
 【提交】
 实现提交：3a2021c（feat(unit02): 私人借款与原子账务）
 交接与文档提交：本文件所在提交
+
+【基线更新（2026-11-01，Qoder M7 指出）】
+- 本报告写作时的基线是 91 条；随后复核修复新增到 97 条；单元 03 完成后全仓为 core 134 + server 6。
+- 文中“accrueInterest 对逾期贷款抛 LOAN_OVERDUE”为当时口径误记，实际行为是：accrueInterest 封顶到 dueRound 不抛错，逾期出口在 settleDue（返回 DEFAULTED 并冻结）。

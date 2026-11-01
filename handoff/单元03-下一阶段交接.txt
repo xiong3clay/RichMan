@@ -1,0 +1,38 @@
+单元 03 → 单元 04 交接
+
+【本单元交付的引擎 API（单元 04 直接使用）】
+packages/game-core/src/engine.ts：
+- applyCommand(state, command, ctx: CommandContext): TransitionResult
+- advanceSystem(state, ctx): TransitionResult     // 系统计时器入口，不需要伪造客户端命令
+- eventsForPlayer(events, playerId): GameEvent[]  // 按 audience 过滤私人金额事件
+- encodeSnapshot(state, now) / decodeSnapshot(snapshot)
+- eventsForPlayer 依赖 GameEvent.audience；敏感事件（LOAN_REQUESTED / PRIVATE_LOAN_ACCEPTED / PRIVATE_LOAN_REPAID / PRIVATE_DEBT_COLLECTED）已带 [borrower, lender]
+CommandContext：{ actorId: PlayerId; nowMs: number; drawResult: 0 | 1 }
+GameCommand 额外字段：actorId 只能由服务端注入；payload.playerId 仅作一致性校验
+
+【单元 04 必须做的事（与本引擎对接）】
+1. 同源 HTTP + /ws、房间管理、4～8 位房间码、2～10 人、准备/开始（V1.3 第四节）。
+2. 身份：sessionToken / recoveryCode（≥128 位熵）、服务端分配 seat、connectionEpoch、重连、替换旧连接。
+3. 计时器：用 advanceSystem 驱动超时，不要发假命令；每次调用后广播视图。
+4. 保护：/health 不泄露隐私；Origin 校验；单房间/单 IP 连接上限；命令去重（commandId）在服务端实现。
+5. 事件广播：用 eventsForPlayer 过滤后再发，不要把原始 events 直接广播。
+
+【必须保持的语义（改一处就要同步测试）】
+- 到期余额不足直接失信（reason=insufficient_funds），不开窗口。
+- 私人请求等待期间全桌冻结；取消不退行动；自救请求间隔 2 秒。
+- 私人合同/下注隐私：他人视图与事件流都不得出现金额。
+- eventSeq 连续、version 只 +1 一次、RULE_INVARIANT 回滚。
+- advanceSystem 有状态变化才 +1 version。
+
+【Qoder 列出的可延后项（单元 04/07 前后处理）】
+1. runInterest 只用 remainingCents 判断变化，0% 利率时可能不发 INTEREST_ACCRUED。
+2. replaceRequest / replacePrivateLoan 缺“恰好命中 1 条”守卫（银行侧已有）。
+3. 视图缺 currentSeatId / actedSeats / phaseInstanceId / eventSeq（04 需要 phaseInstanceId 做 stale 校验）。
+4. LoanRequest 快照缺私人债务/冻结部分/双方历史（07 借款卡片需要）。
+5. 视图返回内部对象引用（me / 合同 / myBet），序列化前需拷贝。
+6. 重复同意返回 REQUEST_EXPIRED 而非原结果（由 04 的 commandId 去重兜底）。
+7. TAX 白名单多放行 REPAY_PRIVATE（当前不可达，建议删）。
+8. accept 只按 requestId 找 PENDING，未显式校验 pendingRequestId。
+
+【当前测试基线】
+core 10 文件 / 134 条，server 1 文件 / 6 条。单元 04 必须保持全绿，不允许改旧测试迁就实现。

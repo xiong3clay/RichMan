@@ -22,6 +22,8 @@ describe("protocol schemas", () => {
   it("validates money strings and room codes", () => {
     expect(MoneyStringSchema.parse("0")).toBe("0");
     expect(MoneyStringSchema.parse("1000000000000")).toBe("1000000000000");
+    expect(() => MoneyStringSchema.parse("1000000000001")).toThrow();
+    expect(() => MoneyStringSchema.parse("-1000000000001")).toThrow();
     expect(() => MoneyStringSchema.parse("-0")).toThrow();
     expect(() => MoneyStringSchema.parse("01")).toThrow();
     expect(RoomCodeSchema.parse("0042")).toBe("0042");

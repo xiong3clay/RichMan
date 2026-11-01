@@ -81,10 +81,14 @@ export interface GameEvent {
   type: string;
   at: string;
   payload: unknown;
+  /** 仅这些玩家可见；缺省表示公开事件。 */
+  audience?: PlayerId[];
 }
 
 /** 引擎上下文：时间与随机结果都由调用方注入，保证纯函数与可复现测试。 */
 export interface CommandContext {
+  /** 连接身份对应的玩家；引擎只以此判定操作者，payload.playerId 仅做一致性校验。 */
+  actorId: PlayerId;
   nowMs: number;
   /** 本命令需要用到的开奖结果；不需要时为 0，引擎不得自行取随机源。 */
   drawResult: 0 | 1;

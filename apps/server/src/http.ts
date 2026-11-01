@@ -40,12 +40,12 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
   res.end(text);
 }
 
-function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, staticDir: string): void {
-  const url = new URL(req.url ?? "/", "http://localhost");
-  const requested = decodeURIComponent(url.pathname);
+function serveStatic(res: http.ServerResponse, requested: string, staticDir: string): void {
   const relative = requested === "/" ? "index.html" : requested.replace(/^\/+/, "");
-  const filePath = path.resolve(staticDir, relative);
-  if (!filePath.startsWith(path.resolve(staticDir))) {
+  const baseDir = path.resolve(staticDir);
+  const filePath = path.resolve(baseDir, relative);
+  const relToBase = path.relative(baseDir, filePath);
+  if (relToBase.startsWith("..") || path.isAbsolute(relToBase)) {
     sendJson(res, 403, { ok: false, error: "FORBIDDEN" });
     return;
   }
@@ -76,7 +76,19 @@ export function createRequestHandler(opts: ServerOptions = {}): http.RequestList
   const staticDir = opts.staticDir ?? DEFAULT_STATIC_DIR;
   const startedAt = opts.startedAt ?? Date.now();
   return (req, res) => {
-    const url = new URL(req.url ?? "/", "http://localhost");
+    let url: URL;
+    let decodedPath: string;
+    try {
+      url = new URL(req.url ?? "/", "http://localhost");
+      decodedPath = decodeURIComponent(url.pathname);
+    } catch {
+      sendJson(res, 400, { ok: false, error: "BAD_REQUEST" });
+      return;
+    }
+    if (decodedPath.includes("\0")) {
+      sendJson(res, 400, { ok: false, error: "BAD_REQUEST" });
+      return;
+    }
     if (req.method === "GET" && url.pathname === "/health") {
       sendJson(res, 200, {
         ok: true,
@@ -94,7 +106,7 @@ export function createRequestHandler(opts: ServerOptions = {}): http.RequestList
       sendJson(res, 405, { ok: false, error: "METHOD_NOT_ALLOWED" });
       return;
     }
-    serveStatic(req, res, staticDir);
+    serveStatic(res, decodedPath, staticDir);
   };
 }
 

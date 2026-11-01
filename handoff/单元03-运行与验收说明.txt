@@ -1,0 +1,26 @@
+单元 03 运行与验收说明
+环境：Node v24.18.0、pnpm 11.7.0、TypeScript 7.0.2、Vitest 5.0.5
+
+【命令】
+cd D:\Lianjunjie\biancheng\RichMan
+pnpm test:core      # 10 文件 / 134 条
+pnpm test:server    # 1 文件 / 6 条
+pnpm typecheck      # 退出码 0
+pnpm build
+
+【本单元验收点】
+1. 阶段机：INTEREST→BANK_DUE→ACTION→BETTING→TAX→轮末；最后一人行动完立即进 BETTING；全员提交即开奖；税收处理完立即进下一轮。
+2. 银行到期：dueRound <= round 都会被处理；余额不足直接失信、不开 45 秒窗口；逾期不会永远卡 ACTIVE。
+3. 赌博：100 金币下注 100，一倍输→0、一倍赢→200、二倍赢→300、二倍输→0 且新增 100 金币透支贷款；失信只能一倍；他人看不到未开奖下注。
+4. 税收自救：第 3 轮按座位扣 20；负余额进 DANGER；借到部分仍危险，补到 >=0 立即结束；放弃/超时破产；本轮税全部处理完才判胜负。
+5. 胜负：仅剩 1 人获胜；全员破产无获胜者。
+6. 身份与隐私：ctx.actorId 是唯一身份来源；私人合同只对当事人可见；私人金额事件带 audience。
+7. 系统推进：advanceSystem 可让服务器计时器在无客户端命令时推进阶段，不会被伪造命令利用。
+
+【自动化脚本】
+full-game.test.ts 用固定 ctx 跑 2 人一局到 GAME_OVER，覆盖透支、到期失信、税收自救与破产；10 人局跑到稳定推进。
+
+【未验证项】
+- 真人/真机（单元 05 起要求）。
+- P1-P4 的 Qoder 终审。
+- WebSocket 层尚未实现，事件过滤/重连补发未在网络上验证。

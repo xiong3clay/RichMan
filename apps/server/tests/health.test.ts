@@ -39,4 +39,26 @@ describe("GET /health", () => {
     const res = await fetch(baseUrl + "/health", { method: "POST" });
     expect(res.status).toBe(405);
   });
+
+  it("answers malformed percent-encoding with 400, not a crash", async () => {
+    const res = await fetch(baseUrl + "/%zz");
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toBe("BAD_REQUEST");
+  });
+
+  it("rejects a NUL byte in the pathname with 400", async () => {
+    const res = await fetch(baseUrl + "/%00");
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.error).toBe("BAD_REQUEST");
+  });
+
+  it("rejects path traversal outside the static dir with 403", async () => {
+    const res = await fetch(baseUrl + "/%2e%2e%2fpackage.json");
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.error).toBe("FORBIDDEN");
+  });
 });

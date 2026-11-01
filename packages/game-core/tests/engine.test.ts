@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { RULES } from "@richman/shared";
 import {
-  NotImplementedError,
   SNAPSHOT_SCHEMA_VERSION,
   applyCommand,
   createInitialState,
@@ -61,10 +60,14 @@ describe("snapshot", () => {
 });
 
 describe("applyCommand", () => {
-  it("is not implemented yet and says so", () => {
+  it("advances INTEREST to ACTION and lets the first seat end its action", () => {
     const state = createInitialState("g1", config, seeds);
-    expect(() =>
-      applyCommand(state, { protocolVersion: 1, gameId: "g1", commandId: "c1", type: "END_ACTION", payload: {} }, { nowMs: 0, drawResult: 0 }),
-    ).toThrow(NotImplementedError);
+    const cmd = { protocolVersion: 1, gameId: "g1", commandId: "c1", type: "END_ACTION", payload: { playerId: "p1" } };
+
+    const first = applyCommand(state, cmd, { actorId: "p1", nowMs: 0, drawResult: 0 });
+    expect(first.outcome.ok).toBe(true);
+    expect(first.state.phase).toBe("ACTION");
+    expect((first.state as typeof first.state & { currentSeatId: number | null }).currentSeatId).toBe(2);
+    expect(first.state.version).toBe(state.version + 1);
   });
 });

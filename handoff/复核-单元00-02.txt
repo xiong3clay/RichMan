@@ -1,0 +1,208 @@
+RichMan 独立复核记录：单元 00～02
+复核人：Qoder（只读审查）
+复核日期：2026-11-01
+复核基线：HEAD d164621（97 测试）；工作区另有未提交的单元 03 实现（engine.ts、engine.test.ts 改动，gamble.ts/tax.ts/views.ts 与 4 个新测试未跟踪）
+说明：本文件只记录结论，不修改代码。单元 03 新增功能本身不在本次审查范围；engine.ts 只按“接口是否会逼单元 03 写错代码”核对。
+
+============================================================
+一、结论
+============================================================
+
+有问题：银行/私人账务内核的规则口径基本正确，但存在贷款 ID 可被覆盖、私人还款可绕过本轮利息、协议金额上限错误、HTTP 可被打崩四类会直接影响钱或服务的高危问题，另有交接基线与决策表失真，必须在本轮修掉；其余接口缺口可留到单元 03 之后。
+
+============================================================
+二、必须现在修
+============================================================
+
+【M1】packages/game-core/src/engine.ts:737（handleBorrowBank）；engine.ts:1188-1189（replaceBankLoan）；engine.ts:151-183（applyCommand）
+问题：普通银行贷款 ID 直接使用客户端 commandId（`bank-${command.commandId}`）；引擎没有 commandId 去重表；replaceBankLoan 按 loanId 用 map 替换所有同名项。透支贷款 ID（engine.ts:481）反而是唯一的，说明只有 NORMAL 路径有该缺陷。
+后果：两个客户端使用相同 commandId 时会产生两笔同 ID 贷款；之后 findLoan 只命中第一笔，而还款/结算会同时改写两笔，造成一笔贷款凭空消失或金额错乱。重放同一 commandId 还能二次放款（NORMAL 仅在该玩家仍有未结清贷款时被挡；首笔已 REPAID 或 OVERDRAFT 路径不受此限）。
+建议修法：贷款 ID 改由引擎生成全局唯一值（如 `bank-${seatId}-${round}-${seq}`）；在状态或服务端增加 commandId→(载荷哈希, 原 outcome) 去重；写入 bankLoans 前断言 ID 全局唯一，重复直接报错而不是覆盖。
+为什么会影响单元 03：单元 03 已加入 BETTING/TAX 与重连/重发场景，客户端重试是常态；ID 覆盖会同时破坏对账、存档与事件回放，且单元 04 的存档迁移无法修复已错账。
+
+【M2】packages/game-core/src/private-loans.ts:346-378（repayPrivateLoan）；private-loans.ts:385-402（collectPrivateDebt）
+问题：私人还款/催收都缺少 `currentRound < issuedRound` 的 INVALID_ROUND，也都缺少 `currentRound > lastInterestRound` 的 INTEREST_NOT_ACCRUED；银行侧两者都有（bank.ts:188-196）。accruePrivateInterest 又会跳过非 ACTIVE 合同（private-loans.ts:328-330），还款在金额归零时直接把状态置 REPAID（private-loans.ts:373）。
+后果：在本轮利息尚未计入时全额还款，合同变 REPAID 后本轮利息永久不再计算，等于凭空少还一轮利息；在过期轮次调用还款也会被放行。催收虽不改状态，但会在本轮利息未计的情况下按旧余额计算可收上限。当前正常 ACTION 流程因 INTEREST 阶段先于 ACTION 而不易触发，但这是内核契约漏洞，任何新调用点（单元 03 的 TAX 自救、重放、坏存档恢复）都会直接踩中。
+建议修法：照银行侧补两道校验：`currentRound < issuedRound → INVALID_ROUND`，`currentRound > lastInterestRound → INTEREST_NOT_ACCRUED`；repay 与 collect 都加，并补测试证明“未计息不可还/不可催、计息后可操作”。
+为什么会影响单元 03：engine.ts:976-1009（repayPrivateCore）与 engine.ts:1011 起（collectPrivateCore）直接调用这两个函数；单元 03 的税收自救（TAX 阶段）新增了还款/催收入口，调用点变多，漏洞面随之扩大。
+
+【M3】packages/shared/src/protocol.ts:7-11（moneyDigits / MoneyStringSchema）；protocol.ts:29-34（SliceBetPayloadSchema）
+问题：`moneyDigits = "0|[1-9][0-9]{0,12}"` 允许 13 位任意值，`1000000000001`～`9999999999999` 以及负向超限值都能通过；没有对绝对值做 MAX_MONEY_CENTS 校验。
+后果：协议入口放行超过 R01 规定上限（10^12 分）的金额；任何直接信任该 schema 的命令/下注路径都会把非法金额带进引擎。SliceBetPayloadSchema 已经引用该 schema，单元 03 接协议时必然使用。
+建议修法：保留正则后追加 `refine(Math.abs(Number(s)) <= MAX_MONEY_CENTS)`，继续拒绝 `-0`；补边界测试：`"1000000000000"` 通过，`"1000000000001"` 与 `"-1000000000001"` 拒绝。
+为什么会影响单元 03：单元 03/04 会把共享 schema 作为客户端命令的唯一入口；schema 错了，后面的引擎校验只能兜底，无法保证“协议层已拒绝非法金额”。
+
+【M4】apps/server/src/http.ts:44-48（serveStatic 的 URL 解析与路径包含）；http.ts:52（fs.readFile）
+问题：`new URL`/`decodeURIComponent` 没有 try；含 NUL 的路径会进入 `fs.readFile`；路径包含使用 `filePath.startsWith(path.resolve(staticDir))`。
+后果（已用 node 复现）：`decodeURIComponent('%zz')` 抛 URIError；含 NUL 的路径 `fs.readFile` 同步抛 ERR_INVALID_ARG_VALUE；`D:\app\web2\x` 对 `D:\app\web` 的 startsWith 为 true。前两者在请求回调中未捕获，会让 Node 进程直接退出（LAN 上任何人可打崩服务）；后者可读到兄弟目录。
+建议修法：URL 解析/decode 整段 try/catch，失败返回 400；拒绝含 `\0` 的 pathname；路径包含改用 `path.relative(base, target)`，要求结果不以 `..` 开头且不是绝对路径。
+为什么会影响单元 03：单元 03 起服务端要真正暴露到局域网给手机访问，静态页与 /health 同进程；一次畸形请求就会让整局房间进程消失。
+
+【M5】packages/shared/src/types.ts:87-91（CommandContext）；packages/game-core/src/engine.ts:1214（readPlayerId）及各 handler
+问题：CommandContext 只有 nowMs/drawResult，没有 actorId；引擎所有操作者身份都从 `payload.playerId` 读取。
+后果：服务端如果按现有接口原样转发客户端载荷，任何连接都能冒充他人借款、还款、催收、同意/拒绝请求；引擎自身的 currentSeat/lender 校验只能防“非本人当轮”，防不了“同轮冒名”。
+建议修法：CommandContext 增加 `actorId`（由连接身份注入），引擎统一用 ctx.actorId 鉴权；payload.playerId 仅用于回显或一致性校验（不一致直接 UNAUTHORIZED）。
+为什么会影响单元 03：下一步就是 socket/身份接入；接口不先定死，服务端只能继续从 payload 取身份，单元 04 再改会波及所有 handler 和测试。
+
+【M6】packages/game-core/src/engine.ts:747（handleBorrowBank 的 `player.cents += amountCents`）
+问题：借入后直接加余额，没有 MAX_MONEY_CENTS 校验；私人 accept 路径有入账上限校验（private-loans.ts 批准流程内），银行借款没有。
+后果：余额可以越过 10^12 分上限；随后 views 汇总、快照编码或 assertCentsRange 会抛 RULE_INVARIANT（engine.ts:167-171 回滚）或把房间置 ERROR_PAUSED，玩家卡在无法继续提交的状态。
+建议修法：抽一个统一入账 helper，入账前 `assertCentsRange(next)`，越界抛 INVALID_AMOUNT；借款、私人收款、下注派彩、催收入账全部走它。
+为什么会影响单元 03：BETTING 派彩与 OVERDRAFT 会在同一次提交里多次加钱，散落的 `+=` 越多，越容易出现某条路径漏校验。
+
+【M7】handoff/项目当前状态.txt:15、:19；handoff/单元02-成果报告.txt:7、:22、:41；handoff/单元02-下一阶段交接.txt:35；handoff/规则决策表.txt:1-4、:57
+问题：项目当前状态仍写“规则引擎尚未接通”“6 文件/97 测试”；成果报告第 7/22 行写 private 34 条、全仓 91 条，第 41 行又写 97；下一阶段交接第 35 行写 91 条；工作区实际已是 11 文件/123 条（见第五节），且单元 03 代码尚未提交。决策表仍是占位版本，R06“待填”，没有按 AGENTS.md 单元 00 的要求给出逐条来源/原因/测试。
+后果：下一单元会拿错误基线验收；R06 没有正式口径，正好覆盖本次发现问题的私人计息/还款/催收；成果报告的“已修”结论与代码不一致（例如曾声称 accrueInterest 对逾期抛 LOAN_OVERDUE、settleDue 只接受等于 dueRound，实际分别是静默钳制 bank.ts:159-177 和超时直接 DEFAULTED bank.ts:220-226，需在报告中更正）。
+建议修法：复跑后统一三处数字并注明“工作区含未提交单元 03”；先提交或明确隔离单元 03 改动；补齐决策表 R06 与逐条来源/原因/测试行；把上述两条不实结论改成“实际行为 + 对应测试”。
+为什么会影响单元 03：单元 03 已在进行中，交接说不清哪些是已提交、哪些是 WIP，验收与回退都会失控；R06 缺失会让私人账务继续按“实现即规则”漂移。
+
+============================================================
+三、可延后到单元 03 之后
+============================================================
+
+【D1】packages/game-core/src/engine.ts:413-427（runInterest）
+问题：只比较 remainingCents 判断是否变化，漏掉仅 lastInterestRound 变化的情况。
+后果：0 息或利率舍入为 0 时状态已变却返回 false、不发 INTEREST_ACCRUED，依赖该事件的推进逻辑会误判。
+建议修法：同时比较 lastInterestRound/status，任一变化即算 changed。
+为什么可以延后：当前阶段推进不依赖该事件，但单元 03 之后的事件回放/存档会依赖。
+
+【D2】packages/game-core/src/engine.ts:268-272（BANK_DUE 到期贷款窗口）
+问题：每笔到期贷款固定等待 bankDueSec，即使借款人余额明显不足或已离线。
+后果：全房被一个无法 REPAY 的玩家拖满计时，破坏 R10 节奏。
+建议修法：余额不足时直接按 insufficient_funds 结算，或允许超时/房主跳过。
+为什么可以延后：规则允许倒计时兜底，先保证不卡死；体验问题可在联机阶段处理。
+
+【D3】packages/game-core/src/engine.ts:151-183（applyCommand 返回值）；packages/shared/src/types.ts:93-98（TransitionResult）
+问题：失败命令期间若 runSystem 推进了阶段，state/version 已变化，但 outcome 仍是 ok:false，TransitionResult 没有 stateChanged/committed 标记。
+后果：服务端若按 ok:false 丢弃返回 state，会丢掉阶段推进；若广播又可能与客户端认知不一致。
+建议修法：返回值增加 committed/stateChanged，服务端据此决定广播、落库与去重记录。
+为什么可以延后：目前只有单元 03/04 的 socket 层会消费该字段。
+
+【D4】packages/game-core/src/engine.ts:66、:782-793、:882（pendingRequestId 单槽）
+问题：全局只有一个 pendingRequestId，等待答复期间 TAX/ACTION 都被锁住。
+后果：与 D6“出借人可同时收到多个请求并逐一处理”不完全一致；多人局存在堵点。
+建议修法：借款人仍限一个 PENDING，出借人侧改为收件箱列表，逐一处理不占用借款人轮次。
+为什么可以延后：当前顺序回合下请求会即时结束，不会立刻出错，但扩到 D6 语义前必须改。
+
+【D5】packages/game-core/src/private-loans.ts:38-50（LoanRequest）；private-loans.ts:224-247（acceptLoanRequest）；engine.ts:866-884（createPrivateRequest）
+问题：请求结构没有 createdPhase/phaseInstanceId，也没有借款人私人债务/冻结应收快照；accept 不刷新 D5 风险快照。
+后果：从发起请求到同意之间借款人若刚失信，出借人看到的仍是旧信用/旧失信欠款，D5“必须看到失信提示”会被绕过。
+建议修法：补字段并在 accept 时重取信用与失信欠款；变化时提示或按 INVALID_REQUEST 拒绝。
+为什么可以延后：当前违约只发生在 BANK_DUE，时间窗口小；但属于 R05/D5 的明确口径，单元 03 接 UI 前要定。
+
+【D6】packages/game-core/src/bank.ts:159-177、:251-258；packages/game-core/src/private-loans.ts:491-499
+问题：loan/request 对象本身没有结构校验，汇总函数只校验总和；负 remainingCents、乱写 status 可直接进入计算。
+后果：坏存档会算出错误金额或抛错；accrueInterest 在 lastInterestRound < issuedRound 时还会补算放款前的轮次。
+建议修法：入口增加 assertLoan/assertRequest（status 枚举、remaining 范围、lastInterestRound 与 issued/due 关系）；汇总前逐笔校验。
+为什么可以延后：正常流程不会产生坏对象，属于存档/迁移防御，单元 04 前补即可。
+
+【D7】packages/game-core/src/bank.ts:242-249；packages/game-core/src/private-loans.ts:481-489；packages/game-core/src/views.ts:128-129
+问题：totalDebtCents/defaultedBankDebtCents/frozenCents/badDebtCents 只支持全局；views 把全局 FROZEN/BAD_DEBT 塞进个人视图。
+后果：玩家同时是借款人和出借人时，冻结/坏账的角色混算，财务面板金额误导。
+建议修法：汇总函数接受 playerId/role 过滤，视图分别展示“我欠的”和“别人欠我的”。
+为什么可以延后：不影响主账，只影响展示与对账。
+
+【D8】packages/shared/src/types.ts:100-109（PlayerView）；packages/game-core/src/views.ts
+问题：视图没有 phaseInstanceId，而引擎已按 command.phaseInstanceId 拒绝过期命令（engine.ts:1268）。
+后果：客户端拿不到该字段，无法回传 expectedPhaseInstanceId，过期计时器/过期命令防护形同虚设。
+建议修法：在 PlayerView/RichPlayerView 补 phaseInstanceId（以及待处理请求的最小字段，不含第三人隐私）。
+为什么可以延后：单元 03 目前仍可只在服务端校验，但联机前端接入前必须补。
+
+【D9】packages/shared/src/types.ts:42-43（status 与 alive 并存）
+问题：两个字段表达相近状态，破产/危险切换时可能漂移。
+后果：R09“失信不淘汰”依赖 alive，而 UI/规则又可能读 status，迟早不一致。
+建议修法：保留单一真相，另一个改为派生字段。
+为什么可以延后：当前 engine 同步更新两者，尚未出现实际漂移。
+
+【D10】packages/game-core/src/engine.ts:904、:908-912、:967-973（accept/closeRequestWindow）
+问题：accept 只按 requestId 找 PENDING，不校验它就是 s.pendingRequestId；重放已处理请求返回 REQUEST_EXPIRED，而不是首次结果。
+后果：一旦 D6 队列允许多个 PENDING，可能接受非当前窗口的请求并错误结束当前座位；重试拿不到幂等结果。
+建议修法：accept 前校验 `requestId === s.pendingRequestId`；配合 M1 的去重表返回原 outcome。
+为什么可以延后：当前单槽设计下不会并发多个 PENDING，先记录风险。
+
+【D11】packages/game-core/src/private-loans.ts:346-352（repayPrivateLoan 的 currentRound == issuedRound）
+问题：借出当轮允许原额还款；银行侧也允许，但方案没有明确私人侧是否应允许。未核实。
+后果：若规则希望“借出当轮不能还款/不能刷请求”，当前实现会放行。
+建议修法：先向用户确认；若不允许，补 `currentRound <= issuedRound → INVALID_ROUND`。
+为什么可以延后：不影响金额守恒，属于规则口径待确认项。
+
+============================================================
+四、测试缺口
+============================================================
+
+T1 packages/game-core/tests/engine-round.test.ts:216-249（views_privacy）是空测。
+现状：state 只塞了 requests，没有 privateLoans、没有 bets，所以第三人断言必然为 0，证明不了隐私。
+应加断言：构造 ACTIVE/FROZEN/BAD_DEBT 合同与 p2 的下注后，(a) 第三人 finance.privateLoans/incomingRequests/myBet 为空；(b) JSON.stringify(第三人视图) 不含 principalCents/betCents/guess/leverage；(c) 借款人看得到自己的合同，出借人只看得到自己参与的合同。
+
+T2 没有 commandId 去重与 loanId 唯一性测试。
+应加断言：同一 commandId 重放 BORROW_BANK 两次，第二次不得新增贷款/不得二次入账（或返回首次 outcome）；p1/p2 使用相同 commandId 时两笔 loanId 必须不同；REPAY_BANK 只改目标那一笔，另一笔 remainingCents 不变。
+
+T3 没有私人还款/催收的轮次与计息时序测试。
+应加断言：loan issuedRound=1、lastInterestRound=1、currentRound=2 时 repay/collect 抛 INTEREST_NOT_ACCRUED；currentRound=0（或 < issuedRound）抛 INVALID_ROUND；先 accruePrivateInterest 到 round 2 后同一操作成功；还款后状态与金额正确。
+
+T4 私人借款全链路只覆盖了 0 利率、无还款/催收。
+现状：full-game.test.ts:76-90、106-118 只做 REQUEST→ACCEPT，166-168 只验破产转 BAD_DEBT。
+应加断言：rateBps>0 时下一轮 remainingCents 增加；部分还款后双方余额与 remaining 正确；催收上限与部分催收；借出当轮催收抛 INVALID_ROUND。
+
+T5 破产链路缺少出借人破产与逐人汇总。
+现状：full-game 只覆盖借款人破产转 BAD_DEBT；没有 FROZEN。
+应加断言：出借人破产后其 ACTIVE 合同变 FROZEN、不再计息/催收/还款；FROZEN 借款人再破产转 BAD_DEBT；frozenCents/badDebtCents 按玩家/角色过滤后金额正确。
+
+T6 没有余额上限测试。
+应加断言：构造接近 MAX_MONEY_CENTS 的余额借款，入账后不得越界；越界时抛 INVALID_AMOUNT 且 state/version 不变（或按 RULE_INVARIANT 回滚）；accept/collect/派彩同样覆盖。
+
+T7 packages/shared/tests/protocol.test.ts 没有金额上界。
+应加断言：`"1000000000000"` 通过；`"1000000000001"`、`"9999999999999"`、`"-1000000000001"` 拒绝；`"-0"` 继续拒绝；SliceBetPayloadSchema 使用同一上界。
+
+T8 packages/shared/tests/money-codec.test.ts 没有输入上界与负数 floor。
+应加断言：parseCoinsInput("10000000000") === 10^12 分（当前正则最多 10 位整数，永远到不了上限）；超过上限拒绝；mulDivFloor 在负操作数下为真 floor（BigInt 除法向零截断，不是 floor）。
+
+T9 packages/game-core/tests/bank.test.ts:157-167 是假绿。
+现状：把“未到期时传非法 decision/availableCents 静默返回”固化为期望，锁死了未定义行为。
+应加断言：明确契约——要么先校验参数抛 INVALID_DECISION/INVALID_AMOUNT（并删除静默断言），要么在注释中写明“未到期不校验参数”为正式契约；不能两头都算对。
+
+T10 packages/game-core/tests/bank.test.ts:149-155 与复核结论冲突。
+现状：测试名/断言是“逾期再计息金额不变、不抛错”，但复核清单声称逾期抛 LOAN_OVERDUE。
+应加断言：若保留钳制契约，改测试名/注释明确“防御性钳制，逾期由 repayBankLoan/settleDue/引擎扫描强制”；同时保留 repayBankLoan 的 LOAN_OVERDUE 与 settleDue 的 INTEREST_NOT_ACCRUED 测试，避免两条路径口径混淆。
+
+T11 apps/server/tests/health.test.ts 没有静态服务安全用例。
+应加断言：GET `/%zz` → 400 且进程仍能响应后续 /health；GET `/%00` → 400；GET `/../secret`、`/..%2fsecret` → 403/404；兄弟目录（staticDir 的 `../web2`）不可读；/health 仍 200。
+
+T12 没有引擎超时/顺序/版本边界测试。
+应加断言：deadline 前 1ms 不发生超时、ctx.nowMs === deadline 时发生；多笔到期按 seat→dueRound→loanId 顺序处理；expectedGameVersion 不符返回 VERSION_CONFLICT；phaseInstanceId 过期命令被拒且状态不变。
+
+T13 没有 D5 刷新测试。
+应加断言：请求创建后借款人信用变 DEFAULTED（或失信欠款变化），出借人再 accept 时看到的信用/欠款必须是新值；若按设计拒绝，则返回 INVALID_REQUEST；不得继续展示旧快照。
+
+T14 没有幂等结果测试。
+应加断言：同一 commandId 的第二次提交返回与首次相同的 outcome（成功或同一错误码），且不产生新事件/新贷款/新请求。
+
+============================================================
+五、实际跑过的命令与真实结果
+============================================================
+
+环境：Windows 10，Node v24.18.0，pnpm，仓库 D:\Lianjunjie\biancheng\RichMan。
+工作区状态（git status --short）：M packages/game-core/src/engine.ts；M packages/game-core/tests/engine.test.ts；?? gamble.ts、tax.ts、views.ts、engine-round.test.ts、full-game.test.ts、gamble.test.ts、tax.test.ts。HEAD 为 d164621（97 测试）。
+
+1) pnpm test:core
+结果：10 个测试文件全部通过，120 条测试通过。
+明细：shared/money-codec 8、shared/protocol 4、bank 32、private-loans 40、engine 6、engine-round 7、tax 5、money 7、gamble 9、full-game 2。
+
+2) pnpm test:server
+结果：1 个测试文件通过，3 条测试通过（apps/server/tests/health.test.ts）。
+
+3) pnpm test
+结果：11 个测试文件通过，123 条测试通过。
+
+4) pnpm typecheck
+结果：通过（tsc --noEmit -p tsconfig.json，无输出，退出码 0）。
+
+5) HTTP 崩溃/越界结论的只读复现（node -e，不写文件）
+结果：
+- decodeURIComponent('%zz') -> URIError
+- fs.readFile(含 NUL 的路径) -> ERR_INVALID_ARG_VALUE（同步抛出）
+- D:\app\web2\x 对 D:\app\web 的 startsWith -> true；path.relative -> ..\web2\x
+
+未运行：pnpm build（会写 apps/web/dist，本次不要求，也不属于只读测试）；未做真机/真人验收；未运行 e2e（尚未实现）。
+
+注意：以上 123 条是工作区（含未提交单元 03）的实测值，不是 HEAD d164621 的 97 条；交接文件里的 91/97 均需按本次输出更新。

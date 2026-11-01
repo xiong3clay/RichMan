@@ -42,6 +42,8 @@ export interface LoanRequest {
   principalCents: Cents;
   rateBps: number;
   createdRound: number;
+  /** 请求创建时的服务器毫秒时间，用于自救阶段的 2 秒频率限制。 */
+  createdAtMs: number;
   deadlineMs: number;
   status: LoanRequestStatus;
   /** D5：创建时快照，供出借人看到失信风险。 */
@@ -63,7 +65,8 @@ export type PrivateLoanErrorCode =
   | "INSUFFICIENT_FUNDS"
   | "NOT_ACTIVE"
   | "AMOUNT_EXCEEDS_DEBT"
-  | "AMOUNT_EXCEEDS_COLLECTIBLE";
+  | "AMOUNT_EXCEEDS_COLLECTIBLE"
+  | "INTEREST_NOT_ACCRUED";
 
 export class PrivateLoanRuleError extends Error {
   readonly code: PrivateLoanErrorCode;
@@ -213,6 +216,7 @@ export function createLoanRequest(input: CreateLoanRequestInput): LoanRequest {
     principalCents: input.principalCents,
     rateBps: input.rateBps,
     createdRound: input.createdRound,
+    createdAtMs: input.nowMs,
     deadlineMs: input.deadlineMs,
     status: "PENDING",
     borrowerCredit: input.borrowerCredit,
@@ -354,6 +358,12 @@ export function repayPrivateLoan(
   if (loan.status !== "ACTIVE") {
     throw new PrivateLoanRuleError("NOT_ACTIVE", "只有 ACTIVE 私人贷款可以还款");
   }
+  if (currentRound < loan.issuedRound) {
+    throw new PrivateLoanRuleError("INVALID_ROUND", "不能回到借出轮之前还款");
+  }
+  if (currentRound > loan.lastInterestRound) {
+    throw new PrivateLoanRuleError("INTEREST_NOT_ACCRUED", "本轮利息尚未计入，不能还款");
+  }
   assertPositiveCents(cents, "repay cents");
   assertBalanceCents(borrowerCents, "borrowerCents");
   assertBalanceCents(lenderCents, "lenderCents");
@@ -399,6 +409,9 @@ export function collectPrivateDebt(
   }
   if (currentRound < loan.issuedRound + 1) {
     throw new PrivateLoanRuleError("INVALID_ROUND", "借出当轮不能催收");
+  }
+  if (currentRound > loan.lastInterestRound) {
+    throw new PrivateLoanRuleError("INTEREST_NOT_ACCRUED", "本轮利息尚未计入，不能催收");
   }
   assertPositiveCents(cents, "collect cents");
   assertBalanceCents(borrowerCents, "borrowerCents", true);

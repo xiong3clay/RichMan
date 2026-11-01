@@ -1,0 +1,247 @@
+单元 03 复核报告（只读审查）
+============================================================
+复核对象：HEAD d164621 + 当前未提交工作区
+  - 已修改：engine.ts、private-loans.ts、http.ts、types.ts、protocol.ts 及对应测试
+  - 未跟踪：gamble.ts、tax.ts、views.ts、engine-round/gamble/tax/full-game 测试
+复核方式：只读源码与测试；未改任何代码、未 commit；本文件是唯一写入。
+规则依据：docs/plans/Richman分阶段联机开发方案_V1.3精简施工版.txt（V1.3.2）
+          R02/R03/R04/R05/R07/R08/R10 与 handoff/规则决策表.txt（D1/D5/D6/D7）
+
+------------------------------------------------------------
+一、结论
+------------------------------------------------------------
+M1–M6 六项在引擎范围内均已真修复、无回退；单元 03 的阶段机、赌博结算、
+税收/危险自救、胜负与本人视图主干符合 R02/R07/R08/R10，但有 3 处硬规则缺口
+（银行到期余额不足仍等满窗口、缺“取消请求”、缺自救 2 秒请求间隔）和 1 处
+隐私契约缺口（私人金额进入无受众的事件流）必须在进入单元 04 前处理。
+
+------------------------------------------------------------
+二、第一件事：M1–M6 逐条验收
+------------------------------------------------------------
+M1 银行贷款 ID 唯一性 + 重复/多命中保护 — 已修复
+  证据：
+  - engine.ts:741-742  普通贷款 ID = `bank-<seatId>-r<round>-<bankLoans.length>`，同轮不同座位必不同。
+  - engine.ts:483-485  透支贷款 ID = `overdraft-r<round>-<playerId>`，每轮每人至多一笔，不撞普通贷款前缀。
+  - engine.ts:1194-1200 追加时同 ID 抛 RULE_INVARIANT（整次回滚）。
+  - engine.ts:1202-1208 替换时要求恰好命中 1 条，0 或 2 条都抛 RULE_INVARIANT。
+  - 测试：tests/engine-round.test.ts:231-268（唯一性 + 双命中回滚 + 余额/版本不变）。
+  说明：commandId 级“同一命令重发只执行一次”按方案属服务端（plan:118/333/527），
+        引擎里没有去重表是符合分工的，不算未修；但必须写进单元 04 交接。
+
+M2 private-loans 两道轮次守卫 — 已修复
+  证据：
+  - private-loans.ts:358-363 repayPrivateLoan：currentRound < issuedRound → INVALID_ROUND；
+    currentRound > lastInterestRound → INTEREST_NOT_ACCRUED。
+  - private-loans.ts:407-412 collectPrivateDebt：issuedRound+1 之前 INVALID_ROUND；
+    本轮利息未计入 → INTEREST_NOT_ACCRUED。
+  - 测试：tests/private-loans.test.ts:470-490、:574（复利未算时还/催都被拒；借出轮内催收被拒）。
+
+M3 MoneyStringSchema 绝对值上限 — 已修复
+  证据：
+  - protocol.ts:12  `.refine((s) => Math.abs(Number(s)) <= MAX_MONEY_CENTS, ...)`
+  - 测试：tests/protocol.test.ts:25-26（±1000000000001 均抛错）。
+
+M4 http.ts 健壮性 — 已修复
+  证据：
+  - apps/server/src/http.ts:78-91  URL/ decodeURIComponent 包 try/catch → 400 BAD_REQUEST；
+    解码后含 "\0" 也 400（:88-90）。
+  - apps/server/src/http.ts:43-51  static 根 path.resolve 后用 path.relative 判断，
+    越界或绝对路径 → 403。
+  - 测试：apps/server/tests/health.test.ts:43-60（%zz→400、%00→400、路径穿越→403）。
+
+M5 ctx.actorId 身份注入 — 已修复
+  证据：
+  - shared/src/types.ts:86-93  CommandContext 新增必填 actorId，并注明 payload.playerId 只做一致性校验。
+  - engine.ts:1260-1270 actorOf：payload.playerId 存在且 != ctx.actorId → UNAUTHORIZED；
+    返回 ctx.actorId，引擎所有经济命令都走它。
+  - 全仓 grep readPlayerId 无命中，旧“从载荷取操作者”的路径已删除。
+  - 测试：tests/engine-round.test.ts:218-229。
+
+M6 creditPlayer 统一入账 — 已修复
+  证据：
+  - engine.ts:1214-1240 creditCents 先校验非负、安全整数与 assertCentsRange，再赋值；
+    creditPlayer 是唯一入口。
+  - 调用点：:497 下注派彩、:751 银行借款、:935 私人借款入账、:1011 私人还款给出借人、
+    :1051 催收入账，覆盖 M6 列出的四类。
+  - 扣款（还款/催收/到期/税收/下注亏损）仍是直接减法，不属于 M6“入账”范围，且各有前置上限校验。
+  说明：银行借款是 creditCents 先算、appendBankLoan 后写余额（:751-753），
+        溢出时不会留下半笔账；测试 tests/engine-round.test.ts:270-286 已覆盖。
+
+------------------------------------------------------------
+三、第二件事：单元 03 实现复核
+------------------------------------------------------------
+核对通过、无需修改的部分（供交接引用）：
+1. 阶段机：INTEREST→BANK_DUE→ACTION→BETTING→(第 3/6/9 轮)TAX→下一轮/GAME_OVER，
+   已实现 runSystem 前后各推一次（engine.ts:153-185、242-413）。
+   - 到期扫描 dueRound <= round，稳定次序座位→到期轮→loanId（:431-437）；
+     逾期贷款不会永远卡 ACTIVE（测试 engine-round.test.ts:133-177）。
+   - 全员完成即推进，不空等倒计时：ACTION :303-323、BANK_DUE :278、BETTING :326-334、
+     TAX :373-378（测试 gamble.test.ts:148-173、tax.test.ts:324-341）。
+   - 超时兜底只结算一次：到期窗口 :255-267、行动 :316-322、下注 :329-333、自救 :365-369；
+     guard 1000 防死循环，且各阶段均有单调递减的计数器。
+2. 行动消耗与权限：只有当前座位能行动（assertTurn :1150 附近），等待答复期间全桌冻结
+   （:1154-1160），破产者不会被排进 nextSeat（:542-546），BETTING 只收 SUBMIT_BET（:665-673），
+   GAME_OVER 全拒（:655-657）。伪造出借人同意/他人命令都返回 UNAUTHORIZED 且不改状态
+   （测试 engine-round.test.ts:179-215）。
+3. 赌博：一次锁定（:710-712）、提交前隐藏金额/猜测/杠杆（:722-727 事件只带谁已提交；
+   views.ts:136-137 只有本人 myBet）、全员提交或超时统一结算（:326-334、467-540）、
+   超时补 0 注/猜 0/一倍（:475）、2 倍亏损生成缺口 OVERDRAFT 并把余额归 0（:479-504、
+   gamble.ts:102-116）、失信只能一倍（gamble.ts:38-66）、1 倍不可能负（gamble.ts:102-105）。
+   R07 要求的“开奖前禁止其他经济操作”由 BETTING 白名单保证。
+4. 税收与自救：第 3/6/9 轮开税，进入 TAX 时一次性定 taxSeats（:514-522、tax.ts:6-11），
+   按座位串行扣 20 金币（:373-405），<0 进 DANGER 并开自救总窗口（:394-404）；
+   自救中只能当前危险玩家操作（assertDangerTurn），余额 >=0 立即收尾继续收税（:357-364），
+   放弃/超时破产（:365-369、580-619），待处理请求在自救里受 min(请求时限, 自救截止) 约束
+   （:845-847、869-870）。本轮税全部处理完才判胜负（:622-643）。
+5. 胜负：存活 <=1 时 winner=该玩家；全员破产 winnerId=null（:526-531、629-635）。
+6. 视图隐私：公开列表只有信用/状态/存活/失信银行欠款（views.ts:92-101）；
+   私人合同按 borrower 或 lender 过滤（views.ts:104-108），第三人取不到；
+   下注只暴露 myBet 与 betsSubmitted（views.ts:136-137）；测试 gamble.test.ts:130-146
+   已对第三人序列化结果断言不含 betCents/金额。
+7. 纯函数与序号：applyCommand 用 structuredClone（:154、191-209），不原地改入参；
+   emit 统一递增 eventSeq（:211-220），RULE_INVARIANT 回滚时返回原状态且 events=[]、版本不变
+   （:169-173，测试 engine-round.test.ts:244-267）；版本只在“有状态变化或命令成功”时 +1
+   （:177-184），符合 plan:334“纯拒绝不推进 gameVersion、有状态变化的业务失败按完整转移保存”。
+
+------------------------------------------------------------
+四、必须现在修（4 项）
+------------------------------------------------------------
+【P1 规则】engine.ts:270-276（配合 settleDueLoan :1094-1123）
+  问题：R03:175 要求“余额不足直接进失信并显示原因，不额外等待无效选择”。
+        当前 BANK_DUE 只要发现 ACTIVE 到期贷款就一律开 45 秒/20 秒窗口，
+        完全不看借款人余额。
+  后果：余额不足的到期贷款每笔白等一个完整窗口（10 人局多笔到期会连续卡 20-45 秒×N）；
+        客户端会展示一个注定失败的“偿还”按钮；全桌进度被拖住。
+        tests/full-game.test.ts:120-127 正是靠人工发 BANK_DUE_DECISION 才从第 4 轮推进，
+        说明测试也把这个偏差固化了。
+  建议：在 :271 找到 due 后先取 borrower；若 `borrower.cents < due.remainingCents`，
+        直接调用 settleDueLoan(s, due, "REFUSE", ctx, events, false) 并走“余额不足”分支，
+        continue，不 setDeadline、不发 BANK_DUE_PENDING。
+        注意当前 settleDueLoan:1114-1120 在 decision=REFUSE 时会把 reason 记成 "refused"，
+        需要给 settleDueLoan 增加显式 reason 参数（"insufficient_funds"），
+        只有“能全额偿还”时才开窗口。同步改 full-game 第 4 轮脚本。
+
+【P1 规则/卡死】engine.ts:788-799、805-816、675-696
+  问题：R05:196、R05:200、R08:231 都要求“取消”：
+        普通行动可取消、自救等待答复时“只能等、取消该请求或放弃”，
+        但引擎没有 CANCEL_PRIVATE_LOAN；LOAN_REQUEST_STATUS.CANCELLED（private-loans.ts:19）
+        目前只由破产清理写入。
+  后果：借款人填错金额/选错对象、或出借人离线时，只能白等到
+        min(请求时限, 行动/自救截止)；自救期间无法换人借，等于被一笔请求锁死到超时破产。
+  建议：新增 CANCEL_PRIVATE_LOAN，处理如下：
+        - ACTION：仅请求的 borrower；置 CANCELLED、pendingRequestId=null、finishSeatAction
+          （R05 明确取消不退行动）；
+        - TAX：仅当前危险玩家；置 CANCELLED、pendingRequestId=null、
+          setDeadline(dangerDeadlineMs)，自救继续、可再发起（受 2 秒间隔约束）；
+        - 记录取消时间供下面第 3 项使用；第三人或非危险玩家取消一律 UNAUTHORIZED。
+        同时在 :788-799 的等待分支放行 CANCEL_PRIVATE_LOAN。
+
+【P1 规则】engine.ts:851-897 + private-loans.ts:38-50
+  问题：R08:232 要求“同人发起请求间隔至少 2 秒”，
+        但 createPrivateRequest 只做 requestId 查重；LoanRequest 也没有 createdAtMs，
+        引擎无法判定间隔。
+  后果：危险玩家可连续每秒向同一/多个出借人发请求骚扰；该规则无法被测试验证。
+  建议：给 LoanRequest 增加 createdAtMs（createLoanRequest 已有 nowMs，直接写入）；
+        在 createPrivateRequest 中仅当 rescue（TAX）时检查该借款人最近一笔请求
+        （本轮自救开始后）`ctx.nowMs - createdAtMs < 2_000` → 返回明确错误
+        （建议 INVALID_ACTION + “请求间隔不足 2 秒”），不消耗次数、不重置自救截止；
+        普通 ACTION 的请求不加此限制（R08 该条写在自救段）。
+
+【P1 隐私契约】shared/src/types.ts:79-84 + engine.ts:890-896、937-941、1014、1054
+  问题：验收要求（plan:649）“未参与私人合同者不能从快照、事件、响应、错误或重连补发
+        读到细节”，但 LOAN_REQUESTED / PRIVATE_LOAN_ACCEPTED / PRIVATE_LOAN_REPAID /
+        PRIVATE_DEBT_COLLECTED 把本金、还款额、催收额直接写进 GameEvent，
+        而 GameEvent 没有 audience/可见范围字段。
+  后果：单元 04 若把 events 当“公共事件”广播，第三人可从事件流读到私人金额；
+        events.ndjson 也会长期保存全量细节（审计可留，但不能复用同一对象对外发）。
+  建议：二选一并在 04 交接写死——
+        (a) GameEvent 增加 `audience?: PlayerId[]`，私人事件填 [borrower, lender]，
+            公共事件不填，服务端按 audience 过滤；
+        (b) 引擎不为私人金额发公共事件，改为服务端按本人视图生成“私人待办”消息。
+        无论哪种，补一条“对外序列化的事件流不含 principalCents/paidCents/collectedCents”的测试。
+
+------------------------------------------------------------
+五、可延后（不阻塞 03 验收，按顺序处理）
+------------------------------------------------------------
+1. engine.ts:810-811 TAX 白名单多放行 REPAY_PRIVATE（R02:168、R08:230 未列）。
+   当前不可达成功：有 danger 时余额必 <0，还款先被 `cents > player.cents` 拒；
+   不涉及算错钱，但应删除以免将来改动后变成规避规则的口子。
+   顺带 :815 的文案“TAX 阶段只允许危险自救操作”与实际放行项不一致。
+2. engine.ts:415-429 runInterest 只用 remainingCents 判断是否变化：
+   0% 利率的私人贷款会静默推进 lastInterestRound 而不发 INTEREST_ACCRUED。
+   不影响金额/轮次，只影响审计与回放可读性。
+3. engine.ts:1190-1192 replaceRequest、:1210-1212 replacePrivateLoan 没有“恰好命中 1 条”守卫
+   （银行侧 :1194-1208 有）。当前 ID 生成唯一；接存档/导入/测试夹具后重复 ID 会静默双写。
+4. views.ts:115-138 / shared/src/types.ts:102-111 视图缺 currentSeatId、actedSeats、
+   phaseInstanceId、eventSeq。单元 04 要用 phaseInstanceId 做 stale 命令校验（plan:293/342）、
+   要渲染“轮到谁/我是否已行动”（plan:374），进入 04 前必须补。
+5. private-loans.ts:38-50 请求快照只有 credit + defaultedBankDebt（D5 已确认的最小集），
+   缺 R05 要求的私人债务/冻结部分/双方历史借贷/创建阶段。单元 07 做借款卡片时
+   只能现场查全账（破坏隐私）或再扩快照，建议 07 前补 LoanRequest 字段。
+6. R08 要求出借确认界面提示“你本轮是否尚未纳税”，但 taxSeats/taxIndex 只在 EngineExtras，
+   视图未暴露；单元 07 前补视图字段。
+7. views.ts:115、125、136 返回的是 state 内部对象引用（me、私人合同、myBet），不是深拷贝。
+   applyCommand 已 structuredClone 不共享；但服务端若在序列化前改视图会污染存档，
+   建议 04 明确“视图只读/序列化即拷贝”。
+8. engine.ts:909-910 accept 只按 requestId 找 PENDING，不校验它等于 s.pendingRequestId。
+   当前全局最多一个 PENDING（R05/D6），安全；建议显式化，防将来放开多待办后串单。
+9. engine.ts:910 重复同意返回 REQUEST_EXPIRED 而非“原结果”（R05:198）。
+   按 plan:333 由服务端 commandId 去重返回原结果，04 验收必须覆盖，本单元不重复实现。
+
+------------------------------------------------------------
+六、测试缺口（指出该加什么断言）
+------------------------------------------------------------
+1. 银行到期余额不足立即失信（对应必须修 #1）：
+   构造 round=N、dueRound<=N、remaining > 借款人余额；发任意一条命令（甚至非借款人命令）后断言
+   phase 直接 ACTION、该笔 DEFAULTED、credit DEFAULTED、deadline 不是 now+bankDueSec、
+   事件里没有 BANK_DUE_PENDING 且 BANK_LOAN_DEFAULTED.reason="insufficient_funds"。
+   同时改 tests/full-game.test.ts:120-127（不应再需要人工决策）。
+2. 取消请求（对应必须修 #2）：
+   - ACTION：请求 → 借款人 CANCEL → status CANCELLED、pendingRequestId=null、
+     currentSeatId 前进（行动已消耗）；之后 lender 再 ACCEPT 返回 REQUEST_EXPIRED 且无转账；
+   - TAX：danger 请求 → CANCEL → deadline 回到 dangerDeadlineMs、仍 DANGER、
+     可在 2 秒后重新请求；
+   - 第三人取消 → UNAUTHORIZED，请求仍 PENDING。
+3. 2 秒请求间隔（对应必须修 #3）：
+   自救拒绝后 t+1999ms 再发 → 拒（明确错误码/文案）；t+2000ms → 成功；
+   断言两次尝试都不改变 dangerDeadlineMs，且拒绝那次不消耗任何状态。
+4. 超时命令的提交语义：
+   下注截止后提交 → outcome.ok=false，但 version=before+1、phase 已推进、
+   events 恰含一次 BET_SETTLED、bets 已清空；再发同轮 SUBMIT_BET → 拒绝且余额不再变。
+   对照：纯拒绝（NOT_YOUR_TURN / ALREADY_LOCKED）version、eventSeq、deadline 全不变
+   （后者已有，建议扩到 eventSeq）。
+5. 赌博不变量回滚：
+   篡改 cents 使 1 倍猜输出现负余额 → outcome=RULI_INVARIANT（gamble.ts NEGATIVE_BALANCE），
+   断言所有玩家余额、bets、bankLoans、version、eventSeq 全部保持原样；
+   near-MAX 猜赢触发 BALANCE_OVERFLOW 同样断言整次回滚、不生成 OVERDRAFT。
+6. 视图隐私用真实数据：
+   现有 engine-round.test.ts:288-320 只放了 requests，privateLoans/bets 为空，属于“假绿”。
+   应塞入真实 ACTIVE/FROZEN/BAD_DEBT 私人合同与他人已锁定下注，断言第三人
+   JSON.stringify(view) 不含 loanId/remainingCents/principalCents/betCents/guess/leverage，
+   且本人视图全部可见；公开列表不含 ACTIVE 银行贷款金额（只允许失信欠款）。
+7. 全员破产：两人余额均小于应缴税，按座位先后破产 → GAME_OVER 且 winnerId===null，
+   并断言两人的税都已被处理（taxIndex===2），不是剩下谁谁赢。
+8. 税收节奏与座位序：
+   第 1/2/4/5 轮永不进入 TAX；第 3/6/9 轮 TAX_CHARGED 事件的 seatId 序列严格递增等于
+   本轮开局存活座位；每人每轮恰好一条 TAX_CHARGED。10 人 full-game 现在只断言最终余额。
+9. 银行到期稳定次序与单次结算：
+   同座位多笔逾期 + 多座位逾期，断言 BANK_DUE_PENDING 顺序 = 座位→dueRound→loanId，
+   每笔只出现一次，全部结束后同一命令内进入 ACTION。
+10. 重复 ID 防御对称性：privateLoans/requests 放入两条同 ID 夹具，
+    调还款/催收/同意，断言抛 RULE_INVARIANT 或明确拒绝且不双写（当前 replacePrivateLoan 无守卫）。
+11. 事件隐私：对第三人可收到的事件流做 JSON 断言，不含私人本金/还款额/催收额；
+    若采用 audience 字段，断言非当事人过滤后事件数变少且不含私人类型。
+12. 非法规避行动消耗：
+    自借（lenderId===playerId）、向破产者借款、金额非法 → 返回错误后
+    currentSeatId 与 windowDeadlineMs 均不变（R02“失败不消耗行动、不重置倒计时”）。
+
+------------------------------------------------------------
+七、实际执行命令与真实结果（2026-11-01，只读）
+------------------------------------------------------------
+- pnpm -s typecheck   → 退出码 0（无输出）
+- pnpm -s test:core   → 10 个测试文件 / 126 个测试全部通过
+- pnpm -s test:server → 1 个测试文件 / 6 个测试全部通过
+- pnpm -s test        → 11 个测试文件 / 132 个测试全部通过
+- git rev-parse --short HEAD → d164621
+- git status --porcelain → 6 个已修改 + 7 个未跟踪（含引擎/测试/本报告上一轮文件）
+- 未执行任何会改文件的命令；未做真人/真机与 WebSocket 广播验证（单元 04 尚未实现，标“未核实”）。
