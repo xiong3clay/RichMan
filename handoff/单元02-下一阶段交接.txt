@@ -33,3 +33,14 @@ system_once、privacy_views、phase_advance_when_all_done、defaulted_player_sti
 
 【当前测试基线】
 全仓 91 条通过。单元 03 必须保持全部通过，不允许改旧测试。
+
+【单元 03 开工前必须一起定的接口问题（Qoder 第三轮复核提出）】
+1. applyCommand 需要 CommandContext：现签名是 (state, command, now: Date)，但赌博开奖需要注入随机结果，否则引擎只能内部取随机源、测试不可复现。建议改为
+   applyCommand(state, command, ctx: { nowMs: number; drawResult: 0 | 1 })。
+2. outcome 只有 code: string：R06 要求催收被拒时“返回合法上限”，现在上限只在中文 message 里，引擎只能解析字符串（AGENTS 明令禁止）。建议 outcome 增加 message 与结构化 details（如 { limitCents }）。
+3. GameState 没有 eventSeq：GameEvent.seq 已有但无处赋值，事件日志连续性会断。建议 eventSeq 放进 GameState（或 context 并在快照里持久化）。
+4. BANK_DUE 必须扫 dueRound <= round，不能只扫 === round：被跳过的逾期贷款会永远卡在 ACTIVE（还款被 LOAN_OVERDUE 拒、新贷款被 ACTIVE_LOAN_EXISTS 挡、信用永远 GOOD）。
+5. bank.repayBankLoan 不接收金币数：R03 要求“不超过金币”，引擎必须自己校验余额并加测试，否则可能在非税收期把玩家扣成负余额。
+6. 汇总函数（银行两个 + 私人两个）只支持全局：引擎必须按 playerId 过滤，误传全房贷款会把别人的欠债算进“我的总负债”并泄露隐私。建议接入视图前先加 playerId 参数。
+7. 失信事件要带 defaultedAtRound / originalCents / reason（R04 要求保留历史且不叠加进总负债），现在没有字段。
+8. 私人请求“最多一个 PENDING”只按借款人判断（D6 已确认），出借人可同时收多个请求。
