@@ -7,7 +7,7 @@ packages/game-core/src/private-loans.ts：
 - refuseLoanRequest / cancelLoanRequest / expireLoanRequest(request): LoanRequest
 - accruePrivateInterest(loans, round): PrivateLoan[]
 - repayPrivateLoan(loan, cents, currentRound, borrowerCents, lenderCents): { loan, paidCents, borrowerCents, lenderCents }
-- collectPrivateDebt(loan, cents, currentRound, borrowerCents, lenderCents, lenderId): { loan, collectedCents, borrowerCents, lenderCents }
+- collectPrivateDebt(loan, cents, currentRound, borrowerCents, lenderId, lenderCents): { loan, collectedCents, borrowerCents, lenderCents }
 - settleBankruptcy(loans, bankruptPlayerId): PrivateLoan[]
 - closeRequestsForBankrupt(requests, bankruptPlayerId): LoanRequest[]
 - 汇总：privateDebtCents / receivableCents / frozenCents / badDebtCents

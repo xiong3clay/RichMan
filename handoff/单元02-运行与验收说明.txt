@@ -3,7 +3,7 @@
 
 【命令】
 cd D:\Lianjunjie\biancheng\RichMan
-pnpm test:core      # 应显示 5 文件 / 91 测试通过（private-loans 34 条）
+pnpm test:core      # 应显示 6 文件 / 97 测试通过（private-loans 40 条）
 pnpm typecheck      # 退出码 0
 pnpm build
 

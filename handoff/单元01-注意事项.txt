@@ -7,7 +7,7 @@
 
 【语义坑】
 - “逾期 = 失信”是超时语义，不是错误：settleDue(currentRound > dueRound) 返回 DEFAULTED，别改成抛错。
-- 计息上限是 dueRound：不要写成“只要 ACTIVE 就计息”，否则逾期贷款会无限涨息。
+- 计息上限是 dueRound：不要写成“只要 ACTIVE 就计息”，否则逾期贷款会无限涨息。accrueInterest 对逾期 ACTIVE 贷款**不抛错**（封顶到 dueRound 就不再加息），逾期出口在 settleDue（返回 DEFAULTED）；两者的分工不要混。
 - 补轮计息是逐轮复利，不是单次乘一次；漏轮补算时金额必须按每轮累加。
 - DEFAULTED 的三个禁止：不能还款、不能计息、不能转回 ACTIVE。测试里已有 default_no_repay / default_freezes_interest。
 - 全局贷款表可以直接传入 borrowFromBank（内部按 borrowerId 过滤），不要在外面手工过滤后再传，否则容易漏。

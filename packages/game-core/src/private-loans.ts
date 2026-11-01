@@ -175,6 +175,9 @@ function assertRequestIntegrity(request: LoanRequest): void {
   if (!Number.isSafeInteger(request.rateBps) || request.rateBps < 0 || request.rateBps > 10_000) {
     throw new PrivateLoanRuleError("INVALID_REQUEST", "请求利率必须是 0～10000 的整数基点");
   }
+  // 截止时间与轮次也必须可信：deadlineMs 为 NaN 时 nowMs >= NaN 恒为 false，迟到同意会被放行。
+  assertTimeMs(request.deadlineMs, "deadlineMs", "INVALID_DEADLINE");
+  assertRound(request.createdRound, "createdRound");
 }
 
 /** 创建私人借款请求；失信借款人也可发起，但请求必须快照信用与失信欠款供出借人查看。 */
@@ -225,7 +228,8 @@ export function acceptLoanRequest(
   assertRound(ctx.currentRound, "currentRound");
   assertTimeMs(ctx.nowMs, "nowMs", "INVALID_DEADLINE");
   assertBalanceCents(ctx.lenderCents, "lenderCents");
-  assertBalanceCents(ctx.borrowerCents, "borrowerCents");
+  // R08：危险玩家余额为负，紧急借款时必须允许“负余额借款人”收款；出借人一侧仍必须非负。
+  assertBalanceCents(ctx.borrowerCents, "borrowerCents", true);
 
   if (request.status !== "PENDING") {
     throw new PrivateLoanRuleError("REQUEST_NOT_PENDING", "请求已结束，不能重复批准");
@@ -238,6 +242,15 @@ export function acceptLoanRequest(
     throw new PrivateLoanRuleError("PARTY_NOT_ALIVE", "借款双方都必须存活");
   }
 
+  // R05：跨到下一轮的借款请求一律无效，置 EXPIRED 且不转账。
+  if (request.createdRound !== ctx.currentRound) {
+    return {
+      request: { ...request, status: "EXPIRED" },
+      loan: null,
+      lenderCents: ctx.lenderCents,
+      borrowerCents: ctx.borrowerCents,
+    };
+  }
   if (ctx.nowMs >= request.deadlineMs) {
     return {
       request: { ...request, status: "EXPIRED" },
@@ -389,7 +402,8 @@ export function collectPrivateDebt(
   }
   assertPositiveCents(cents, "collect cents");
   assertBalanceCents(borrowerCents, "borrowerCents", true);
-  assertBalanceCents(lenderCents, "lenderCents");
+  // R08：危险玩家可作为债权人催收，自己余额为负时必须放行；借款人一侧上限仍是 max(0, 余额)。
+  assertBalanceCents(lenderCents, "lenderCents", true);
 
   const collectibleCents = Math.min(loan.remainingCents, Math.max(0, borrowerCents));
   if (cents > collectibleCents) {

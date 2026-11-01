@@ -31,8 +31,14 @@ Qoder 复核：
 - 破产时未关闭相关 PENDING 请求 → 新增 closeRequestsForBankrupt
 - 遗留未处理（不阻塞）：还款/催收未带阶段参数（自己行动/自救）；accept 时不刷新 D5 风险快照；参数风格不统一；loanId 唯一性交给上层
 
+【第三轮复核（Qoder 在 RichMan 工作区读仓库）发现并修掉的问题】
+- accept 拒绝负余额借款人（R08 危险自救的紧急借款路径完全不可用）→ 只放开借款人一侧，出借人仍必须非负
+- collect 拒绝负余额出借人（危险玩家作为债权人无法催收）→ 只放开收款人一侧
+- accept 不校验请求自身 deadlineMs/createdRound：deadlineMs=NaN 时迟到同意会被放行；跨轮请求会被批准 → 补 assertTimeMs/assertRound，跨轮置 EXPIRED 且不转账
+- 新增 6 条回归测试：负余额借款人获批、负余额出借人被拒、负余额出借人催收、NaN 截止被拒、undefined 截止被拒、跨轮作废
+
 【验证命令与真实结果】
-pnpm test:core → 5 文件 / 91 测试通过（private-loans 34 条）
+pnpm test:core → 6 文件 / 97 测试通过（private-loans 40 条）
 pnpm typecheck → 退出码 0
 pnpm build → 通过
 

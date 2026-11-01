@@ -1,5 +1,10 @@
 单元 02 注意事项
 
+【第三轮复核补的规则（不要改回去）】
+- accept 必须允许**借款人**余额为负（R08 危险玩家紧急借款），但**出借人**余额仍必须非负；collect 必须允许**收款人（出借人）**余额为负，借款人一侧上限仍是 max(0, 余额)。
+- accept 必须校验请求自身的 deadlineMs（NaN/undefined 一律 INVALID_DEADLINE）与 createdRound；createdRound !== currentRound 的跨轮请求置 EXPIRED、不转账。
+- 这两条是为了让单元 03 的 danger_partial_rescue 能写出来；如果把它们“收紧”回去，自救流程会再次不可用。
+
 【语义坑】
 - 催收超上限必须抛 AMOUNT_EXCEEDS_COLLECTIBLE（错误里带合法上限），不是静默取 min；否则出借人会以为收到了他输入的金额。
 - repay/collect 现在返回双方余额，引擎必须使用返回值写回，不能自己加减。

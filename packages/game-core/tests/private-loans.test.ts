@@ -580,3 +580,46 @@ describe("immutability", () => {
     expect(collected.loan).not.toBe(frozenDue);
   });
 });
+
+describe("rereview_negative_balance_and_deadline", () => {
+  it("负余额借款人可以被批准（R08 紧急借款路径）", () => {
+    const out = acceptLoanRequest(request(), acceptCtx({ borrowerCents: -2_000, lenderCents: 9_000 }));
+    expect(out.request.status).toBe("ACCEPTED");
+    expect(out.loan?.status).toBe("ACTIVE");
+    expect(out.borrowerCents).toBe(2_000);
+    expect(out.lenderCents).toBe(5_000);
+  });
+
+  it("负余额出借人仍被拒绝（不能凭空造钱）", () => {
+    expectCode(
+      () => acceptLoanRequest(request(), acceptCtx({ lenderCents: -1 })),
+      "INVALID_AMOUNT",
+    );
+  });
+
+  it("负余额出借人可以催收（R08 危险玩家作为债权人）", () => {
+    const out = collectPrivateDebt(activeLoan({ remainingCents: 3_000 }), 1_000, 2, 5_000, "A", -2_000);
+    expect(out.collectedCents).toBe(1_000);
+    expect(out.lenderCents).toBe(-1_000);
+    expect(out.loan.remainingCents).toBe(2_000);
+    expect(out.loan.status).toBe("ACTIVE");
+  });
+
+  it("deadlineMs 为 NaN 的伪造请求在同意时被拒", () => {
+    const forged = { ...request(), deadlineMs: Number.NaN };
+    expectCode(() => acceptLoanRequest(forged, acceptCtx()), "INVALID_DEADLINE");
+  });
+
+  it("deadlineMs 缺失（undefined）同样被拒", () => {
+    const forged = { ...request(), deadlineMs: undefined as unknown as number };
+    expectCode(() => acceptLoanRequest(forged, acceptCtx()), "INVALID_DEADLINE");
+  });
+
+  it("跨轮请求一律无效：置 EXPIRED 且不转账", () => {
+    const out = acceptLoanRequest(request(), acceptCtx({ currentRound: 2 }));
+    expect(out.request.status).toBe("EXPIRED");
+    expect(out.loan).toBeNull();
+    expect(out.lenderCents).toBe(10_000);
+    expect(out.borrowerCents).toBe(10_000);
+  });
+});
