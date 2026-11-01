@@ -49,6 +49,10 @@ export interface GameState {
   round: number;
   phase: Phase;
   phaseInstanceId: string;
+  /** 审计事件序号：每次产生事件的提交 +1，保证快照 eventSeq 连续。 */
+  eventSeq: number;
+  /** 当前阶段截止时间（ISO 字符串）；无截止阶段为 null。 */
+  deadlineAt: string | null;
   config: RoomConfig;
   players: PlayerState[];
 }
@@ -65,13 +69,25 @@ export interface GameCommand {
   requestId?: string;
 }
 
-export type CommandOutcome = { ok: true } | { ok: false; code: string };
+import type { ErrorCode } from "./errors.js";
+
+/** 结构化操作结果：code 给程序判断，message 给玩家看，details 放可执行数据（如催收上限 limitCents）。 */
+export type CommandOutcome =
+  | { ok: true }
+  | { ok: false; code: ErrorCode; message: string; details?: Record<string, string | number | boolean | null> };
 
 export interface GameEvent {
   seq: number;
   type: string;
   at: string;
   payload: unknown;
+}
+
+/** 引擎上下文：时间与随机结果都由调用方注入，保证纯函数与可复现测试。 */
+export interface CommandContext {
+  nowMs: number;
+  /** 本命令需要用到的开奖结果；不需要时为 0，引擎不得自行取随机源。 */
+  drawResult: 0 | 1;
 }
 
 export interface TransitionResult {

@@ -19,6 +19,8 @@ describe("createInitialState", () => {
     expect(state.round).toBe(1);
     expect(state.phase).toBe("INTEREST");
     expect(state.version).toBe(0);
+    expect(state.eventSeq).toBe(0);
+    expect(state.deadlineAt).toBeNull();
     expect(state.players).toHaveLength(2);
     for (const p of state.players) {
       expect(p.cents).toBe(RULES.startCents);
@@ -62,7 +64,7 @@ describe("applyCommand", () => {
   it("is not implemented yet and says so", () => {
     const state = createInitialState("g1", config, seeds);
     expect(() =>
-      applyCommand(state, { protocolVersion: 1, gameId: "g1", commandId: "c1", type: "END_ACTION", payload: {} }, new Date()),
+      applyCommand(state, { protocolVersion: 1, gameId: "g1", commandId: "c1", type: "END_ACTION", payload: {} }, { nowMs: 0, drawResult: 0 }),
     ).toThrow(NotImplementedError);
   });
 });

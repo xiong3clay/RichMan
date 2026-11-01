@@ -1,4 +1,5 @@
 import type {
+  CommandContext,
   GameCommand,
   GameEvent,
   GameState,
@@ -39,13 +40,15 @@ export function createInitialState(gameId: string, config: RoomConfig, seeds: Pl
     round: 1,
     phase: "INTEREST",
     phaseInstanceId: "round1-interest",
+    eventSeq: 0,
+    deadlineAt: null,
     config,
     players,
   };
 }
 
 /** 规则引擎入口：单元 01～03 逐步实现；现在显式抛出，避免假装可用。 */
-export function applyCommand(_state: GameState, _command: GameCommand, _now: Date): TransitionResult {
+export function applyCommand(_state: GameState, _command: GameCommand, _ctx: CommandContext): TransitionResult {
   throw new NotImplementedError("applyCommand（按 V1.3 在单元 03 实现）");
 }
 
