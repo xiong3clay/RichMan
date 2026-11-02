@@ -1,0 +1,156 @@
+RichMan 单元 04A 独立复核
+复核人：Qoder（只读）
+复核日期：2026-11-01
+复核对象：HEAD d7a836c + 工作区未提交改动
+  apps/server/src/ws.ts（新）
+  apps/server/src/rooms/manager.ts（新）
+  apps/server/src/http.ts（改）
+  apps/server/tests/rooms.test.ts（新）
+  packages/shared/src/protocol.ts（改）
+复核方式：通读源码 + 真实跑测试/typecheck + 本机 WebSocket 探针；未改代码、未 commit。
+
+一、结论
+04A 主体实现是正确的：ws 库升级、字符串房间码（含前导零）、碰撞重试、2～10 人、座位分配、
+房主权限、全员准备、开局冻结名单、单连接断开保座、/health 真实计数、schema 校验、maxPayload、
+非 /ws 升级销毁都成立；game-core 未被改动；core 134 / server 15 / typecheck 0 是真绿。
+但有 3 个必须先处理的缺口：
+  M1 身份 token 走 URL，直接违反方案 264/654“秘密不进 URL”。
+  M2 04A 已开放“带 token 回座”，却没有任何 token→连接的归属/替换；旧连接 close 会把仍在线的
+     新连接标记离线（已实测复现），违反方案 268/495/654。
+  M3 真实客户端没有建房入口：createRoom 只有 manager API，网络端到端只能加入测试里预先创建的房间，
+     “另一台设备加入同一房间 / 交接里的建房步骤”无法验收。
+其余问题（心跳、connectionEpoch、房主离线转移、限流、Origin、房间上限）属于 04B / 06，见第四节。
+
+二、已核实通过（对应本轮 1～7 点）
+1. 房间生命周期：join 前校验房间存在；满员在 10 人处按 RULES.playerMax 拒绝；同 token 再 join 返回
+   原 playerId/seatId/sessionToken 且不新增玩家（manager.ts:163-206）；createRoom 对已占用码最多重试
+   50 次（manager.ts:130-147）；defaultRoomCode 用 crypto.randomInt 生成 4～8 位并补零（manager.ts:84-94）。
+   开局后新玩家 join、setReady 均返回 ALREADY_STARTED（manager.ts:186、210）。
+2. 权限：start 校验 LOBBY、hostId、>=playerMin、全员 ready（manager.ts:219-236）；非房主返回 NOT_HOST；
+   非本房间 token 不能操作别的房间（resolve 走 token 摘要→sessions→该房间，manager.ts:276-283）。
+3. 冻结：start 按 seatId 排序生成 seeds 并调用 createInitialState（manager.ts:226-231）；房间进入 PLAYING 后
+   名单/座位不变；测试断言了 seeds 顺序与玩家昵称一致（rooms.test.ts:107-142）。
+4. 断开语义：单连接场景正确——标 online=false、广播 peer_left、保留座位（manager.ts:242-248）。
+   双连接同 token 场景不正确，见 M2。
+5. 协议与安全：ClientLobbyMessageSchema 是 strict 判别联合，未知 type/非法布尔/JSON 错误都回
+   INVALID_MESSAGE（protocol.ts:70-81、ws.ts:89-101）；昵称按码点 1～20（protocol.ts:63-68）；
+   maxPayload=16 KiB（ws.ts:50）；room 广播只发 playerId/nickname/seatId/ready/online，不含 token
+   （ws.ts:69-85、manager.ts:298-312）；/health 不含昵称/成员/合同/token（health.test.ts:19-28）；
+   房间数/连接数无上限、无按 IP 限制——属 06，见第四节。
+6. 兼容性：git status 仅 apps/server（package.json、http.ts、ws.ts、rooms/、tests/rooms.test.ts）、
+   shared/src/protocol.ts 与 pnpm-lock.yaml；packages/game-core 无改动。134+15 真绿，typecheck 0（见第六节）。
+7. 传输：使用 ws 库的 WebSocketServer({noServer}) + handleUpgrade，没有手写帧解析（ws.ts:3、50、192-194）；
+   非 /ws 的 upgrade 直接 socket.destroy()（ws.ts:186-189）。
+
+三、必须现在修
+1) 文件: apps/server/src/ws.ts:17-20、110、190-191；packages/shared/src/protocol.ts:58-59
+   问题：sessionToken 通过 WebSocket URL（/ws?room=0042&token=...）传输；protocol.ts 注释把
+         “重连时通过 /ws?token=... 带回”写成正式方案。
+   后果：违反方案 264“原始秘密不进快照、日志、URL、二维码、Git”和 654“秘密不进 URL、日志或公共数据”。
+         token 会进入浏览器历史、反向代理/隧道访问日志、截图和转发链接；拿到链接即可占用该座位
+         （本机探针已用 URL 中的 token 成功回到 seat 1）。这比 04B 的恢复码问题更早暴露。
+   建议：删除 ?token= 读取（ws.ts:190-191）与 join 时的 conn.tokenQuery 回退（ws.ts:110），连接 URL
+         只保留公开房间码；token 只在 joined 响应里下发，04B 重连改为消息体内的 sessionToken
+         （join 增加可选字段，或新增 resume 消息）。同步修改 protocol.ts:58-59 的注释。
+         补测试断言 join/重连请求的 URL 中不出现 token。
+
+2) 文件: apps/server/src/ws.ts:149-175（close 回调无归属判断）；apps/server/src/rooms/manager.ts:170-184
+   问题：同一 token 可被两条活连接同时使用；任意一条关闭都会无条件 manager.disconnect(token)，
+         把仍然活着的新连接对应的玩家标成离线并广播 peer_left。方案 268 明确“同一玩家只允许一个有效
+         连接；新连接替换旧连接；旧 close 回调不能把新连接标离线”，495 把 replace_connection 列为本
+         单元必测。
+   复现（本机 node --import tsx 探针，端口 0，未写文件）：
+     ws1 加入得到 token；
+     ws2 用同一 token 加入 -> 同一 seat 1，players 仍为 1；
+     关闭 ws1 后 -> p1.online=false，而 ws2 仍为 OPEN；
+     随后 ws2 仍能成功 ready:true（服务端认为离线的人在操作）。
+   后果：新连接被旧 close 误判离线；若 04B 在此基础上做恢复，会出现“玩家实际在线、服务端判离线”的状态
+         分裂，并给重复标签页互抢留口子。
+   建议：在 ws.ts 维护 tokenOwners: Map<string, WebSocket>（或 connectionEpoch）。join 成功且带回 token 时，
+         若已有 owner：按方案 495“旧连接被拒”——给旧连接发 REPLACED 并关闭，owner 改为新连接；
+         close 回调只在 owner 是自己时才 disconnect，否则只清理连接表。
+         若本轮不想做替换，就删掉 04A 的 token 回座入口（manager.join 的 sessionToken 分支 + ?token=），
+         把整段重连留给 04B；不要保留“能回座但没有归属”的中间态。
+
+3) 文件: apps/server/src/http.ts:100-119（只有 /health 与静态）；packages/shared/src/protocol.ts:70-81
+         （客户端消息只有 join/ready/leave/start）；apps/server/src/rooms/manager.ts:130
+   问题：没有任何网络入口可以创建房间；join 不存在的码只会得到 ROOM_NOT_FOUND。createRoom 仅 manager
+         API，仓库内只有测试调用。
+   后果：真实浏览器/集成客户端无法“开房 -> 第二台设备加入”，方案 500 的 LAN 验收与 601 要求交接里的
+         “建房步骤”无从谈起；rooms.test.ts 直接调 manager.createRoom() 绕过网络，容易造成“已验证”的错觉。
+   建议：加同源 HTTP POST /api/rooms（或 WS create 消息），返回 4～8 位字符串房间码；来源/频率限制留到 06。
+         补一条真实网络测试：HTTP 建房 -> WS 加入 -> 第二客户端加入 -> 准备 -> 开始。
+         如果团队明确把建房入口放到 04B，请在本轮交接和验收说明里写清“04A 不能端到端建房”，
+         不要用 manager 级测试代替网络验收。
+
+四、可延后到 04B / 05 / 06
+04B（身份与重连，方案 261-275、491）
+- ping/pong 心跳与半开连接失效关闭（ws.ts 目前没有 heartbeat；断网后可能长期占用“在线”状态）。
+- connectionEpoch、REPLACED 错误码、指数退避重连、recoveryCode/换 origin 恢复、命令去重、计时器。
+- 房主离线超过 30 秒转给在线存活玩家中座位最小者（方案 273）；大厅开局是否要求全员在线需同期定。
+- 玩家离线但 ready 仍保留，房主可以带着离线玩家开局（当前行为）；请 04B 明确是允许还是拒绝。
+- 跨房间 token 被静默忽略并新建座位（manager.ts:170-184）：不是越权（resolve 只命中本房），但会在原房间
+  留下 online=true 的幽灵座位；建议显式回错，而不是静默新建。
+- ws 的 error 被吞（ws.ts:165），接日志/排障时补上下文。
+
+06（安全与上限，方案 558-563）
+- 创建/加入按来源 IP 限流；单 IP/单房间连接数上限；房间总数上限与空闲房间回收。现在空房只有“最后一人
+  leave”才删除，createRoom 产生的空房、全员断线的房间都会永久保留。
+- Origin 校验（CSWSH）；房间码枚举防护（4 位数字空间只有 9000，错误码还区分 ROOM_NOT_FOUND/ROOM_FULL/
+  ALREADY_STARTED）。
+- 昵称只按码点限制，允许控制字符和纯空白（protocol.ts:63-68）；05 做 UI 时统一 trim/过滤。
+
+05 / 本轮小债（不影响 04A 结论）
+- leave 时 manager 先 emit，ws 层之后才置空 conn.token（manager.ts:267 + ws.ts:133-136），离开者自己也会
+  收到 peer_left 和一次 room 广播；建议先解绑再 emit。
+- start 先写 room.gameId 再调 createInitialState（manager.ts:230-231）；createGameState 抛错会留下
+  “LOBBY 但有 gameId”的不一致（当前 2～10 与 ready 校验让这条路径基本不可达，低风险）。
+- getGame 返回内部可变 EngineState 引用（manager.ts:155-157）；04B/05 接入命令后建议改成受控接口，
+  避免绕过版本号直接改状态。
+- 房间码 50 次重试失败后返回 ROOM_FULL（manager.ts:146），语义不准，建议单独错误码。
+- DEFAULT_ROOM_CONFIG 写死 standard 计时与 privateDebtAffectsBankLoan=false（manager.ts:13-16）；
+  快速模式暂时无法选择，若 05 要为玩家提供选择需提前定配置入口。
+
+五、测试缺口（建议加的断言）
+A. 连接替换（方案 495，当前 0 条）
+   - 同 token 两条 WS：第二条 join 后第一条被关闭/收到 REPLACED，room 仍 1 人、seat 不变；
+   - 关闭第一条后 manager.getRoom(...).players[0].online 仍为 true；
+   - 第一条关闭前发出的消息不再改变状态，第二条 ready/start 仍生效。
+B. 秘密不落 URL / 公共消息（方案 264/654）
+   - 断言 join 与重连使用的 URL 不含 sessionToken；
+   - 对 room/peer_left/started 消息 JSON.stringify 后断言不含 "sessionToken"/"tokenDigest"；
+   - /health 已有“无 token/nickname”断言（health.test.ts:27），保留。
+C. 建房与网络生命周期
+   - 通过真实 HTTP/WS 建房（不是直接 manager.createRoom），第二客户端用返回的码加入；
+   - 不存在码 -> ROOM_NOT_FOUND；10 人后第 11 人 -> ROOM_FULL；满员时原 token 回座仍成功；
+   - 房主在大厅 leave -> 房主转给座位最小者；最后一人 leave -> 房间删除且 /health rooms 减 1。
+D. 冻结与 seeds 对应
+   - 10 人且有人 leave 后座位被复用时，start 传给 createInitialState 的 seeds 仍按 seatId 排序并与
+     room.players 一一对应；
+   - 断言传给 createGameState 的 config.timerMode 与 config.privateDebtAffectsBankLoan；
+   - 开局后带原 token 重连回原座位（不被 ALREADY_STARTED 拒绝），新玩家仍被 ALREADY_STARTED 拒绝。
+E. 协议边界
+   - NOT_JOINED：未 join 直接 ready/start/leave，以及 leave 两次；
+   - 非 /ws 的 upgrade 被销毁，且随后 /health 仍 200；
+   - 单帧 > 16 KiB 被关闭（1009），同房间另一客户端不受影响；
+   - 两个房间同时广播，消息不串房；
+   - 房间码 "0042" 经 WS URL 加入仍保留前导零（目前只有 manager 级断言，rooms.test.ts:26-30）。
+F. 测试自身
+   - rooms.test.ts 的 health/flow/invalid 三组共用一个 beforeAll 房间（:255-259），且 flow 会把它开到
+     PLAYING；建议每组新建房间，避免顺序耦合或单独跑某组时出现“假绿”。
+   - rooms.test.ts:355 的 hostToken 长度断言是残留断言，不验证任何行为，可删或改为回座断言。
+
+六、实际跑过的命令与结果
+- pnpm -s test:core   -> 10 files / 134 tests passed（23:51:51）
+- pnpm -s test:server -> 2 files / 15 tests passed（health 6 + rooms 9，23:51:55）
+- pnpm -s typecheck   -> exit 0
+- 本机 WS 探针（node --import tsx --input-type=module，端口 0，未写文件）：
+    ws2 joined seat: 1 | players: 1
+    after ws1 close -> players: 1 | p1.online: false | ws2 still open: true
+    ws2 setReady while player marked offline -> ready: true
+- 未跑 pnpm build：本轮只允许写复核文件，build 会写 dist；建议 04A 收尾时由实现方补跑并记录。
+
+七、未核实 / 未做
+- 真机 LAN、手机、隧道/代理下的行为未验证（04A 不要求）。
+- 房间码枚举、连接洪泛未做压力测试，限流结论属 06。
+- 浏览器端 token 的保存方式未验证（05 才有 UI）。

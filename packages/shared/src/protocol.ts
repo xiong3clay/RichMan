@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { MAX_MONEY_CENTS, MAX_MONEY_DIGITS } from "./money.js";
-import { PHASES } from "./types.js";
+import { RULES, SERVER_DEFAULTS } from "./rules.js";
+import { PHASES, ROOM_STATE } from "./types.js";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -51,3 +52,111 @@ export const HealthResponseSchema = z
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;
 
 export const PhaseSchema = z.enum(PHASES);
+
+/* ------------------------------------------------------------------ *
+ * 大厅协议（单元 04A）
+ * 房间码走连接 URL（/ws?room=0042）；token 不进 URL，只在 joined 响应下发。
+ * 04B 用消息体内的 sessionToken 恢复（resume 消息）。
+ * ------------------------------------------------------------------ */
+
+/** 昵称按 Unicode 码点计数，1～20 个码点（emoji 不按 UTF-16 双字节重复计）。 */
+export const NicknameSchema = z
+  .string()
+  .refine((value) => [...value].length >= 1, { message: "昵称至少 1 个字符" })
+  .refine((value) => [...value].length <= SERVER_DEFAULTS.nicknameMaxCodePoints, {
+    message: "昵称最多 " + String(SERVER_DEFAULTS.nicknameMaxCodePoints) + " 个字符",
+  });
+
+export const LobbyJoinSchema = z
+  .object({
+    type: z.literal("join"),
+    nickname: NicknameSchema,
+    /** 已有会话可在消息体内带回 joined 下发的 token，回到原座位；04B 会独立成 resume 消息。 */
+    sessionToken: z.string().min(16).optional(),
+  })
+  .strict();
+export const LobbyReadySchema = z.object({ type: z.literal("ready"), ready: z.boolean() }).strict();
+export const LobbyLeaveSchema = z.object({ type: z.literal("leave") }).strict();
+export const LobbyStartSchema = z.object({ type: z.literal("start") }).strict();
+
+export const ClientLobbyMessageSchema = z.discriminatedUnion("type", [
+  LobbyJoinSchema,
+  LobbyReadySchema,
+  LobbyLeaveSchema,
+  LobbyStartSchema,
+]);
+export type ClientLobbyMessage = z.infer<typeof ClientLobbyMessageSchema>;
+
+export const LOBBY_ERROR_CODES = [
+  "INVALID_MESSAGE",
+  "INVALID_NICKNAME",
+  "ROOM_NOT_FOUND",
+  "ROOM_FULL",
+  "ALREADY_STARTED",
+  "NOT_JOINED",
+  "NOT_HOST",
+  "NOT_ALL_READY",
+  "NOT_ENOUGH_PLAYERS",
+  "REPLACED",
+] as const;
+export type LobbyErrorCode = (typeof LOBBY_ERROR_CODES)[number];
+
+export const LobbyPlayerSchema = z
+  .object({
+    playerId: z.string().min(1).max(64),
+    nickname: z.string(),
+    seatId: z.number().int().min(1).max(RULES.playerMax),
+    ready: z.boolean(),
+    online: z.boolean(),
+  })
+  .strict();
+export type LobbyPlayer = z.infer<typeof LobbyPlayerSchema>;
+
+const ROOM_STATES = [
+  ROOM_STATE.LOBBY,
+  ROOM_STATE.PLAYING,
+  ROOM_STATE.PAUSED,
+  ROOM_STATE.ERROR_PAUSED,
+  ROOM_STATE.ENDED,
+] as const;
+export const RoomStateSchema = z.enum(ROOM_STATES);
+
+export const JoinedMessageSchema = z
+  .object({
+    type: z.literal("joined"),
+    playerId: z.string().min(1).max(64),
+    seatId: z.number().int().min(1).max(RULES.playerMax),
+    sessionToken: z.string().min(16),
+    roomCode: RoomCodeSchema,
+  })
+  .strict();
+
+export const RoomMessageSchema = z
+  .object({
+    type: z.literal("room"),
+    players: z.array(LobbyPlayerSchema),
+    hostId: z.string().min(1).max(64).nullable(),
+    state: RoomStateSchema,
+  })
+  .strict();
+
+export const StartedMessageSchema = z
+  .object({ type: z.literal("started"), gameId: z.string().min(1).max(64) })
+  .strict();
+
+export const PeerLeftMessageSchema = z
+  .object({ type: z.literal("peer_left"), playerId: z.string().min(1).max(64) })
+  .strict();
+
+export const LobbyErrorSchema = z
+  .object({ type: z.literal("error"), code: z.enum(LOBBY_ERROR_CODES), message: z.string() })
+  .strict();
+
+export const ServerLobbyMessageSchema = z.discriminatedUnion("type", [
+  JoinedMessageSchema,
+  RoomMessageSchema,
+  StartedMessageSchema,
+  PeerLeftMessageSchema,
+  LobbyErrorSchema,
+]);
+export type ServerLobbyMessage = z.infer<typeof ServerLobbyMessageSchema>;

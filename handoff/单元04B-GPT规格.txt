@@ -1,0 +1,77 @@
+单元 04B 实现规格（交给 GPT/Codex 执行）
+方案依据：V1.3.2 第四节（身份/协议/并发/隐私）与第二节点 2A/2B 要求
+前置：04A 已完成（同源 HTTP、/ws、房间、大厅协议、POST /api/rooms），core 134 + server 18 测试通过
+
+============================================================
+一、写作用域（严格）
+============================================================
+允许修改/新增：
+- apps/server/src/ws.ts（扩展）
+- apps/server/src/rooms/session.ts（新增）
+- apps/server/src/rooms/command-queue.ts（新增）
+- apps/server/src/rooms/scheduler.ts（新增）
+- packages/shared/src/protocol.ts（增加 resume 与游戏命令 schema）
+- apps/server/tests/session.test.ts、commands.test.ts、scheduler.test.ts（新增）
+禁止修改：
+- packages/game-core/**（规则引擎已冻结）
+- apps/web/**（界面在单元 05）
+- docs/**、handoff/**（除非补交接）
+不得引入 ws 之外的新依赖；不得 commit。
+
+============================================================
+二、身份与会话
+============================================================
+1. 首次 join：服务端生成 playerId、seatId、sessionToken、recoveryCode，各 ≥128 位随机熵；
+   服务端只保存 sha256 摘要与映射，原始秘密只在 joined 响应里发给本人。
+2. token 只走消息体，绝不进 URL、日志、广播、/health、二维码。
+3. resume 消息：{type:"resume", roomCode, sessionToken?, recoveryCode?}
+   - sessionToken 命中 → 恢复原 playerId/seatId，保留金币、合同、待办、已锁下注、原 deadlineAt；
+   - recoveryCode 命中 → 签发新 sessionToken，旧 token 立即失效，仍回原座位；
+   - 都无效 → UNAUTHORIZED，不得新建座位。
+4. 同一玩家只允许一个有效连接：新连接恢复成功后绑定递增 connectionEpoch，旧连接收到 REPLACED 并关闭；
+   旧连接的 close 回调不得把新连接标离线（04A 已有 tokenOwners，扩展到 epoch）。
+5. ping/pong：每 10 秒 ping，连续 2 次无 pong 判定半开，关闭连接并标记离线（不立即破产，交给超时规则）。
+
+============================================================
+三、命令队列与去重
+============================================================
+1. 每个房间一个串行队列：玩家命令、计时器到期、内部结算都进同一队列。
+2. 命令信封：{protocolVersion, gameId, commandId, type, payload, actorId 由连接注入}；
+   处理器顺序：认证/大小/频率校验 → 去重查询 → 处理到期系统动作 → 阶段/权限/金额校验 → applyCommand → 保存去重结果 → 应答与广播。
+3. 去重：键 (gameId, playerId, commandId)，保存 payloadHash 与终局 outcome（含失败）；
+   同 ID 同载荷重发返回原结果且不重新执行；同 ID 不同载荷返回 COMMAND_ID_REUSED；去重整局累积，不设滑动窗口。
+4. 版本校验按命令分类（不要统一按全局 version 拒绝）：
+   - 行动类（借款/还款/催收/结束行动）：严格校验 expectedGameVersion；
+   - 下注：按 gameId+roundId+phaseInstanceId+playerId 校验是否已锁与余额，不因别人下注导致的版本变化拒绝；
+   - 同意/拒绝私人请求：按 requestId+阶段+截止+指定出借人校验；
+   - 银行到期：按 loanId+到期处理实例（pendingDueLoanId）+借款人校验。
+5. actorId 只能来自已认证连接；payload 里出现 playerId 且不一致 → UNAUTHORIZED。
+
+============================================================
+四、计时器
+============================================================
+1. 每房间维护定时器：读当前状态的 deadlineAt，到点调用 advanceSystem(state, {actorId: SYSTEM, nowMs, drawResult})；
+   drawResult 只由服务器安全随机源生成，仅 BETTING 需要。
+2. 每次调度记录 phaseInstanceId/epoch：旧计时器、重复唤醒、重连补发到达时，若实例不匹配必须丢弃，不能重复结算。
+3. 结算后广播：视图用 getPlayerView、事件用 eventsForPlayer 过滤，禁止广播原始 events。
+4. 计时器迟到（nowMs 已过多个 deadline）时，循环调用 advanceSystem 直到 deadline 在未来，但每次只提交一次状态变更与一次广播。
+
+============================================================
+五、必须通过的场景（缺一条不算完成）
+============================================================
+1. refresh_same_seat：刷新/重连后金币、座位、行动、待办、已锁下注不变。
+2. replace_connection：旧连接被拒（REPLACED）；旧 close 不把新连接标离线；旧页面消息不再改变状态。
+3. ack_lost_retry：转账应答丢失后，原 commandId 原载荷重发只执行一次；同 ID 换金额返回 COMMAND_ID_REUSED。
+4. ten_bets_same_version：10 个客户端持相同版本同时下注，各自一次合法提交全部被接受（不因全局版本变化批量拒绝）。
+5. recover_different_origin：换 origin 后不能用旧 localStorage token，但 recoveryCode 能回原座位；旧 token 失效。
+6. stale_timer_ignored：旧阶段计时器迟到不重复结算；重复 ping 唤醒不重复推进。
+7. half_open_closed：断开网络（不发 close）时 ping 超时后连接关闭、座位标离线，但座位保留。
+
+============================================================
+六、验收
+============================================================
+- pnpm test:core（134 条必须全绿）
+- pnpm test:server（18 条 + 新增必须全绿）
+- pnpm typecheck、pnpm build 均 0
+- 不修改 game-core；不改 web
+- 输出：改了哪些文件、每个测试验证什么、真实命令结果与测试数

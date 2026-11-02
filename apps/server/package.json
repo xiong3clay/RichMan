@@ -5,7 +5,11 @@
   "type": "module",
   "main": "src/http.ts",
   "dependencies": {
+    "@richman/game-core": "workspace:*",
     "@richman/shared": "workspace:*",
-    "@richman/game-core": "workspace:*"
+    "ws": "^8.22.1"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.2"
   }
 }

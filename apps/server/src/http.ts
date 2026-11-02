@@ -3,7 +3,9 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { SERVER_DEFAULTS, PROTOCOL_VERSION } from "@richman/shared";
+import { SERVER_DEFAULTS, PROTOCOL_VERSION, NicknameSchema } from "@richman/shared";
+import { RoomManager } from "./rooms/manager.js";
+import { attachLobbyWebSocket } from "./ws.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_STATIC_DIR = path.resolve(HERE, "../../../apps/web/dist");
@@ -25,12 +27,17 @@ export interface ServerOptions {
   port?: number;
   staticDir?: string;
   startedAt?: number;
+  manager?: RoomManager;
+  /** /health 的实时计数，缺省返回 0/0。 */
+  stats?: () => { connections: number; rooms: number };
 }
 
 export interface StartedServer {
   server: http.Server;
   host: string;
   port: number;
+  manager: RoomManager;
+  connections: () => number;
   close: () => Promise<void>;
 }
 
@@ -38,6 +45,63 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
   const text = JSON.stringify(body);
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(text) });
   res.end(text);
+}
+
+function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > SERVER_DEFAULTS.maxMessageBytes) {
+        reject(new Error("PAYLOAD_TOO_LARGE"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      const text = Buffer.concat(chunks).toString("utf8").trim();
+      if (text === "") {
+        resolve({});
+        return;
+      }
+      try {
+        resolve(JSON.parse(text));
+      } catch {
+        reject(new Error("BAD_REQUEST"));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+/** 同源建房入口：POST /api/rooms，body 为 {} 或 {"nickname": "..."}，返回 4～8 位房间码。 */
+async function handleCreateRoom(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  manager: RoomManager,
+): Promise<void> {
+  try {
+    const body = await readJsonBody(req);
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      sendJson(res, 400, { ok: false, error: "BAD_REQUEST" });
+      return;
+    }
+    const nickname = (body as Record<string, unknown>)["nickname"];
+    if (nickname !== undefined && !NicknameSchema.safeParse(nickname).success) {
+      sendJson(res, 400, { ok: false, error: "INVALID_NICKNAME" });
+      return;
+    }
+    sendJson(res, 201, { ok: true, roomCode: manager.createRoom() });
+  } catch (error) {
+    const message = (error as Error).message;
+    if (message === "PAYLOAD_TOO_LARGE") {
+      sendJson(res, 413, { ok: false, error: "PAYLOAD_TOO_LARGE" });
+      return;
+    }
+    sendJson(res, 400, { ok: false, error: "BAD_REQUEST" });
+  }
 }
 
 function serveStatic(res: http.ServerResponse, requested: string, staticDir: string): void {
@@ -75,6 +139,8 @@ function serveStatic(res: http.ServerResponse, requested: string, staticDir: str
 export function createRequestHandler(opts: ServerOptions = {}): http.RequestListener {
   const staticDir = opts.staticDir ?? DEFAULT_STATIC_DIR;
   const startedAt = opts.startedAt ?? Date.now();
+  const manager = opts.manager ?? new RoomManager();
+  const stats = opts.stats ?? (() => ({ connections: 0, rooms: 0 }));
   return (req, res) => {
     let url: URL;
     let decodedPath: string;
@@ -90,16 +156,21 @@ export function createRequestHandler(opts: ServerOptions = {}): http.RequestList
       return;
     }
     if (req.method === "GET" && url.pathname === "/health") {
+      const counts = stats();
       sendJson(res, 200, {
         ok: true,
         service: "richman",
         version: VERSION,
         protocolVersion: PROTOCOL_VERSION,
         uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
-        connections: 0,
-        rooms: 0,
+        connections: counts.connections,
+        rooms: counts.rooms,
         serverNow: new Date().toISOString(),
       });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/rooms") {
+      void handleCreateRoom(req, res, manager);
       return;
     }
     if (req.method !== "GET" && req.method !== "HEAD") {
@@ -113,21 +184,35 @@ export function createRequestHandler(opts: ServerOptions = {}): http.RequestList
 export async function startServer(opts: ServerOptions = {}): Promise<StartedServer> {
   const host = opts.host ?? SERVER_DEFAULTS.host;
   const port = opts.port ?? Number(process.env["PORT"] ?? SERVER_DEFAULTS.port);
-  const server = http.createServer(createRequestHandler(opts));
+  const manager = opts.manager ?? new RoomManager();
+  let runtime: ReturnType<typeof attachLobbyWebSocket> | null = null;
+  const stats =
+    opts.stats ??
+    (() => ({
+      connections: runtime?.connections() ?? 0,
+      rooms: manager.roomCount(),
+    }));
+  const server = http.createServer(createRequestHandler({ ...opts, manager, stats }));
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, host, () => resolve());
   });
+  runtime = attachLobbyWebSocket(server, manager);
   const address = server.address();
   const actualPort = typeof address === "object" && address !== null ? address.port : port;
+  const wsRuntime = runtime;
   return {
     server,
     host,
     port: actualPort,
-    close: () =>
-      new Promise<void>((resolve, reject) => {
+    manager,
+    connections: () => wsRuntime.connections(),
+    close: async () => {
+      await wsRuntime.close();
+      await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));
-      }),
+      });
+    },
   };
 }
 

@@ -1,0 +1,39 @@
+单元 04A 成果报告
+日期：2026-11-02
+执行：Trae CN 实现 → Qoder CN 复核（写 handoff/复核-单元04A.txt）→ Harness 验收
+方案版本：V1.3.2
+
+【结论】
+04A = 完成（代码验证通过）。同源 HTTP + /ws + 房间 + 大厅协议骨架可用：真实网络可以建房、两人加入、准备、开局。
+core 134 条、server 18 条测试通过，typecheck 与 build 通过。未做 04B 的身份/重连/命令去重/计时器。
+
+【完成项】
+1. apps/server/src/ws.ts：用 ws 库（WebSocketServer noServer + handleUpgrade）实现 /ws；JSON 消息校验；非 /ws 升级销毁；maxPayload 16KiB。
+2. apps/server/src/rooms/manager.ts：4～8 位字符串房间码（允许前导零、碰撞重试）、2～10 人、服务端分配座位、房主权限、全员 ready 才能 start、开局冻结名单并调用 createInitialState、断线保座。
+3. apps/server/src/http.ts：POST /api/rooms 同源建房（返回 roomCode）、/health 的 rooms/connections 真实计数、静态服务与路径防护保留。
+4. packages/shared/src/protocol.ts：大厅客户端/服务端消息 schema（join/ready/leave/start 与 joined/room/started/peer_left/error），昵称按码点 1～20、未知 type 拒绝。
+5. 测试：server 从 6 条增至 18 条，覆盖建房/前导零/碰撞/满员/权限/冻结/断线保座/协议校验/health/建房网络闭环/连接替换。
+
+【Qoder 复核发现并修复（M1-M3）】
+M1 口令走 URL：原实现从 /ws?token=... 取 sessionToken。已改为 URL 只带公开房间码，token 只在 joined 响应下发；
+   并断言房间广播与 URL 都不含 sessionToken/tokenDigest。
+M2 无连接归属：同 token 两条连接时旧 close 会把在线者标离线。已加 tokenOwners：新连接接管旧连接（旧连接收 REPLACED 并关闭），
+   旧 close 不再标离线；补网络测试。
+M3 无建房入口：createRoom 只有内部 API。已加 POST /api/rooms，并补「HTTP 建房 → 两 ws 加入 → 准备 → 开始」网络闭环测试。
+
+【未完成（04B 范围）】
+- sessionToken / recoveryCode 的完整生命周期（恢复码、换 origin 恢复、旧 token 失效）。
+- ping/pong 心跳、半开连接清理、connectionEpoch。
+- 玩家命令队列、命令去重（commandId/payloadHash）、按命令分类的版本校验。
+- 计时器接 advanceSystem、旧计时器淘汰。
+- 房主离线转移、限流/Origin/房间上限（部分属 06）。
+
+【验证结果】
+pnpm test:core   → 10 文件 / 134 条通过
+pnpm test:server → 2 文件 / 18 条通过
+pnpm typecheck   → 退出码 0
+pnpm build       → 退出码 0
+game-core 无改动（git status 确认）。
+
+【提交】
+实现提交：见下一条提交

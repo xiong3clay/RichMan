@@ -1,6 +1,6 @@
 RichMan 项目当前状态
-更新日期：2026-11-01
-更新者：DeepSeek Harness（单元 03 收尾轮）
+更新日期：2026-11-02
+更新者：DeepSeek Harness（单元 04A 收尾轮）
 
 【版本】
 方案版本：V1.3.2
@@ -10,33 +10,27 @@ RichMan 项目当前状态
 游戏版本：未发布，目标 V1.0
 
 【进度】
-已完成单元：00、01、02、03
-当前单元：无（下一单元 04：同源服务器、房间、身份与重连）
-代码状态：规则引擎完整（阶段机/赌博/税收自救/胜负），尚未接 WebSocket
+已完成单元：00、01、02、03、04A
+当前单元：04B（身份/恢复码/重连/命令去重/计时器）——规格见 handoff/单元04B-GPT规格.txt
+代码状态：规则引擎完整；服务端有 /ws、房间、大厅协议、POST /api/rooms；尚无游戏命令通道与重连
+提交号：见 git log
 
 【验证状态】
 pnpm test:core：10 文件 / 134 测试通过
-pnpm test:server：1 文件 / 6 测试通过
+pnpm test:server：2 文件 / 18 测试通过
 pnpm typecheck：通过
 pnpm build：通过
-真人/真机：未进行（单元 03 不要求）
-独立复核：Qoder 三轮（00-02 复核、03A 复核、03 复核），提出的 M1-M6 与 P1-P4 已修；P1-P4 尚未做 Qoder 终审
+独立复核：Qoder 04A 复核（M1-M3 已修）；04B 尚未开始
+真人/真机：未进行
 
 【命令】
 安装：pnpm install
-启动：pnpm start（当前只有 /health 与静态页）
+启动：pnpm start（默认 0.0.0.0:8000；/health、静态页、POST /api/rooms、/ws）
 测试：pnpm test:core / test:server / test
-未实现：pnpm test:e2e（单元 05 建立）
+未实现：pnpm test:e2e（单元 05）
 
 【阻塞】
-无。D3b（出借人破产后合同冻结）仍按默认实现，用户未最终表态。
+无。D3b 仍按默认（出借人破产冻结），用户未最终表态。
 
 【下一入口】
-单元 04：同源服务器、房间、稳定身份与重连。读 handoff/单元03-下一阶段交接.txt。
-必须先接引擎的系统推进入口 advanceSystem（计时器），以及 eventsForPlayer 的受众过滤。
-
-【应读文件】
-AGENTS.md
-handoff/单元03-下一阶段交接.txt
-handoff/规则决策表.txt
-docs/plans/Richman分阶段联机开发方案_V1.3精简施工版.txt
+单元 04B：按 handoff/单元04B-GPT规格.txt 执行；完成后由 Qoder 复核，再做 05。
