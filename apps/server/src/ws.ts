@@ -5,7 +5,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { RawData } from "ws";
 import { ClientGameCommandSchema, ClientLobbyMessageSchema, SERVER_DEFAULTS } from "@richman/shared";
 import type { GameEvent, LobbyErrorCode, ServerLobbyMessage, TransitionResult } from "@richman/shared";
-import { eventsForPlayer, getPlayerView } from "@richman/game-core";
+import { SNAPSHOT_SCHEMA_VERSION, eventsForPlayer, getPlayerView } from "@richman/game-core";
 import type { EngineState } from "@richman/game-core";
 import { LobbyError } from "./rooms/manager.js";
 import type { RoomManager, RoomManagerEvent } from "./rooms/manager.js";
@@ -108,6 +108,7 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
     if (state === null) return;
     const pendingDueLoan = state.bankLoans.find(loan => loan.loanId === state.pendingDueLoanId);
     send(conn, { type: "snapshot", view: wireCopy({
+      schemaVersion: SNAPSHOT_SCHEMA_VERSION,
       ...getPlayerView(state, identity.playerId, new Date(now())),
       phaseInstanceId: state.phaseInstanceId, eventSeq: state.eventSeq,
       currentSeatId: state.currentSeatId, actedSeats: [...state.actedSeats],
@@ -197,9 +198,14 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
     if (command.success) {
       if (!current(conn)) { sendError(conn, "NOT_JOINED", "请先加入房间"); return; }
       const identity = conn.identity!, epoch = conn.epoch;
+      const versionBefore = manager.getGame(identity.roomCode)?.version;
       const reply = await processor.execute(identity.roomCode, identity.playerId, command.data,
         () => current(conn) && conn.epoch === epoch);
-      if (current(conn)) { send(conn, wireCopy(reply)); snapshot(conn); }
+      if (!current(conn)) return;
+      send(conn, wireCopy(reply));
+      // commit 已向房间内所有连接推送快照；version 没变说明命令被拒/冲突且没有广播，
+      // 补发一次本人快照，避免界面停在过期状态。有 commit 时保持“不重复补发”。
+      if (manager.getGame(identity.roomCode)?.version === versionBefore) snapshot(conn);
       return;
     }
     const lobby = ClientLobbyMessageSchema.safeParse(json);

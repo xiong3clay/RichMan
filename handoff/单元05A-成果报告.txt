@@ -1,0 +1,45 @@
+单元 05A 成果报告
+日期：2026-11-03
+执行：Trae CN 实现 → Qoder CN 复核（handoff/复核-单元05A.txt，4 项必修）→ Trae 修复 → Harness 验收
+方案版本：V1.3.2
+
+【结论】
+05A = 代码验证通过。最小可玩联机 UI 与双客户端冒烟已可用，单元 05 的真人/真机试玩（05B）尚未进行，
+因此**单元 05 整体还不能标记完成**。
+
+【完成项】
+1. apps/web/src/LobbyView.tsx：昵称 → 建房（POST /api/rooms）/ 加入（房间码）；玩家列表、准备、房主开始；
+   错误码中文提示（ROOM_NOT_FOUND / ROOM_FULL / ALREADY_STARTED / NOT_HOST）。
+2. apps/web/src/GameView.tsx：轮次/阶段/当前行动者/倒计时（来自服务端 deadlineAt）；
+   自己金币、信用、失信欠款、总负债；借银行、逐笔还银行、结束行动、BETTING 下注；
+   非本人回合/错误阶段/破产/等待答复时禁用并说明原因；渲染 command_result 与服务端 error（code+message）。
+3. apps/web/src/net/client.ts、wire.ts：ws 连接、join/ready/start/leave/resume；
+   断线指数退避重连；只采用 version 不低于当前的 snapshot；REPLACED 停止重连；
+   金额按十进制字符串处理，上限与服务端一致（13 位 / 10^12 分）。
+4. apps/server/src/ws.ts（+4/-2）：wire snapshot 补 schemaVersion；被拒绝/版本冲突的命令补发最新本人快照；
+   成功提交不重复补发。
+5. scripts/smoke-two-clients.ts + pnpm smoke:lan：真实服务 + 两个真实 WS 客户端，跑完借银行、结束行动、下注、
+   第 2 轮结算；断言 version 单调、金额变化可解释、过期命令返回 VERSION_CONFLICT 并补发新快照。
+6. 测试：apps/web/tests（client/wire）、apps/server/tests/leave-resume.test.ts。
+
+【Qoder 复核发现并修复（M1-M4）】
+M1 退出房间不发 leave、无条件清 token → 改为先发 leave；大厅清会话、游戏内保留 token 并提示可恢复。
+M2 重连后 resume 失败无收口 → 重连时重置已加入状态；resume 失败 clearSession + dispose + 回入口并显示错误。
+M3 被拒绝命令不回推快照 → 服务端按 version 是否变化决定补发，冒烟补 VERSION_CONFLICT 场景。
+M4 游戏内 error 不渲染、金额上限宽于服务端 → GameView 渲染 code+message；客户端校验对齐 13 位/10^12。
+
+【验证结果】
+pnpm test        → 18 文件 / 222 条通过（core 134、server 82、web 6）
+pnpm typecheck   → 退出码 0
+pnpm build       → 退出码 0
+pnpm smoke:lan   → PASS（含 VERSION_CONFLICT 与快照补发断言）
+
+【未完成（05B）】
+- 两台真实设备（电脑 + 手机）跑完整一轮；
+- 刷新/断网恢复实测；
+- 另一设备核对公共状态；
+- 真人试玩记录（等待时长、卡点、理解困难、是否找得到债务/操作）；
+- 10 客户端自动化压力验证（可先由脚本做，不冒充真人）。
+
+【提交】
+实现提交：见下一条提交

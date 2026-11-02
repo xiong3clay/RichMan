@@ -15,7 +15,8 @@
     "test:core": "vitest run packages/game-core/tests packages/shared/tests",
     "test:server": "vitest run apps/server/tests",
     "test": "vitest run",
-    "test:e2e": "node -e \"console.error('尚未实现：e2e 测试按 V1.3 在单元 05 建立'); process.exit(1)\""
+    "test:e2e": "node -e \"console.error('尚未实现：e2e 测试按 V1.3 在单元 05 建立'); process.exit(1)\"",
+    "smoke:lan": "tsx scripts/smoke-two-clients.ts"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

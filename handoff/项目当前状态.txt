@@ -1,6 +1,6 @@
 RichMan 项目当前状态
-更新日期：2026-11-02
-更新者：DeepSeek Harness（单元 04 收尾轮）
+更新日期：2026-11-03
+更新者：DeepSeek Harness（单元 05A 收尾轮）
 
 【版本】
 方案版本：V1.3.2
@@ -10,28 +10,27 @@ RichMan 项目当前状态
 游戏版本：未发布，目标 V1.0
 
 【进度】
-已完成单元：00、01、02、03、04
-当前单元：无（下一单元 05：最小可玩联机 UI + 首次真人试玩）
-代码状态：规则引擎 + 同源服务端（房间/身份/恢复码/重连/命令队列/去重/计时器）可用；游戏界面仍是占位页
-会话与去重仅内存，进程重启不保留（06 再做持久化）
+已完成单元：00、01、02、03、04、05A
+当前单元：05B（真人/真机试玩）——清单见 handoff/单元05B-试玩清单.txt
+代码状态：规则引擎 + 服务端 + 最小可玩网页 UI；完整借贷 UI/教程/音频/手机适配未做（07/08）
+会话与去重仅内存，重启不保留（06）
 
 【验证状态】
-pnpm test:core：10 文件 / 134 测试通过
-pnpm test:server：5 文件 / 80 测试通过
-pnpm typecheck：通过
-pnpm build：通过
-独立复核：Qoder 04A（M1-M3）、04B（M1）已修；04 的 D1-D9 遗留已归类到 05/06
-真人/真机：未进行（05 要求）
+pnpm test：18 文件 / 222 条通过（core 134、server 82、web 6）
+pnpm typecheck / build：通过
+pnpm smoke:lan：PASS（真实服务 + 双 WS，含 VERSION_CONFLICT 与快照补发断言）
+独立复核：Qoder 05A 复核 4 项必修已修
+真人/真机：未进行（05B）
 
 【命令】
 安装：pnpm install
+构建：pnpm build
 启动：pnpm start（默认 0.0.0.0:8000）
-测试：pnpm test:core / test:server / test
+测试：pnpm test / pnpm test:core / test:server / pnpm smoke:lan
 建服验证：POST /api/rooms；/ws?room=<码>；/health
 
 【阻塞】
 无。D3b（出借人破产冻结）仍按默认，用户未最终表态。
 
 【下一入口】
-单元 05：最小可玩联机。读 handoff/单元04-下一阶段交接.txt，先做大厅 + 最小游戏操作，
-再用两台真实设备跑完一整轮并记录等待/理解问题。
+05B：按 handoff/单元05B-试玩清单.txt 在两台设备上实跑并记录；通过后进单元 06（可靠存档与重启恢复）。
