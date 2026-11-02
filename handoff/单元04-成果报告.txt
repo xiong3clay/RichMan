@@ -1,0 +1,45 @@
+单元 04 成果报告
+日期：2026-11-02
+执行：Trae CN（04A）→ Qoder CN 复核 → Codex/GPT（04B）→ Qoder CN 复核 → Harness 验收
+方案版本：V1.3.2
+
+【结论】
+单元 04 = 完成（代码验证通过，人工验收待 05）。同源服务器、房间大厅、稳定身份、恢复码、重连、命令队列/去重、
+计时器全部落地；core 134 条、server 80 条测试通过，typecheck/build 通过。
+未做真实手机/局域网真人验收（属 05），04 的会话与去重仅内存、重启不保留（属 06）。
+
+【04A 完成项】
+- ws 库实现 /ws、JSON 校验、maxPayload、非 /ws 升级销毁
+- 房间：4～8 位字符串房间码（前导零、碰撞重试）、2～10 人、服务端分配座位、房主开始、开局冻结、断线保座
+- POST /api/rooms 同源建房；/health 真实 rooms/connections
+- 连接归属 tokenOwners + REPLACED（M2 修复）；token 不进 URL（M1 修复）
+
+【04B 完成项】
+- session.ts：sessionToken / recoveryCode 各 256 位、只存 sha256 摘要、resume 消息体恢复、恢复码轮换 token、同房绑定、epoch
+- command-queue.ts：每房间串行；键 (gameId, playerId, commandId)；payloadHash 规范化；终局成功/失败结果整局累积；
+  分类版本校验（行动严格 version、下注按 roundId+phaseInstanceId、请求按 requestId、到期按 loanId+pendingDueLoanId）
+- scheduler.ts：只走 advanceSystem；phaseInstanceId/epoch 校验；迟到 deadline 逐窗口追赶、每次一次提交/广播；仅 BETTING 取开奖结果
+- ws.ts：10s ping/pong、两次无 pong 关闭、限流、私有事件按 audience 过滤、金额字符串编码、被替换连接不标离线
+- protocol.ts：resume、游戏命令/结果/快照/事件 schema、错误码
+
+【复核发现并修复】
+04A（Qoder）：M1 token 走 URL、M2 无连接归属、M3 无建房入口 → 全修 + 网络测试。
+04B（Qoder）：M1 银行到期贷款存在性泄露（BANK_DUE_PENDING 与 snapshot.pendingDueLoanId 对全员可见）→ 已改为
+  仅借款人可见，并补 3 条测试（三人隐私、URL 回归、替换后半开）。
+
+【验证结果】
+pnpm test:core   → 10 文件 / 134 条通过
+pnpm test:server → 5 文件 / 80 条通过
+pnpm typecheck   → 退出码 0
+pnpm build       → 退出码 0
+
+【未完成 / 已归类的遗留（详见 单元04-注意事项.txt）】
+- 去重表先写后提交的原子性（06 持久化时一次快照提交）
+- 计时器/commit 失败的静默停摆与 ROOM_PAUSED 出口（06）
+- recoveryCode 永不过期、不可主动重生成（05 提供入口，06 考虑一次性）
+- 快照缺 schemaVersion（05 前补）
+- 全局限流/Origin/房间回收（06）
+- 真人/真机验收（05）
+
+【提交】
+实现提交：见下一条提交

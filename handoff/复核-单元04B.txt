@@ -1,0 +1,197 @@
+复核-单元04B（身份 / 恢复码 / 重连 / 命令队列 / 去重 / 计时器）
+复核人：Qoder（只读复核；未改代码、未 commit）
+复核时间：2026-11-02
+基线：HEAD 3c58d38（工作区未提交）；复核范围与用户给定一致。
+
+复核范围
+- apps/server/src/ws.ts（修改）
+- apps/server/src/rooms/manager.ts（修改）
+- apps/server/src/rooms/session.ts、command-queue.ts、scheduler.ts（新增）
+- packages/shared/src/protocol.ts（修改）
+- apps/server/tests/session.test.ts、commands.test.ts、scheduler.test.ts（新增）
+只读参考：packages/game-core/src/{engine,views,bank,private-loans,gamble}.ts、shared/{types,errors,money}.ts、
+handoff/单元04B-GPT规格.txt、docs/plans/Richman分阶段联机开发方案_V1.3精简施工版.txt 第四节。
+未改动 packages/game-core/**、apps/web/**（git diff --stat HEAD 为空）。
+
+======================================================================
+一、结论
+======================================================================
+04B 的核心机制实现正确：秘密只存摘要、消息体内恢复、epoch 连接替换、同房间串行队列、
+(gameId,playerId,commandId) 去重、按命令分类的版本校验、只由 advanceSystem 推进的计时器、
+getPlayerView/eventsForPlayer 投影、金额十进制字符串，均与 04B 规格一致；7 个必过场景均有
+断言余额/版本/事件的真测试，未发现“会算错钱”“重复结算”“旧连接把新连接标离线”等确定性缺陷。
+
+必须现在修 1 条：银行到期贷款（非失信、仍 ACTIVE）的“存在性 + 借款人 + loanId”会通过
+BANK_DUE_PENDING 事件和每份 snapshot 的 pendingDueLoanId 泄露给房间内所有玩家，与 V1.3
+第四节公开白名单（不含普通银行债务）不符。金额本身未泄露，但属于明文隐私矩阵违背。
+
+其余问题均为 05/06 范围：去重表先写后提交的原子性、计时器异常后的静默停摆、恢复码不轮换、
+缺少全局限流/Origin/房间回收、快照缺 schemaVersion 等，不阻塞 04B 收尾。
+
+======================================================================
+二、必须现在修
+======================================================================
+编号 | 文件:行号 | 问题 | 后果 | 建议
+-----|-----------|------|------|------
+M1 | apps/server/src/ws.ts:112（snapshot 无条件下发 pendingDueLoanId）；
+     apps/server/src/ws.ts:61-68（visibleEvents 未收窄 BANK_DUE_PENDING）；
+     事件源 packages/game-core/src/engine.ts:315（只读，不改）
+   | BANK_DUE_PENDING 的 payload 含 borrowerId + loanId，被 eventsForPlayer 当作公开事件
+     发给全员；同时每名玩家的 snapshot 都带 pendingDueLoanId。loanId 形如
+     "bank-<seatId>-r<round>-<n>"（engine.ts:785），本身又编码座位。V1.3 第四节明确：
+     公开只有昵称/座位/存活·危险·离线/信用/当前失信银行欠款/轮次阶段/允许公开的提交与结算；
+     非失信银行贷款属于“自己：全部金币、债务”；未参与合同者只能看公共信用与失信银行欠款。
+   | 第三人可得知“p1 当前有到期银行贷款”及其贷款编号，属于私人债务存在性与座位关联泄露，
+     可用于针对性策略；违背第四节隐私矩阵。金额未被泄露（p3 的 finance.bankLoans 为空、
+     publicPlayers.defaultedBankDebtCents 为 0，已实测）。
+   | 只在 server 投影层修，不动 game-core：
+     1) visibleEvents 中把 BANK_DUE_PENDING 归入私密事件，audience = [payload.borrowerId]
+        （或统一按 loanId 反查 state.bankLoans 的 borrowerId）；
+     2) snapshot 里仅当 identity.playerId === 该 pendingDueLoanId 对应贷款的 borrowerId
+        时下发真实 loanId，其他人给 null；若 05 需要“有人在处理到期贷款”的公开态，
+        另发一个不含身份/编号的布尔字段；
+     3) 在 session.test.ts 加 3 人真实 WS 测试（可用 RoomManager 的 createGameState 注入
+        一笔 dueRound=1 的 ACTIVE 贷款）：断言 p3 的 events 与 snapshot 都不含
+        BANK_DUE_PENDING/borrowerId/loanId，而 p1 仍能收到事件并完成 BANK_DUE_DECISION；
+        同时断言 p1 决策后 BANK_LOAN_REPAID 仍只给借款人。
+     4) 若产品明确希望“银行到期公开”，则不要改代码，改为在方案/交接中写明并补测试固化，
+        不能保持现状又不记录。
+
+======================================================================
+三、可延后到 05/06
+======================================================================
+D1（06，账务原子性）apps/server/src/rooms/command-queue.ts:104-106
+   先去重表 set，再 await commit。代码注释已说明 06 要把“去重结果 + 状态转移”作为一次快照提交。
+   现状 commit 是内存 Object.assign + 广播，正常路径不会抛；一旦 06 接持久化后写盘失败，
+   重发会命中缓存返回成功，但状态未落盘/未应用，属于“应答成功、钱没动”的风险。
+   建议：06 用一次原子快照写入同时覆盖 state 与去重表；或在 commit 抛错时删除该去重项再向上抛。
+
+D2（06，卡死出口）apps/server/src/rooms/scheduler.ts:96 与 ws.ts:127
+   advanceSystem 返回 !ok 时直接 throw；定时器回调在 scheduler.ts:65-68 只 console.error，
+   不会重排下一次唤醒；ws.ts:127 构造 RoomScheduler 时没有注入 onError。结果是房间计时器
+   静默停摆，客户端只看到不再推进，且没有 ROOM_PAUSED 通知（RULE_INVARIANT 文案却写着“已暂停房间”）。
+   合法状态下未找到触发路径（需要引擎不变量/commit 失败），故不算 04B 必修；06 接持久化后
+   commit 失败是现实路径。建议：注入 onError，对应房间置暂停态、广播 ROOM_PAUSED 并保留
+   可恢复入口；补一条注入失败的定时器测试。
+
+D3（05/06，凭证策略）apps/server/src/rooms/session.ts:120-127
+   recoveryCode 命中后只轮换 sessionToken，recoveryCode 本身永不过期、可重复使用；每次使用都会
+   作废上一枚 token 并顶掉上一连接。已实测：同一恢复码连续使用两次均成功，前一枚 token 均
+   UNAUTHORIZED。规格只要求“旧 token 立即失效”，所以不算违规；但恢复码一旦泄露等于永久后门。
+   方案允许“仍有有效会话时生成新恢复码并立即作废旧码”，该接口/UI 未实现（属 05）。建议：
+   05 提供重新生成恢复码入口并写清“恢复码遗失不可凭昵称找回”；06 可考虑一次性轮换（需产品确认）。
+
+D4（05，协议清理）packages/shared/src/protocol.ts:37-44
+   SliceBetPayloadSchema 未被任何地方使用，且字段名是 bet 而线上实际是 betCents；05 接 UI 时
+   容易被误导。建议删除或改成与 ClientGameCommandSchema 一致的 betCents。
+
+D5（05，快照字段）apps/server/src/ws.ts:105-114 / packages/game-core/src/views.ts:108-117
+   V1.3 第四节要求快照含 schemaVersion，当前 wire snapshot 只有 gameId/version/round/phase/
+   serverNow/deadlineAt 等，没有 schemaVersion（game-core 的 schemaVersion 只用于存档）。
+   不涉及钱/卡死/泄露，但 05 一旦依赖再改协议成本更高；建议 05 开工前补上并在 ServerLobbyMessage
+   里固化。
+
+D6（05，隐私细节）apps/server/src/ws.ts:112（pendingDueLoanId 之外）
+   snapshot 的 deadlineAt 取引擎全局截止；私有借款请求会把截止缩短到请求窗口，第三人可通过
+   截止值变化推断“存在一笔私人请求”。方案又要求快照带 deadlineAt，二者有张力。建议 05 明确
+   是否需要按查看者下发截止（借款双方看请求截止，其他人看阶段截止），无需在 04B 改。
+
+D7（05，重复推送）apps/server/src/ws.ts:200
+   processor 返回后再次 snapshot，而 commit 已经向该连接发过同一版本快照；每笔命令多一份重复
+   快照，不伤正确性（客户端应按最高版本采用），但 05 若对消息做严格顺序断言会受影响。建议 05 前
+   删掉这次补发，或仅在 commit 未覆盖该连接时补发。
+
+D8（06，运维防护）ws.ts:227-228 仅按连接限流；无按 IP/房间的限流、无 Origin 白名单、无房间 TTL。
+   04B 规格已把房间回收留给 06；建议 06 一并补上，避免建房接口被刷爆内存。
+
+D9（低，隐私）engine.ts:1006/1028/1066/1080 的 LOAN_REQUEST_CLOSED、337/391 的
+   LOAN_REQUEST_EXPIRED 仍公开，但 payload 只有 requestId/status，无当事人与金额；第三人无法
+   与 LOAN_REQUESTED（仅双方可见）关联。若产品要求“私人请求存在性也不公开”，可给这两类事件加
+   audience [borrower,lender]；当前不构成金额/当事人泄露。
+
+======================================================================
+四、测试缺口（建议补的断言）
+======================================================================
+1. M1 的三人真实 WS 隐私测试（注入 due 贷款；断言 p3 看不到 BANK_DUE_PENDING 与 pendingDueLoanId，
+   p1 仍能 BANK_DUE_DECISION；同时断言金额事件仍只给借款人）。
+2. URL 回归：连接 /ws?room=X&sessionToken=... 不应仅凭 URL 获得身份；必须发 resume 消息才 joined。
+   现在 token 已从 URL 移除，但没有测试锁死这个安全性质。
+3. 被替换连接的半开：新连接 bind 后，对旧连接触发一次心跳 tick，断言新连接仍 online=true、
+   game 状态不变（现有 half_open_closed 只测单连接；replace_connection 只测正常 close）。
+4. 大厅 leave 后用 sessionToken（不是 recoveryCode）resume：断言 UNAUTHORIZED 且不新建座位
+   （现有 leave_detaches 只用 recoveryCode 测）。
+5. 恢复码重复使用行为固化：连续用同一恢复码 resume 两次，断言第一枚 token 失效、第二枚生效、
+   座位/金币/deadline 不变（实测行为，应写成测试防止无意改动）。
+6. 私有请求窗口的真实计时器：ACTION 截止晚于请求截止时，advanceDue 在请求截止触发
+   LOAN_REQUEST_EXPIRED、截止回到行动窗口、且不消耗 draw；现有 scheduler 测试只覆盖 ACTION 超时。
+7. 跨阶段追赶：一个 advanceDue 窗口内跨 BETTING→TAX→下一轮 INTEREST，断言只开奖一次
+   （draw 调用一次）、每个 version 一次 commit/broadcast；现有 late_deadlines 只覆盖两次 ACTION 超时。
+8. 下注命令的去重重发：BET_SETTLED 之后用原 commandId 原载荷重发，断言返回原成功、不重新下注、
+   不重复结算、余额/version 不变（现有 ack_lost_retry 只测转账）。
+9. BANK_DUE_DECISION 的去重重发：第一笔决策已推进到下一笔 pendingDueLoanId 后用原 commandId
+   重发，断言命中缓存、下一笔贷款仍 ACTIVE、未被误处理（现有测试只测换 ID 的旧实例）。
+10. 计时器失败出口：注入 advanceSystem 失败或 commit 抛错，断言 onError 被调用、房间进入暂停态/
+    广播 ROOM_PAUSED，且不会无限重试（对应 D2）。
+11. 传输边界：>16KiB 帧、未知命令 type、数字金额、payload 非对象，在 WS 层断言连接关闭或
+    INVALID_MESSAGE 且 state/version 不变（wire_schema 只测 zod，未测真实 WS 行为）。
+12. 秘密不外泄的全量断言：把 snapshot/events/command_result/room/joined（joined 除外，token 只给本人）
+    全部 JSON.stringify，断言不含 sessionToken/recoveryCode；并断言 joined 只向本人发。
+13. 去重隔离：两个房间各有一名 p1，使用同一 commandId 各自执行（键含 gameId），断言互不影响。
+14. 下注事件的金额保密：除 snapshot 外，断言 BET_SUBMITTED 事件/他人 events 中不含
+    betCents/guess/leverage（ten_bets_same_version 目前只查 snapshot）。
+15. DANGER_RESCUED 的他人视图：断言第三人收到的事件无 cents/centsAfter（TAX_CHARGED 已有类似断言）。
+
+======================================================================
+五、你实测复现过的问题
+======================================================================
+以下命令均为只读执行，未改代码、未写额外文件。
+
+1) 基线测试
+   pnpm -s test:core
+     -> Test Files 10 passed (10)；Tests 134 passed (134)
+   pnpm -s test:server
+     -> Test Files 5 passed (5)；Tests 77 passed (77)
+        （commands 32、health 6、scheduler 9、session 18、rooms 12）
+   pnpm -s typecheck
+     -> 退出码 0，无错误输出
+   pnpm build：未执行。本任务只允许写 handoff/复核-单元04B.txt 一个文件，而 build 会写 dist；
+   用户给出的“build 0”本轮未独立复核。
+
+2) 恢复码行为探针（RoomManager + SessionRegistry，内存）
+   - token/recoveryCode 长度均为 43 字符（32 字节 base64url，256 位熵）。
+   - 用 recoveryCode resume 后：新 token 生效；旧 token 立即 UNAUTHORIZED。
+   - 同一 recoveryCode 再次 resume：再次签发新 token，上一枚 token 立即 UNAUTHORIZED。
+   结论：sessionToken 轮换正确；“恢复码可重复使用、永不过期”是现状（见 D3），非规格违规，
+   但应写测试固化并明确 05 的“重新生成恢复码”入口。
+
+3) 银行到期隐私（先 core 探针，再三人真实 WS 复现，对应 M1）
+   core 探针：构造 3 人初始状态 + p1 的 dueRound=1 ACTIVE 贷款，advanceSystem 后：
+     phase=BANK_DUE，pendingDueLoanId=bank-1-r1-0
+     eventsForPlayer(events, "p3") = ["PHASE_CHANGED","BANK_DUE_PENDING"]
+     p3 的 finance.bankLoans=[]，publicPlayers 中 p1 的 defaultedBankDebtCents=0
+   三人真实 WS（RoomManager.createGameState 注入同一笔贷款，p3 只旁观）：
+     p3 phase = BANK_DUE
+     p3 sees BANK_DUE_PENDING =
+       {"seq":2,"type":"BANK_DUE_PENDING","payload":{"loanId":"bank-1-r1-0","borrowerId":"p1"}}
+     p3 snapshot pendingDueLoanId = "bank-1-r1-0"
+     p3 own bankLoans = []
+     p3 publicPlayers 的 defaultedBankDebtCents 全为 "0"
+   结论：非失信银行贷款的存在性、借款人、贷款编号（编码座位）确实泄露给第三人；金额未泄露。
+   这是本轮唯一“必须现在修”的确定性隐私问题。
+
+4) 未复现的问题（明确记录，避免误报）
+   - 未复现任何“算错钱/重复结算”：去重、分类版本校验、draw 仅 BETTING、stale timer 丢弃、
+     旧 close 不标新连接离线，均有测试覆盖且本轮逐条核对代码路径未发现反例。
+   - 未复现“旧连接迟到消息改状态”：ws.ts:190/226 先判 replaced/closed，processor 在队列内
+     两次 authorize，commands.test 已覆盖排队期间与异步推进期间的替换。
+   - 未复现“伪造 actorId/playerId 改钱”：actorOf(engine.ts:1382-1388) 只认 ctx.actorId，
+     payload.playerId 不一致直接 UNAUTHORIZED，processor 在去重前先做同一校验。
+   - D2 的静默停摆只有注入引擎不变量失败/commit 抛错才可达，本轮未构造合法状态触发，
+     因此列为 06 风险而非当前必修。
+
+======================================================================
+六、给 05 的一句话入口
+======================================================================
+04B 可以进入 05，但先把 M1 的银行到期隐私投影修掉并补上测试；05 开工前同时处理 D4/D5/D6
+（删未用 schema、补 schemaVersion、明确 per-viewer deadline），否则 05 的 UI 会把这些协议
+缺口固化成接口。

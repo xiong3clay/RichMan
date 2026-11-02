@@ -1,0 +1,29 @@
+单元 04 运行与验收说明
+环境：Node v24.18.0、pnpm 11.7.0、TypeScript 7.0.2、ws 8.x
+
+【命令】
+cd D:\Lianjunjie\biancheng\RichMan
+pnpm test:core      # 10 文件 / 134 条
+pnpm test:server    # 5 文件 / 80 条
+pnpm typecheck
+pnpm build
+pnpm start          # 默认 0.0.0.0:8000
+
+【手工验收（局域网，2 台设备）】
+1. 启动后访问 http://<局域网IP>:8000/health，应看到 ok=true、rooms/connections 为数字。
+2. POST /api/rooms（body {} 或 {"nickname":"甲"}）返回 4～8 位字符串房间码（如 "0042"）。
+3. 两个客户端连 /ws?room=<码>，发 {"type":"join","nickname":"甲"} / "乙"，收到 joined（含 playerId/seatId/sessionToken/recoveryCode）。
+4. 双方 ready:true → 房主发 {"type":"start"} → 收到 started，房间进入 PLAYING。
+5. 关闭其中一条连接：另一方收到 peer_left；用原 sessionToken 发 resume 回原座位。
+6. 用 recoveryCode 发 resume：拿到新 sessionToken，旧 token 再 resume 应 UNAUTHORIZED。
+7. 同一 token 两条连接：第二条 resume 后第一条收到 REPLACED 并关闭，旧连接 close 不影响新连接在线状态。
+
+【自动化覆盖】
+- apps/server/tests/session.test.ts：秘密隐私、刷新同座位、连接替换、换 origin 恢复、跨房拒绝、心跳半开、10 人同版本下注、应答丢失重发、私人事件过滤
+- commands.test.ts：串行、去重（成功/失败/换载荷）、分类版本校验、伪造身份、跨房间隔离
+- scheduler.test.ts：准时推进、迟到追赶、旧计时器丢弃、房间隔离、仅 BETTING 开奖
+
+【未验证项】
+- 真实手机/另一台电脑（05）
+- WebSocket 经过 Cloudflare 隧道（06）
+- 进程重启后的会话/状态恢复（06，当前仅内存）

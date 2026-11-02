@@ -1,0 +1,56 @@
+单元04B运行与验收说明
+【Qoder窄修后的最新验收】
+pnpm test:server：80/80（原77+本轮A/B/C三条）；pnpm test:core：134/134；
+pnpm typecheck / pnpm build：exitCode=0。
+真实输出：artifacts/test-logs/04B-Qoder-{server,core,typecheck,build}-final.txt。
+银行到期事件及pendingDueLoanId只给借款人，其他人快照字段为null；
+未新增公开到期提示。后文77/211为首轮验收记录，本轮pnpm test未重跑。
+
+环境：Windows / Node v24.18.0 / pnpm 11.7.0。
+工作目录：D:\Lianjunjie\biancheng\RichMan。
+安装：pnpm install（本轮依赖未变，无新增依赖）。
+构建：pnpm build；启动：pnpm start（默认0.0.0.0:8000，打印实际端口及LAN地址）。
+页面：http://localhost:8000/；手机使用启动日志中的LAN地址；/health只含健康统计。
+本轮没有游戏UI，apps/web页面仍为04A占位，不能从页面完成全部游戏验收。
+
+建房：POST /api/rooms，JSON {}或{"nickname":"甲"}，返回公开数字roomCode。
+WS：/ws?room=<roomCode>；URL不得携带sessionToken/recoveryCode。
+首次消息：{"type":"join","nickname":"甲"}。
+本人joined返回playerId/seatId/roomCode/sessionToken/recoveryCode/connectionEpoch。
+恢复码只首次返回；妥善单独保存，不能放公开邀请/日志。
+ready：{"type":"ready","ready":true}；所有玩家ready后房主发{"type":"start"}。
+开局可包含离线ready玩家，冻结名单不删离线座位。
+
+自动同源恢复：新WS发{"type":"resume","roomCode":"...","sessionToken":"..."}。
+换设备/地址恢复：新WS发{"type":"resume","roomCode":"...","recoveryCode":"..."}。
+预期：回原玩家/座位；恢复码路径给新token并撤销旧token；新连接epoch递增；
+旧连接收到REPLACED并关闭，旧close不把新连接标离线；游戏余额/合同/行动/锁注/deadline不重置。
+无效或跨房凭证返回UNAUTHORIZED，不新增座位。
+
+游戏命令直接使用type=引擎命令名，而非另加command包装。
+示例：{"protocolVersion":1,"gameId":"...","commandId":"唯一ID","type":"BORROW_BANK",
+"payload":{"amountCents":"500"},"expectedGameVersion":1}。
+所有Cents金额（含cents字段）为规范十进制字符串；rateBps/guess/leverage仍为数值。
+私人请求用principalCents；还款/催收用cents；下注用betCents。
+SUBMIT_BET必须带roundId+phaseInstanceId；私人应答指向requestId；
+BANK_DUE_DECISION必须payload.loanId匹配pendingDueLoanId。
+actorId来自连接，不接受客户端信封字段；payload.playerId不一致则拒绝。
+command_result保留该命令原gameVersion/outcome；重复命令不会执行/重开奖。
+snapshot另送最新本人视图；客户端不能用旧命令应答覆盖较新快照。
+每秒每连接最多60条入站消息；单条上限16KiB；超过限流返回RATE_LIMITED。
+
+自动验收：
+pnpm test:core → 134/134
+pnpm test:server → 77/77（18旧+59新增）
+pnpm typecheck → 0
+pnpm build → 0
+pnpm test → 211/211
+日志：artifacts/test-logs/04B-*-final.txt；逐项测试目的见单元04B-成果报告.txt。
+
+人工验收待执行：
+1 同一浏览器刷新，确认原座位/金币/合同/行动/待办/锁注/剩余时限不重置。
+2 第二页面恢复，旧页面提示REPLACED并停止自动重连（UI在05实现）。
+3 换origin，确认新origin读不到旧localStorage；输入个人恢复码可回座位。
+4 手机断网不发close，观察两个未应答ping后离线且座位保留；重新联网恢复。
+5 实际公网设备建立WSS；当前未验证公网、真机或物理断网。
+控制帧心跳10s发ping，第一次10s发出，20s记一次未应答，30s记第二次并关闭。

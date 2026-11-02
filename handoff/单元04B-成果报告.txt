@@ -1,0 +1,158 @@
+单元04B成果报告
+【最新补充：Qoder复核窄修，2026-11-02】
+仅改ws.ts的BANK_DUE_PENDING及pendingDueLoanId投影；session.test.ts仅追加3条，
+与修复前原文按完整前缀比较一致，原18条及其他旧测试未改；不改core/web/docs，不commit。
+M1：BANK_DUE_PENDING按loanId反查真实借款人，仅该人可见；
+snapshot仅借款人保留pendingDueLoanId，其他人null，无额外公开布尔字段。
+新增3项：
+A bank_due_identity_private：三人真实WS注入到期贷款，p2/p3均无到期身份/编号；
+  p1真实BANK_DUE_DECISION成功得到私密BANK_LOAN_SETTLED，再偿还另一笔未到期贷款，
+  BANK_LOAN_REPAID也仅p1收到，余额/贷款余额有真实断言。
+B session_token_url_requires_resume：URL含sessionToken仍NOT_JOINED且未joined；
+  消息体resume后才回原座位，无新增玩家。
+C replaced_half_open_heartbeat：旧连接禁用pong并暂停真实TCP读取以阻止close握手；
+  新bind后心跳令服务端连接数3降2（旧端仍暂停），新连接仍在线且整个游戏状态不变。
+先红：04B-Qoder-red.txt，A因p3收到真实pendingDueLoanId失败，B/C通过；
+后绿：04B-Qoder-green.txt，新增3/3通过。
+最终真实命令（04B-Qoder-{server,core,typecheck,build}-final.txt）：
+pnpm test:server → 5文件 / 80 passed (80)，原77+本轮3，exitCode=0。
+pnpm test:core → 10文件 / 134 passed (134)，exitCode=0。
+pnpm typecheck → tsc --noEmit -p tsconfig.json，exitCode=0。
+pnpm build → 117 modules transformed，built in 220ms，exitCode=0。
+独立只读复核无阻塞；C另补等待正常peer的ping后再发屏障，保证pong先于屏障消息。
+本轮未额外重跑pnpm test；下方211是首轮历史记录，不作本轮新鲜证据。
+05是否需要银行到期公开态待议，本轮未实现；真人/真机等原未验证项不变。
+以下保留04B首轮记录供追溯，最新测试数以上述80/134为准。
+
+日期：2026-11-02（Asia/Shanghai）
+结论：代码验证通过，人工验收待完成。仅04B；按用户要求不commit。
+基线提交：3c58d38925553eae9f0c175b6cfa0023423538b5；本轮验证对象为此基线上的未提交工作区。
+
+【范围确认】
+唯一任务规格：handoff/单元04B-GPT规格.txt。
+用户本轮明确确认：保留p1～p10与数字seatId，随机熵要求用于两个独立秘密。
+用户本轮明确允许：manager.ts最小身份恢复/轮换接口与开局空洞座位映射。
+未改game-core、web源码、docs、依赖与lockfile；旧测试未改；没有commit。
+
+【完成项与变更文件】
+apps/server/src/ws.ts：resume/游戏信封接线、身份epoch替换、10s控制帧心跳、
+  连续两次未pong关闭、限流、同房队列、引擎视图与事件的逐人隐私过滤、金额字符串编码。
+apps/server/src/rooms/session.ts（新增）：独立256位秘密、sha256摘要映射、
+  同房恢复、恢复码轮换token、内存SessionStore注入接口、epoch与身份操作。
+apps/server/src/rooms/command-queue.ts（新增）：串行队列、整局去重与原始成功/失败结果、
+  规范化信封hash、分类版本校验、连接身份校验、到期优先及wire金额解码。
+apps/server/src/rooms/scheduler.ts（新增）：advanceSystem、phase/deadline/epoch校验、
+  按历史deadline追赶、逐转移提交/广播、仅BETTING生成安全开奖结果。
+apps/server/src/rooms/manager.ts：用户批准的摘要轮换/按身份操作接口、
+  显式无效join token拒绝、冻结名单保留非连续座位。
+packages/shared/src/protocol.ts：resume、游戏命令/结果/快照/事件schema、错误码；
+  外层严格信封不接受客户端actorId；金额走规范十进制字符串。
+apps/server/tests/session.test.ts（新增）：18项身份/真实WS/隐私与金额编码测试。
+apps/server/tests/commands.test.ts（新增）：32项串行、去重、分类校验与权限测试。
+apps/server/tests/scheduler.test.ts（新增）：9项真实队列与引擎的定时推进测试。
+handoff/单元04B-成果报告.txt、运行与验收说明.txt、下一阶段交接.txt、注意事项.txt，
+以及handoff/项目当前状态.txt：本轮交接。
+
+【七个必过场景与测试名】
+1 refresh_same_seat → session.test.ts / refresh_same_seat: resume保留金币、行动、待办、合同与原deadline及已锁下注
+2 replace_connection → session.test.ts / replace_connection: epoch递增且旧close/旧消息不影响新连接与游戏
+  补充commands.test.ts的排队期间被替换、异步推进期间被替换测试。
+3 ack_lost_retry → session.test.ts / ack_lost_retry: 断线恢复后原转账命令只执行一次且同ID改金额被拒
+  同名commands.test.ts真实转账重放测试补充覆盖。
+4 ten_bets_same_version → session.test.ts / ten_bets_same_version: 十个真实WS同版本下注全部一次接受且他人锁注金额保密
+  commands.test.ts同名测试验证只结算一轮。
+5 recover_different_origin → session.test.ts / recover_different_origin: recoveryCode回原座位并立即作废旧token
+6 stale_timer_ignored → scheduler.test.ts两个同前缀测试：
+  replaced deadline within the same ACTION instance cannot time out the next seat；
+  validates after queue wait and ignores duplicate callback。
+  session.test.ts / pong_keeps_online验证重复心跳不改版本/截止。
+7 half_open_closed → session.test.ts / half_open_closed: 每10s ping，两次无pong关闭并保留离线座位
+
+【真实命令输出摘要】
+pnpm test:core：Test Files 10 passed (10)；Tests 134 passed (134)；exitCode=0。
+pnpm test:server --reporter=verbose：Test Files 5 passed (5)；Tests 77 passed (77)；exitCode=0。
+  原18项 + 新59项（session18 / commands32 / scheduler9），均通过。
+pnpm typecheck：tsc --noEmit -p tsconfig.json；exitCode=0。
+pnpm build：vite v8.3.5，117 modules transformed，built in 205ms；exitCode=0。
+pnpm test：Test Files 15 passed (15)；Tests 211 passed (211)；exitCode=0。
+最终日志：artifacts/test-logs/04B-{core,server,typecheck,build,all}-final.txt。
+测试先红证据：04B-session-red.txt、04B-commands-red.txt、04B-scheduler-red.txt；
+  金额与隐私专项红灯：04B-error-money-red.txt、04B-tax-money-red.txt、04B-event-privacy-red.txt。
+专项修复绿灯：04B-session-green.txt、04B-event-privacy-green.txt，以及最终全量日志。
+最初沙箱内loopback EACCES，不作为业务失败/通过；允许本机网络的执行环境重跑后为上述结果。
+
+【独立复核】
+另一agent对队列、会话/WS/协议复核，另一agent对scheduler用Object.assign提交方式复核。
+修复了失败应答/收税金额编码，以及冻结引擎公共事件中的银行金额/他人余额泄漏。
+最终定向session18/18、typecheck通过，当前04B范围无剩余阻塞。
+仅在传输层过滤，不改变引擎事件源、规则、余额或核心测试。
+
+【未完成/未核实】
+真人/真机、浏览器localStorage origin隔离、物理断网、公网WSS：未验证。
+跨origin测试为不同Origin头的新WS；半开为真实WS关闭autoPong并注入心跳时钟，非物理断网。
+已排队旧WS帧未做网络级竞态注入；由执行时epoch的异步队列测试与独立代码复核覆盖。
+持久化、房间回收、界面属于06/05；当前仅内存，不可声称重启恢复。
+06必须把状态和去重结果原子提交；当前commit为同步内存替换，注入可拒绝的异步commit尚不安全。
+没有生成本轮提交号，按用户要求保持未提交。
+
+【每个新增测试验证什么】
+以下清单由最终真实verbose日志提取，测试名即其验收行为；参数化场景逐项列出。
+1. apps/server/tests/session.test.ts > join_secrets_private: 独立256位秘密只发本人，不出现在房间广播和health
+2. apps/server/tests/session.test.ts > refresh_same_seat: resume保留金币、行动、待办、合同与原deadline及已锁下注
+3. apps/server/tests/session.test.ts > replace_connection: epoch递增且旧close/旧消息不影响新连接与游戏
+4. apps/server/tests/session.test.ts > recover_different_origin: recoveryCode回原座位并立即作废旧token
+5. apps/server/tests/session.test.ts > resume_room_bound: 跨房token/恢复码与无效join token均拒绝且不新建座位
+6. apps/server/tests/session.test.ts > leave_detaches_before_broadcast: 离开者不接收自己的peer_left且大厅身份撤销
+7. apps/server/tests/commands.test.ts > RoomCommandQueue > 同房间异步任务按入队顺序执行，其他房间不被阻塞
+8. apps/server/tests/commands.test.ts > RoomCommandQueue > 异步失败原样拒绝，后续任务仍能执行
+9. apps/server/tests/commands.test.ts > GameCommandProcessor > 排队期间被新连接替换的身份在执行前拒绝，重复命令也不能绕过 epoch 校验
+10. apps/server/tests/commands.test.ts > GameCommandProcessor > 非 BETTING 命令不会请求开奖结果
+11. apps/server/tests/commands.test.ts > GameCommandProcessor > 异步推进期间身份被替换后，不再执行玩家命令或缓存其结果
+12. apps/server/tests/commands.test.ts > GameCommandProcessor > ack_lost_retry：真实私人转账重发只执行一次，同 ID 换载荷拒绝
+13. apps/server/tests/commands.test.ts > GameCommandProcessor > ten_bets_same_version：十人同时持同一版本下注全部接受并只结算一轮
+14. apps/server/tests/commands.test.ts > GameCommandProcessor > 完整客户端信封规范化对象键序；嵌套键序变化重发返回原结果
+15. apps/server/tests/commands.test.ts > GameCommandProcessor > 去重摘要保留版本等信封字段，也区分 wire 字符串与内部数值
+16. apps/server/tests/commands.test.ts > GameCommandProcessor > 纯业务拒绝缓存原始失败与版本，重试不会推进或提交
+17. apps/server/tests/commands.test.ts > GameCommandProcessor > SUBMIT_BET 的伪造 playerId 在到期推进前拒绝
+18. apps/server/tests/commands.test.ts > GameCommandProcessor > BORROW_BANK 的伪造 playerId 在到期推进前拒绝
+19. apps/server/tests/commands.test.ts > GameCommandProcessor > ACCEPT_PRIVATE_LOAN 的伪造 playerId 在到期推进前拒绝
+20. apps/server/tests/commands.test.ts > GameCommandProcessor > 未知连接身份即使命中别人的 commandId 也不能读结果或推进
+21. apps/server/tests/commands.test.ts > GameCommandProcessor > gameId 不匹配不能改变本局，去重键按玩家隔离
+22. apps/server/tests/commands.test.ts > GameCommandProcessor > 行动必须严格携带当前 expectedGameVersion（收到 undefined）
+23. apps/server/tests/commands.test.ts > GameCommandProcessor > 行动必须严格携带当前 expectedGameVersion（收到 0）
+24. apps/server/tests/commands.test.ts > GameCommandProcessor > 截止先推进后版本校验：晚到行动不能使用截止前版本
+25. apps/server/tests/commands.test.ts > GameCommandProcessor > 行动截止在 advance 与 apply 之间到达时，不接受基于上一人阶段版本的操作
+26. apps/server/tests/commands.test.ts > GameCommandProcessor > 下注要求本轮与当前阶段实例 {"phaseInstanceId":"unused"}
+27. apps/server/tests/commands.test.ts > GameCommandProcessor > 下注要求本轮与当前阶段实例 {"roundId":1}
+28. apps/server/tests/commands.test.ts > GameCommandProcessor > 下注要求本轮与当前阶段实例 {"roundId":0,"phaseInstanceId":"unused"}
+29. apps/server/tests/commands.test.ts > GameCommandProcessor > 已锁注玩家新 commandId 仍被引擎拒绝 ALREADY_LOCKED
+30. apps/server/tests/commands.test.ts > GameCommandProcessor > 私人请求拒绝忽略旧全局版本，指定出借人之外无权处理
+31. apps/server/tests/commands.test.ts > GameCommandProcessor > 私人请求到期先推进，旧请求同意失败且不会转账
+32. apps/server/tests/commands.test.ts > GameCommandProcessor > 信封 requestId 可用于请求应答，信封与载荷冲突则拒绝
+33. apps/server/tests/commands.test.ts > GameCommandProcessor > 银行到期必须指向当前 pendingDueLoanId（收到 undefined）
+34. apps/server/tests/commands.test.ts > GameCommandProcessor > 银行到期必须指向当前 pendingDueLoanId（收到 due-2）
+35. apps/server/tests/commands.test.ts > GameCommandProcessor > 银行到期忽略旧全局版本，核对借款人与待决实例
+36. apps/server/tests/commands.test.ts > GameCommandProcessor > 银行截止在 advance 与 apply 之间到达时，旧贷款决策不能误处理下一笔
+37. apps/server/tests/commands.test.ts > GameCommandProcessor > 保存去重结果先于异步 commit，execute 等待提交后才返回
+38. apps/server/tests/commands.test.ts > GameCommandProcessor > 整局累积保留早期命令，调用方修改返回值不改变缓存
+39. apps/server/tests/scheduler.test.ts > room_scheduler > initializes INTEREST with no deadline without a client command
+40. apps/server/tests/scheduler.test.ts > room_scheduler > advances exactly at the deadline, never early, then arms the next seat
+41. apps/server/tests/scheduler.test.ts > room_scheduler > late deadlines catch up each expired window with one commit per engine version
+42. apps/server/tests/scheduler.test.ts > room_scheduler > stale_timer_ignored: replaced deadline within the same ACTION instance cannot time out the next seat
+43. apps/server/tests/scheduler.test.ts > room_scheduler > stale_timer_ignored: validates after queue wait and ignores duplicate callback
+44. apps/server/tests/scheduler.test.ts > room_scheduler > keeps room timers isolated while another room queue is blocked
+45. apps/server/tests/scheduler.test.ts > room_scheduler > advanceDue can run inside the room queue without enqueueing itself
+46. apps/server/tests/scheduler.test.ts > room_scheduler > only requests a draw when an expired BETTING phase settles, preserving real balances
+47. apps/server/tests/scheduler.test.ts > room_scheduler > close clears timers and invalidates callbacks already waiting in the queue
+48. apps/server/tests/session.test.ts > offline_ready_roster: 全员断线仍保留准备和座位；带空洞名单开局身份正确
+49. apps/server/tests/session.test.ts > ten_bets_same_version: 十个真实WS同版本下注全部一次接受且他人锁注金额保密
+50. apps/server/tests/session.test.ts > ack_lost_retry: 断线恢复后原转账命令只执行一次且同ID改金额被拒
+51. apps/server/tests/session.test.ts > private_events_filtered: 第三人快照/事件不含私人请求、合同金额
+52. apps/server/tests/session.test.ts > half_open_closed: 每10s ping，两次无pong关闭并保留离线座位
+53. apps/server/tests/session.test.ts > session_store_digests: 注入store只存摘要，复用store可恢复且轮换删除旧索引
+54. apps/server/tests/session.test.ts > wire_schema: 客户端不能注入actorId或系统命令，金额必须为规范十进制字符串
+55. apps/server/tests/session.test.ts > pong_keeps_online: 匹配pong持续保活，心跳不会改变游戏版本或截止
+56. apps/server/tests/session.test.ts > command_error_money_strings: 真实催收失败的合法上限也按字符串分传输
+57. apps/server/tests/session.test.ts > tax_event_money_strings: 第三轮真实收税事件的centsAfter为字符串分
+58. apps/server/tests/session.test.ts > bank_events_private: 普通银行借款与还款只向借款人发金额事件
+59. apps/server/tests/session.test.ts > settlement_balance_private: 公开开奖结果保留盈亏但不泄漏他人余额及透支贷款

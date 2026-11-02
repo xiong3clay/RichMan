@@ -1,0 +1,31 @@
+单元 04 → 单元 05 交接
+
+【服务端已就绪的入口（05 直接用）】
+- POST /api/rooms  {nickname?} → {ok, roomCode}
+- WS /ws?room=<公开房间码>
+  客户端消息：join {nickname}、ready {ready}、leave、start、resume {sessionToken?|recoveryCode?}、游戏命令信封
+  服务端消息：joined（含 sessionToken/recoveryCode，仅本人）、room、started、peer_left、error、snapshot、events
+- /health：ok/service/version/protocolVersion/uptimeSec/connections/rooms/serverNow
+- 游戏命令信封走 command-queue：{protocolVersion, gameId, commandId, type, payload, expectedGameVersion?, roundId?, phaseInstanceId?, requestId?}
+  金额一律规范十进制字符串；actorId 只能由连接注入（payload 里伪造会被拒）。
+
+【单元 05 目标（V1.3）】
+最小可玩联机 + 首次真人试玩：两名真实浏览器玩家完成一整轮；开服电脑 + 另一台电脑/手机加入核对公共状态；
+至少一次刷新 + 断网恢复；记录操作耗时/等待/理解困难；不做完整借贷 UI（07）、不做美术。
+
+【05 建议实现顺序】
+1. apps/web 大厅页：输入昵称 → 建房（POST /api/rooms）或输码加入 → 房间列表/准备/开始
+2. 游戏页最小操作：银行借/还、结束行动、下注、自己状态、阶段与倒计时（数据全部来自 snapshot）
+3. 客户端连接层：resume（sessionToken）、断线退避重连、按最高 version 采用快照
+4. 到期/危险先走默认超时路径；私人借贷完整 UI 留到 07
+5. 端到端脚本：两浏览器（Playwright 或手工）跑完整一轮；记录真机/真人结论
+
+【必须遵守的接口/语义】
+- 前端不自行计算金币/债务，只渲染服务端 snapshot；金额按十进制字符串解析为展示文本
+- 快照/事件按玩家过滤：私人合同、未开奖下注、到期贷款存在性都不进他人视图
+- 恢复：sessionToken 同源自动恢复；recoveryCode 跨设备/换域名手动恢复
+- 计时器由服务器 advanceSystem 驱动，前端只显示 deadlineAt 倒计时，不做权威
+
+【当前基线】
+core 134 条、server 80 条。05 不得改旧测试；新增 UI 依赖（如 zustand）需先说明。
+所有 04 遗留的 05/06 待办见 单元04-注意事项.txt。

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { MAX_MONEY_CENTS, MAX_MONEY_DIGITS } from "./money.js";
 import { RULES, SERVER_DEFAULTS } from "./rules.js";
 import { PHASES, ROOM_STATE } from "./types.js";
+import { ERROR_CODES } from "./errors.js";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -78,12 +79,39 @@ export const LobbyJoinSchema = z
 export const LobbyReadySchema = z.object({ type: z.literal("ready"), ready: z.boolean() }).strict();
 export const LobbyLeaveSchema = z.object({ type: z.literal("leave") }).strict();
 export const LobbyStartSchema = z.object({ type: z.literal("start") }).strict();
+export const ResumeSchema = z.object({
+  type: z.literal("resume"),
+  roomCode: RoomCodeSchema,
+  sessionToken: z.string().min(16).max(128).optional(),
+  recoveryCode: z.string().min(16).max(128).optional(),
+}).strict().refine(value => value.sessionToken !== undefined || value.recoveryCode !== undefined,
+  { message: "需要sessionToken或recoveryCode" });
+
+export const GAME_COMMAND_TYPES = [
+  "BORROW_BANK", "REQUEST_PRIVATE_LOAN", "ACCEPT_PRIVATE_LOAN", "REFUSE_PRIVATE_LOAN",
+  "CANCEL_PRIVATE_LOAN", "REPAY_BANK", "REPAY_PRIVATE", "COLLECT_PRIVATE", "END_ACTION",
+  "BANK_DUE_DECISION", "SUBMIT_BET", "RESCUE_GIVE_UP",
+] as const;
+
+/** Wire amounts remain canonical decimal cents; the server decodes them for the frozen engine. */
+export const ClientGameCommandSchema = GameCommandSchema.extend({
+  type: z.enum(GAME_COMMAND_TYPES),
+  payload: z.record(z.string(), z.unknown()),
+}).superRefine((command, ctx) => {
+  for (const field of ["amountCents", "principalCents", "betCents", "cents"]) {
+    const value = command.payload[field];
+    if (value !== undefined && !MoneyStringSchema.safeParse(value).success) {
+      ctx.addIssue({ code: "custom", path: ["payload", field], message: "金额必须为规范整数字符串" });
+    }
+  }
+});
 
 export const ClientLobbyMessageSchema = z.discriminatedUnion("type", [
   LobbyJoinSchema,
   LobbyReadySchema,
   LobbyLeaveSchema,
   LobbyStartSchema,
+  ResumeSchema,
 ]);
 export type ClientLobbyMessage = z.infer<typeof ClientLobbyMessageSchema>;
 
@@ -98,6 +126,8 @@ export const LOBBY_ERROR_CODES = [
   "NOT_ALL_READY",
   "NOT_ENOUGH_PLAYERS",
   "REPLACED",
+  "UNAUTHORIZED",
+  "RATE_LIMITED",
 ] as const;
 export type LobbyErrorCode = (typeof LOBBY_ERROR_CODES)[number];
 
@@ -128,6 +158,8 @@ export const JoinedMessageSchema = z
     seatId: z.number().int().min(1).max(RULES.playerMax),
     sessionToken: z.string().min(16),
     roomCode: RoomCodeSchema,
+    recoveryCode: z.string().min(16).optional(),
+    connectionEpoch: z.number().int().positive().optional(),
   })
   .strict();
 
@@ -152,11 +184,31 @@ export const LobbyErrorSchema = z
   .object({ type: z.literal("error"), code: z.enum(LOBBY_ERROR_CODES), message: z.string() })
   .strict();
 
+export const CommandResultMessageSchema = z.object({
+  type: z.literal("command_result"),
+  commandId: z.string(), gameId: z.string(), gameVersion: z.number().int().nonnegative(),
+  outcome: z.discriminatedUnion("ok", [
+    z.object({ ok: z.literal(true) }).strict(),
+    z.object({ ok: z.literal(false), code: z.enum(ERROR_CODES), message: z.string(),
+      details: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
+    }).strict(),
+  ]),
+}).strict();
+
+// PlayerView and event payloads are engine-owned; transport only wraps the filtered result.
+export const SnapshotMessageSchema = z.object({ type: z.literal("snapshot"), view: z.unknown() }).strict();
+export const EventsMessageSchema = z.object({ type: z.literal("events"), gameId: z.string(),
+  gameVersion: z.number().int().nonnegative(), events: z.array(z.unknown()),
+}).strict();
+
 export const ServerLobbyMessageSchema = z.discriminatedUnion("type", [
   JoinedMessageSchema,
   RoomMessageSchema,
   StartedMessageSchema,
   PeerLeftMessageSchema,
   LobbyErrorSchema,
+  CommandResultMessageSchema,
+  SnapshotMessageSchema,
+  EventsMessageSchema,
 ]);
 export type ServerLobbyMessage = z.infer<typeof ServerLobbyMessageSchema>;

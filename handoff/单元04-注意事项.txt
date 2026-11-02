@@ -1,0 +1,39 @@
+单元 04 注意事项
+
+【隐私矩阵（最容易错）】
+- 公开：昵称、座位、存活/危险/离线、信用、当前失信银行欠款、轮次阶段、允许公开的提交状态与结算。
+- 本人：全部金币、银行贷款逐笔、私人合同、请求、本人锁定下注、财务事件。
+- 私人合同双方：该合同明细；未参与合同者看不到。
+- BANK_DUE_PENDING / BANK_LOAN_ISSUED / REPAID / SETTLED 只给借款人；BANK_LOAN_DEFAULTED 可公开（信用与失信欠款本就公开）。
+- snapshot.pendingDueLoanId 只对借款人本人非 null。
+- 事件广播前必须 eventsForPlayer 过滤；禁止广播原始 events。
+
+【身份/秘密】
+- sessionToken、recoveryCode 各 256 位、只存 sha256 摘要；绝不进 URL、日志、广播、/health、二维码。
+- resume 必须走消息体；join 不接受 token 参数。
+- 同 token 新连接替换旧连接（REPLACED + epoch）；旧 close 不得把新连接标离线。
+- 08 之前不实现“恢复码主动重生成”；06 再考虑一次性轮换。
+
+【去重与计时器】
+- 去重键 (gameId, playerId, commandId)，payloadHash 规范化（键序、金额字符串），终局成功/失败都缓存；整局累积不设窗口。
+- 纯业务拒绝不推进 version、不重复执行；有状态变化的失败按完整转移缓存。
+- 计时器只走 advanceSystem；phaseInstanceId/epoch 不匹配的旧计时器必须丢弃；迟到多窗口逐次提交/广播。
+- 开奖结果只由服务器安全随机源生成，且只在 BETTING 过期结算时取。
+
+【已知遗留（05/06 处理，不是隐藏项）】
+D1 去重表先 set 后 commit：06 接持久化时要“状态 + 去重结果一次原子提交”，或 commit 抛错时删去重项。
+D2 计时器/commit 失败静默停摆：需要 onError → 房间 PAUSED + 广播 ROOM_PAUSED，不能只 console.error。
+D3 recoveryCode 永不过期、不可主动重生成：05 提供“重新生成恢复码”入口；06 考虑一次性。
+D4 SliceBetPayloadSchema 未使用且字段名 bet 与线上 betCents 不一致：05 删除或统一。
+D5 wire snapshot 缺 schemaVersion：05 开工前补。
+D6 snapshot.deadlineAt 是全局截止，私有请求会缩短它，第三人可能推断“有私人请求”：05 决定是否按查看者下发。
+D7 processor 返回后又补发一次 snapshot，每命令重复一份：05 前删掉或仅在未覆盖时补发。
+D8 仅按连接限流，无 IP/房间限流、无 Origin、无房间 TTL：06 一并做。
+D9 LOAN_REQUEST_CLOSED/EXPIRED 仍公开（无金额/当事人），若要连“存在性”也不公开，加 audience。
+
+【测试基线】
+core 134、server 80；新增规则/接口先写失败测试；不要用“主路径过了”当完成。
+
+【工具链备注】
+Trae 适合常规实现；04B 这类并发/安全密集模块交给 Codex（GPT-6.1 高思考强度）效果更好；
+Qoder 只能读仓库做复核，结论要求写进 handoff 文件而不是聊天。

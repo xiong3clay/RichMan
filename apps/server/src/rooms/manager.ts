@@ -181,6 +181,7 @@ export class RoomManager {
           room: this.viewOf(room),
         };
       }
+      throw new LobbyError("UNAUTHORIZED", "身份凭证与房间不匹配");
     }
 
     if (room.state !== ROOM_STATE.LOBBY) throw new LobbyError("ALREADY_STARTED", "对局已开始，不能新加入");
@@ -207,6 +208,12 @@ export class RoomManager {
 
   setReady(sessionToken: string, ready: boolean): void {
     const { room, player } = this.resolve(sessionToken);
+    this.setReadyFor(room.roomCode, player.playerId, ready);
+  }
+
+  /** 仅供完成认证的服务端身份层调用，不接受客户端自报的玩家身份。 */
+  setReadyFor(roomCode: string, playerId: string, ready: boolean): void {
+    const { room, player } = this.resolvePlayer(roomCode, playerId);
     if (room.state !== ROOM_STATE.LOBBY) throw new LobbyError("ALREADY_STARTED", "对局已开始，不能再准备");
     player.ready = ready;
     this.emit({ type: "room", roomCode: room.roomCode, room: this.viewOf(room) });
@@ -218,17 +225,28 @@ export class RoomManager {
    */
   start(sessionToken: string): string {
     const { room, player } = this.resolve(sessionToken);
+    return this.startFor(room.roomCode, player.playerId);
+  }
+
+  /** 仅供完成认证的服务端身份层调用。 */
+  startFor(roomCode: string, playerId: string): string {
+    const { room, player } = this.resolvePlayer(roomCode, playerId);
     if (room.state !== ROOM_STATE.LOBBY) throw new LobbyError("ALREADY_STARTED", "对局已开始");
     if (room.hostId !== player.playerId) throw new LobbyError("NOT_HOST", "只有房主可以开始游戏");
     if (room.players.length < RULES.playerMin) throw new LobbyError("NOT_ENOUGH_PLAYERS", "至少需要 2 名玩家");
     if (!room.players.every((item) => item.ready)) throw new LobbyError("NOT_ALL_READY", "还有玩家未准备");
 
     const gameId = this.generateGameId();
-    const seeds = [...room.players]
-      .sort((a, b) => a.seatId - b.seatId)
-      .map((item) => ({ nickname: item.nickname }));
+    const roster = [...room.players].sort((a, b) => a.seatId - b.seatId);
+    const seeds = roster.map((item) => ({ nickname: item.nickname }));
+    const game = this.createGameState(gameId, DEFAULT_ROOM_CONFIG, seeds);
+    // 引擎按输入顺序分配连续座位；大厅离开可能留空洞，必须恢复冻结名单的真实身份。
+    game.players = game.players.map((item, index) => {
+      const member = roster[index]!;
+      return { ...item, playerId: member.playerId, seatId: member.seatId };
+    });
     room.gameId = gameId;
-    room.game = this.createGameState(gameId, DEFAULT_ROOM_CONFIG, seeds);
+    room.game = game;
     room.state = ROOM_STATE.PLAYING;
     this.emit({ type: "room", roomCode: room.roomCode, room: this.viewOf(room) });
     this.emit({ type: "started", roomCode: room.roomCode, gameId });
@@ -241,6 +259,12 @@ export class RoomManager {
    */
   disconnect(sessionToken: string): string {
     const { room, player } = this.resolve(sessionToken);
+    return this.disconnectFor(room.roomCode, player.playerId);
+  }
+
+  /** 只标离线，保留准备状态与座位；旧连接必须由会话层先检查 epoch。 */
+  disconnectFor(roomCode: string, playerId: string): string {
+    const { room, player } = this.resolvePlayer(roomCode, playerId);
     player.online = false;
     this.emit({ type: "peer_left", roomCode: room.roomCode, playerId: player.playerId });
     this.emit({ type: "room", roomCode: room.roomCode, room: this.viewOf(room) });
@@ -252,6 +276,12 @@ export class RoomManager {
    */
   leave(sessionToken: string): string {
     const { room, player } = this.resolve(sessionToken);
+    return this.leaveFor(room.roomCode, player.playerId);
+  }
+
+  /** 仅供完成认证的服务端身份层调用；调用前应先解绑离开者连接。 */
+  leaveFor(roomCode: string, playerId: string): string {
+    const { room, player } = this.resolvePlayer(roomCode, playerId);
     if (room.state !== ROOM_STATE.LOBBY) {
       player.online = false;
       this.emit({ type: "peer_left", roomCode: room.roomCode, playerId: player.playerId });
@@ -273,12 +303,40 @@ export class RoomManager {
     return player.playerId;
   }
 
+  /**
+   * 身份层校验摘要后恢复座位；恢复码签发新 token 时同步撤销旧 token。
+   * 不改游戏状态、版本、阶段或截止时间。
+   */
+  restoreIdentity(roomCode: string, playerId: string, sessionToken: string): JoinResult {
+    const { room, player } = this.resolvePlayer(roomCode, playerId);
+    this.sessions.delete(player.tokenDigest);
+    player.tokenDigest = digestToken(sessionToken);
+    this.sessions.set(player.tokenDigest, roomCode);
+    player.online = true;
+    this.emit({ type: "room", roomCode, room: this.viewOf(room) });
+    return { playerId, seatId: player.seatId, sessionToken, roomCode, room: this.viewOf(room) };
+  }
+
+  /** 摘要校验使会话存储不会把已离开并被复用的座位误认为旧身份。 */
+  matchesIdentity(roomCode: string, playerId: string, tokenDigest: string): boolean {
+    return this.rooms.get(roomCode)?.players.some(
+      (player) => player.playerId === playerId && player.tokenDigest === tokenDigest,
+    ) ?? false;
+  }
+
   private resolve(sessionToken: string): { room: RoomRecord; player: RoomPlayerRecord } {
     const digest = digestToken(sessionToken);
     const roomCode = this.sessions.get(digest);
     const room = roomCode === undefined ? undefined : this.rooms.get(roomCode);
     const player = room?.players.find((item) => item.tokenDigest === digest);
     if (!room || !player) throw new LobbyError("NOT_JOINED", "尚未加入房间");
+    return { room, player };
+  }
+
+  private resolvePlayer(roomCode: string, playerId: string): { room: RoomRecord; player: RoomPlayerRecord } {
+    const room = this.rooms.get(roomCode);
+    const player = room?.players.find((item) => item.playerId === playerId);
+    if (!room || !player) throw new LobbyError("UNAUTHORIZED", "身份凭证与房间不匹配");
     return { room, player };
   }
 
