@@ -1,0 +1,84 @@
+单元 05C 修复规格（M1-M11，交给 Codex/GPT 执行）
+依据：handoff/复核-单元05C.txt（Qoder 复核，含文件:行号与复现证据）+ 方案第六节 3.1
+基线：19 文件 / 240 条测试、typecheck 0、build 0、smoke:lan PASS；HEAD 27b12f7 + 未提交 05C 工作区
+
+============================================================
+一、写作用域
+============================================================
+允许：apps/web/src/**、apps/web/tests/**、handoff/单元05C-*
+禁止：packages/game-core/**、apps/server/**、packages/shared/**、scripts/**、package.json
+不得新增依赖；不得 commit；不得改协议。
+
+============================================================
+二、必须修（按优先级）
+============================================================
+【P0 信息正确性】
+M3 结果条不能盲目“操作成功”（GameView.tsx:951-956、299-314）
+  - 银行到期点还款但余额不足：引擎判 DEFAULTED 且命令 ok → 必须显示“已失信”而不是“已还款”。
+  - 自动失信（进入 BANK_DUE 时余额不足，无 command_result）也要显示。
+  - 消费 BANK_LOAN_DEFAULTED（payload.borrowerId === me.playerId）：原因（余额不足/超时/拒绝/破产）
+    + 已永久失信 + 当前金币；提示要持久（可关闭）。
+  - 点“还款”前若金币 < 应还，先警告/二次确认（服务端仍最终裁决）。
+  - RESCUE_GIVE_UP 成功 → “已放弃自救，你已破产”，不得显示“操作成功”。
+
+M4 私人借款结果通知（GameView.tsx:346-370）
+  - 出借人同意但余额不足 → LOAN_REQUEST_CLOSED(status=FAILED) → “对方余额不足，本次借款未成立，未转账”。
+  - 借款人侧：REFUSED / EXPIRED / FAILED 分别显示原因，并说明“本次行动已用掉”。
+  - 同意失败时不得显示“操作成功”。
+
+M1 银行借款资格（steps.ts:121-126）
+  - 镜像 engine：credit===GOOD、cents>0、不存在 status!==REPAID 的银行贷款（含 DEFAULTED/FROZEN）。
+  - 每种不合格给不同中文原因。
+  - 只做显示/禁用，最终以服务端为准。
+
+M2 文案纠正（GameView.tsx:825-827）
+  - 普通贷款上限 = 当前金币的 50%；删除“不能超过现有金币”这类与 805 行矛盾的说明。
+
+M5 高风险动作第二步确认（GameView.tsx:570-575、360-363）
+  - 放弃自救：金币、自救剩余、确认后立即破产。
+  - 同意出借：出借人/借款人/金额/利率/对方信用与失信欠款、确认后立即转账。
+  - 拒绝还款：说明会永久失信。
+
+M6 取消文案按阶段（GameView.tsx:331、335、547-577）
+  - ACTION：“取消会消耗本次行动，且不退还”。
+  - TAX/自救：“取消只关闭本次请求，自救继续，仍可再次发起”。
+  - DANGER_RESCUED（本人）→ “已解除危险，当前金币 X”。
+
+M10 结算卡利息行（settlement.ts:58-69）
+  - 只有本人存在未结清贷款（从 snapshot 的 bankLoans/privateLoans 判断）时才显示利息行。
+
+M11 结算卡 after（GameView.tsx:164-176）
+  - 按事件推导：本轮本人有 TAX_CHARGED → centsAfter；否则有本人 BET_SETTLED → nextCents；否则 = before。
+
+【P1 时间/离线/手机】
+M7 倒计时校时（GameView.tsx:42-63、329、554、940）
+  - 使用快照 serverNow 计算 offset；tick 用 deadline - (Date.now() + offset)。
+  - 补系统时钟偏移的测试。
+
+M8 离线/被替换禁用操作（GameView.tsx:190-197、95-106）
+  - status !== "online" 时禁用所有提交类 Choice（返回/关闭/查看别人可保留），操作区显示原因。
+  - replaced 时只显示恢复提示与大按钮，不渲染任何可提交操作。
+
+M9 手机抽屉溢出（styles.css:695-697、717-719）
+  - ≤560px 改 4 列或允许换行，禁止横向溢出；360×640 与 390×844 验证。
+
+============================================================
+三、测试要求
+============================================================
+T1 到期贷款不属于自己：断言 title/detail 明确，step 不含 loanId（现有测试是假绿）。
+T2 bankBlockedReason：失信 / 金币 0 / 有 DEFAULTED 贷款 / 有 ACTIVE 贷款 / 合格。
+T3 无贷款观看者的结算卡不含利息行。
+T5 事件→提示纯函数：BANK_LOAN_DEFAULTED / LOAN_REQUEST_CLOSED(FAILED,REFUSED) / LOAN_REQUEST_EXPIRED / DANGER_RESCUED。
+T7 失败不消耗：BORROW_BANK 超额、REPAY 超金币、ACCEPT 余额不足后停留原问题。
+T8 倒计时偏移：offset 正负各一例。
+T9 离线/已替换：渲染后无提交按钮。
+可选 T4：react-dom/server 渲染 ACTION/BETTING/BANK_DUE/DANGER/GAME_OVER，断言只有一个问题面板。
+
+============================================================
+四、验收
+============================================================
+- pnpm test：240 条 + 新增全绿
+- pnpm typecheck、pnpm build：0
+- pnpm smoke:lan：PASS
+- 作用域核对：git status 只含 apps/web 与 handoff
+- 输出：每条 M/T 对应改动与测试名；未完成项明说；不 commit。
