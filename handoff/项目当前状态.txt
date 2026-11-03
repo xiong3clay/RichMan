@@ -1,36 +1,31 @@
 RichMan 项目当前状态
 更新日期：2026-11-03
-更新者：DeepSeek Harness（单元 05A 收尾轮）
+更新者：DeepSeek Harness（V1.3.3 计划修订）
 
 【版本】
-方案版本：V1.3.2
-规则版本：V1.3.2
+方案版本：V1.3.3（V1.3.2 + 引导式界面 + 连接实测）
+规则版本：V1.3.2（规则未变）
 协议版本：1
-存档 schemaVersion：1
 游戏版本：未发布，目标 V1.0
 
 【进度】
 已完成单元：00、01、02、03、04、05A
-当前单元：05B（真人/真机试玩）——清单见 handoff/单元05B-试玩清单.txt
-代码状态：规则引擎 + 服务端 + 最小可玩网页 UI；完整借贷 UI/教程/音频/手机适配未做（07/08）
-会话与去重仅内存，重启不保留（06）
+当前单元：05C（引导式操作界面），随后 05B（真人试玩）
+代码状态：规则引擎 + 服务端 + 最小 UI 已可用；当前游戏页是“一屏堆信息”，05C 重写为阶段引导式
+会话与去重仅内存（06）
 
 【验证状态】
-pnpm test：18 文件 / 222 条通过（core 134、server 82、web 6）
-pnpm typecheck / build：通过
-pnpm smoke:lan：PASS（真实服务 + 双 WS，含 VERSION_CONFLICT 与快照补发断言）
-独立复核：Qoder 05A 复核 4 项必修已修
-真人/真机：未进行（05B）
+pnpm test：18 文件 / 222 条通过
+pnpm smoke:lan：PASS
+独立复核：Qoder 05A 的 4 项必修已修
+真人/真机：未进行（05B，使用 Cloudflare Quick Tunnel）
 
 【命令】
-安装：pnpm install
-构建：pnpm build
-启动：pnpm start（默认 0.0.0.0:8000）
-测试：pnpm test / pnpm test:core / test:server / pnpm smoke:lan
-建服验证：POST /api/rooms；/ws?room=<码>；/health
+pnpm start（0.0.0.0:8000）；公网用 D:\Lianjunjie\tools\cloudflared.exe tunnel --url http://127.0.0.1:8000
 
-【阻塞】
-无。D3b（出借人破产冻结）仍按默认，用户未最终表态。
+【连接实测结论（2026-11-03）】
+校园网 sdu_net 有客户端隔离：手机无法访问局域网 IP；Quick Tunnel 可通并完成 WSS。
+换隧道域名后旧 token 失效，必须用房间码 + 恢复码恢复。
 
 【下一入口】
-05B：按 handoff/单元05B-试玩清单.txt 在两台设备上实跑并记录；通过后进单元 06（可靠存档与重启恢复）。
+05C：按 handoff/单元05C-引导式界面规格.txt 重写游戏页交互；完成后 05B 真人试玩，再进 06。
