@@ -1,0 +1,61 @@
+单元 05D：放弃下注 + 再来一局（规格，交给 Codex）
+依据：用户 2026-11-04 明确要求；方案 V1.3.3 第六节 3.1 / 单元 05
+基线：HEAD 727a04f，24 文件 / 370 测试、typecheck/build 0、smoke:lan PASS
+写作用域：apps/web/**、apps/server/**、packages/shared/src/protocol.ts、handoff/单元05D-*
+禁止：packages/game-core/**（不改规则引擎）、apps/web 之外的其他 app、docs、依赖
+不 commit。
+
+============================================================
+一、放弃下注（纯前端）
+============================================================
+1. BETTING 未锁定时，在“猜哪个点”这一步提供次要按钮「放弃本轮下注」。
+2. 点击后直接提交 SUBMIT_BET：betCents="0"、guess=0、leverage=1（0 注，服务端本来就允许）。
+   不需要再走金额/杠杆步骤；点击前给一句确认（“放弃后本轮不押注，等待开奖”）。
+3. 提交成功后进入“已锁定”视图，显示「已放弃（0 注）」，不可再改。
+4. 断线/被替换/等待状态时按钮禁用，理由与其它提交一致。
+5. 测试：点击一次只发一条命令；成功后 UI 显示 0 注与已锁定；未锁定前可放弃；锁定后按钮消失。
+
+============================================================
+二、再来一局（协议 + 服务端 + 前端）
+============================================================
+【协议】packages/shared/src/protocol.ts
+- 新增客户端消息 { type: "rematch" }（大厅之外、游戏内使用）。
+- 新增/复用服务端消息 { type: "started", roomCode, gameId }：新一局开始时广播，gameId 与上一局不同。
+
+【服务端】apps/server
+- 房间状态保持 PLAYING，但当引擎 phase === "GAME_OVER" 时允许 rematch。
+- 处理规则：
+  - 只有房主可以发起；非房主返回 NOT_HOST。
+  - 当前不是 GAME_OVER → INVALID_STATE，不改变任何状态。
+  - 成功：用原房间的座位表（playerId/seatId/昵称顺序不变）调用 createInitialState 生成新局，
+    新 gameId（不能沿用旧值）；重置 scheduler 到新 state 的 deadline；旧局的去重结果按 gameId 隔离自然失效。
+  - 广播新的 started（含新 gameId）与最新快照/房间信息；旧局事件不重放。
+  - 离线玩家保留座位（新局按原名单开始，不因离线剔除）；在大厅交接里写明。
+- 测试（apps/server/tests/rematch.test.ts）：
+  1) 房主在 GAME_OVER 后 rematch → 新 gameId、phase 回到 INTEREST/ACTION、座位与昵称不变；
+  2) 非房主 rematch → NOT_HOST，gameId 不变；
+  3) 非 GAME_OVER 时 rematch → INVALID_STATE，状态不变；
+  4) 连续两次 rematch → 第二个新 gameId 与第一个不同；
+  5) 旧局的 commandId 在新局不能命中旧结果（去重按 gameId 隔离）；
+  6) rematch 后 scheduler 按新 state 的 deadline 重新计时，不沿用旧 deadline。
+
+【前端】apps/web
+- 收到 phase === "GAME_OVER" 时，显示结算对话框：胜者、最终余额/排名、按钮：
+  - 房主：「再来一局」→ 发送 rematch；点击后禁用并显示“正在开始新一局…”
+  - 非房主：显示「等待房主开始新一局」。
+- 收到 started（gameId 变化）后：清空本地向导步骤（回到 Q1）、结算卡、通知历史与已锁定下注视图，
+  按新快照重建界面；不得残留上一局的横幅或已确认状态。
+- 断线/被替换时按钮禁用；rematch 失败显示 code + 中文原因。
+- 测试：
+  - GAME_OVER 渲染出对话框与按钮；房主/非房主按钮不同；
+  - 点击只发一条 rematch；失败显示原因；
+  - 收到新 started 后本地 UI 状态被重置（步骤回到初始、无旧通知）。
+
+============================================================
+三、验收
+============================================================
+- pnpm test：370 条 + 新增全绿（不得削弱旧测试）
+- pnpm typecheck、pnpm build：0
+- pnpm smoke:lan：PASS；可扩一条冒烟：两人打完/直接构造 GAME_OVER 后房主 rematch，断言新 gameId 与座位不变
+- 作用域核对：git status 只含 web/server/shared-protocol/handoff
+- 输出：每条需求对应文件与测试名、真实命令结果、未完成项；不 commit
