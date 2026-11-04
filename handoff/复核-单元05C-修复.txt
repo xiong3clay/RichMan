@@ -1,0 +1,184 @@
+RichMan 单元 05C 修复复核（M1-M11 + T1-T9）
+复核日期：2026-11-04
+复核人：Qoder（只读复核）
+复核对象：未提交的 apps/web 引导式界面修复轮
+工作区：D:\Lianjunjie\biancheng\RichMan
+约束遵守：本文件是本轮唯一写入；未改任何代码；未 commit。
+
+【复核方法】
+1. 通读 handoff/复核-单元05C.txt（M1-M11、T1-T10 原始意见）与四类 05C 交接。
+2. 通读 apps/web/src 下 GameView/App/Countdown、game/{steps,settlement,notices,results,confirmations,clock}、
+   net/{client,wire}、styles.css；通读新增测试与 guided-integration。
+3. git status / git diff --stat 核对作用域，确认 core/server/shared/协议/依赖未被改动。
+4. 实跑 pnpm test / typecheck / build / smoke:lan。
+5. 用 node --import tsx 内联脚本复现通知重复、DANGER_RESCUED 跨阶段驻留、M10 残留。
+6. 查看 360×640、390×844 两张抽屉截图（模拟视口，非真机）。
+
+【结论】
+有条件通过。
+- M1、M2、M3、M4、M5、M7、M8、M9、M11 的主诉求已真实落地，且新增测试多数断言了余额/版本/状态/文案等行为，
+  不是“渲染不报错”式假绿；guided-integration 使用真实 server/client 验证了账本与失败语义。
+- M6 只完成一半：取消文案已按阶段区分，但 DANGER_RESCUED 仍是永久通知，不是上游要求的“短期提示”。
+- M10 在“观看者完全没有任何贷款”这一字面上通过，但对只有 DEFAULTED/FROZEN/BAD_DEBT 的观看者仍会显示
+  “本轮有贷款计息”，属于本轮新引入的误导，建议与通知问题同批修。
+- 本轮最大风险不在 M 项本身，而在通知生命周期：同一条命令结果会同时出现在结果横幅与事件通知里；
+  通知历史只增不减、动态文字被冻结，DANGER_RESCUED 会跨越阶段长期驻留。这会直接污染 05B 手机试玩。
+- 作用域合规：只改 apps/web 与 handoff；未改 packages/game-core、apps/server、packages/shared，
+  未升协议版本，未改依赖，未 commit。
+- 建议：05B 真人试玩前修掉下面 F1-F4；其余可延后。修完只需重跑受影响测试与 345 全量。
+
+【M1-M11 逐条核对】
+M1 银行资格三种不合格 | 已修 | steps.ts:126-143 同时拦信用非 GOOD、金币<=0/非法、任意 status!=="REPAID"
+   的银行贷款（含 DEFAULTED/FROZEN）；UI 在 GameView.tsx:985/1012 禁用借款入口。
+   测试 steps.test.ts:303-351 覆盖 DEFAULTED 信用、0/负数/非法金币、DEFAULTED/ACTIVE/FROZEN 贷款、REPAID 放行。
+M2 50% 文案 | 已修 | 常量在 steps.ts:14；渲染在 GameView.tsx:979、1000（两处金额页）与 1220（本人面板）。
+   缺口：测试只断言常量（steps.test.ts:351），没有断言两处页面实际渲染。
+M3 余额不足/自动失信 | 已修 | 出借人同意但余额不足时，服务端 ok+FAILED，results.ts:33 明确“未成立/未转账”，
+   notices.ts:127-140 对出借人/借款人分别说明；银行到期自动/超时失信由 BANK_LOAN_DEFAULTED 事件提示
+   （notices.ts:100-117），无需 command_result。全仓 src 已无“操作成功”。
+   集成测试 guided-integration.test.ts 验证 FAILED 不转账、不建合同、请求关闭且不保留过期待办。
+M4 同意失败/拒绝/过期双方提示 | 已修 | notices.ts:120-175 按 borrower/lender 分向；
+   FAILED 对出借人写“你的余额不足”，对借款人写“对方余额不足”，未把方向写反；
+   REFUSED/CANCELLED/EXPIRED 双方都有“未转账”，借款人另带行动后果。结果横幅与通知文案一致。
+M5 放弃自救/同意出借确认摘要 | 已修 | GameView.tsx:318-424 给出金额、利率、对方信用、失信欠款、
+   当前金币/倒计时，并明确“无法撤销/立即破产/立即转出”；余额不足时额外警示“会以未成立关闭，不转账”；
+   银行还款不足与拒绝还款也各有失信后果说明。confirmations.ts 把确认卡绑定到当前快照有效待办。
+M6 取消文案/危险解除短期提示 | 部分 | GameView.tsx:488-503 已按 TAX/非 TAX 区分“自救继续/本次行动已用掉”。
+   DANGER_RESCUED 在 notices.ts:178-186 只对本人生成，但被 GameView.tsx:137/155 放进永久 Map，
+   没有 TTL/阶段清理，离开 TAX 后仍显示（实测在 ACTION 阶段仍生成）。
+M7 serverNow 校时 | 已修 | clock.ts:6-20 用收到 serverNow 的时刻算 offset；相同 serverNow 不重置；
+   Countdown.tsx:12-20 共享 GameView.tsx:138-142 的本地接收样本；四处 Countdown 都传入同一组 props。
+   未做 RTT 补偿（见可延后项）。
+M8 离线/已替换禁用提交 | 已修 | GameView.tsx:1232-1235 在 status!=="open" 时替换操作区；
+   1106-1112 显示“已在另一页面恢复”；send 在 232-236 同时检查 status 与 client.hasJoined。
+   缺口：UI 只按 status 隐藏，status=open 但尚未 joined 的短暂窗口仍会显示按钮（点击会被 send 拦下）。
+M9 ≤560px 抽屉 | 静态通过 | styles.css:737-752 四列 32px/minmax(0,1fr)/48/48，gap 6；
+   player-defaulted-debt 跨全行；styles.css:709-717 有 min-width:0 与 overflow-wrap:anywhere。
+   360×640、390×844 模拟截图无水平溢出、长昵称换行。未真机验证。
+M10 无贷款观看者不显示利息行 | 字面通过，有残留 | settlement.ts:34-38 对“完全无贷款”返回 false，
+   settlement.ts:91-97 因此不显示利息行。但它把 DEFAULTED/FROZEN/BAD_DEBT 都当作“有贷款”；
+   实测只有 DEFAULTED 银行贷款或只有 FROZEN 私人合同时仍返回 true，并在本轮存在全局 INTEREST_ACCRUED 时
+   显示“本轮有贷款计息，具体以本人债务记录为准”，与“失信停息/破产转坏账”的规则相矛盾。
+M11 after 事件推导 | 已修 | settlement.ts:41-43 只用事件余额，无事件时保留 before；
+   61-76 按 seq/ROUND_STARTED 分轮；158-163 优先 tax centsAfter，其次 bet nextCents；
+   GameView.tsx:1322 使用 deriveSettlementBalance。测试覆盖“快照已是下一轮余额但结算仍用上一轮事件”。
+
+【仍未修的必须项（建议 05B 前修）】
+
+F1 同一结果重复显示
+文件：GameView.tsx:1133-1144（结果横幅）与 1167-1182（事件通知）；
+      results.ts:33-38、52-56（结果文案复用了通知文案）
+问题：出借人同意但余额不足、银行到期失信、拒绝/取消等场景，命令结果横幅与事件通知横幅会同时出现，
+      内容相同或几乎相同。实测 ACCEPT FAILED 两条文字完全一致：
+      “你的余额不足，本次借款未成立，未转账。”
+后果：手机上双份横幅、两个“关闭”，用户无法判断是两条事件还是重复提交；首屏被占用，向导和金额输入被下推。
+建议：同一条命令自己触发的结果只保留一处（结果横幅优先），通知侧按 requestId/loanId + seq 去重；
+      或合并成一个 banner。补渲染断言：同一失败在整页只出现一次“未转账”。
+
+F2 通知历史无限累积且动态文字被冻结
+文件：GameView.tsx:128、137、151-158；notices.ts:178-186；App.tsx:94-96
+问题：事件缓冲只保留 300 条，但 noticeHistoryRef 只增不减；每条通知必须手动关闭，没有数量上限/TTL/阶段清理。
+      DANGER_RESCUED 这类一次性提示会永久驻留；通知文本在首次推导时被缓存，里面的“当前金币”、
+      “自救继续/行动已用掉”等动态内容不会随后续快照更新。
+后果：多轮后首屏堆满历史横幅，360px 下把当前问题和输入框挤出视口；旧金币数字与当前状态不一致；
+      M6 要求的“短期提示”实际未实现。实测离开 TAX 进入 ACTION 后 DANGER_RESCUED 仍会生成。
+建议：给通知设同时显示上限（如 3-5 条）与 TTL；DANGER_RESCUED 改为 2-3 秒 toast；
+      BANK_LOAN_DEFAULTED / FAILED 等关键失败保留到手动关闭；缓存语义数据而不是最终文本，
+      或至少在快照/阶段变化时重算动态字段；dismissedNotices 改用 Set 并清理已失效 id。
+      补单测：历史超过 N 条只显示最近 N 条；离开 TAX 后 DANGER_RESCUED 消失；金币变化后文案不冒充“当前”。
+
+F3 结果横幅指向方向反了
+文件：results.ts:64
+问题：兜底文案写“处理结果见上方通知”，但结果横幅渲染在事件通知上方（GameView.tsx:1133 vs 1167），
+      通知实际在下方。
+后果：用户按提示往上看不到解释，可能以为结果丢失；与“不误导”目标冲突。
+建议：改为“见下方通知”或去掉方向词；补一条渲染顺序断言。
+
+F4 M10 残留：非计息债务也触发利息行
+文件：settlement.ts:34-38、91-97；GameView.tsx:165；steps.test.ts:442、455-458
+问题：只看 status!=="REPAID"，DEFAULTED/FROZEN/BAD_DEBT 都算“有贷款”。本轮只要有全局 INTEREST_ACCRUED，
+      观看者即使只有这些非计息债务，也会看到“本轮有贷款计息”。
+后果：按项目规则，失信欠款停止计息、破产私人债务转坏账/冻结；界面却把别人的计息安到本人头上，
+      与本人债务状态矛盾。实测 DEFAULTED-only、FROZEN-only 均返回 true 并生成利息行。
+建议：优先只统计 status==="ACTIVE"（若 FROZEN 是否计息另有明确规则再单独判断），并同步修改
+      steps.test.ts:442、455-458；如果本轮不改判断，至少把文案改为中性
+      “本轮存在全局计息，请核对本人债务记录”，不要断言本人被计息。
+
+【可延后到 05B/07/08】
+1. 05B：status=open 但 client.hasJoined=false 的短暂窗口。GameView.tsx:1232 只按 status 隐藏操作区，
+   点击会被 send（232-236）拦下并提示，但按钮短暂可见。建议操作区同时检查 hasJoined，05B 重点观察重连瞬间。
+2. 05B：手机键盘遮挡。金额输入已是 inputMode=numeric、18px 字号/48px 高度（styles.css:579-585），
+   不会触发 iOS 聚焦缩放；但没有 visualViewport 监听、scrollIntoView、safe-area-inset，
+   页面用 min-height:100vh（styles.css:14），抽屉/覆盖层 86vh。键盘弹起后底部主按钮可能被遮挡。
+   必须真机记录 360×640、390×844 键盘打开时的输入框与主按钮位置。
+3. 05B：M7 未补 RTT。offset = serverNow - 收到时刻，倒计时最多差约单向延迟；弱网下不要宣称精确到毫秒。
+   如果 06 需要更准，应升协议加往返校时，不能在 web 猜。
+4. 05B 开工前：handoff/项目当前状态.txt 仍写“19 文件/240 条、05C 尚未安排独立复核”，
+   实际已是 24/345 且本轮已有复核。按 AGENTS.md 应更新，否则下一个 agent 会按旧基线判断。
+5. 07/08：通知历史、dismissed 集合与会话/存档一起持久化时，需要定义跨刷新是否保留、按什么 key 清理。
+   本轮只在内存，刷新即丢；不要在没有协议支持时假装可回看。
+6. 05B/06：重连后若 PHASE_CHANGED 已被 300 条缓冲截断，knownRequests 的 phase 可能退化为当前快照阶段，
+   导致“自救继续/行动已用掉”归因错误。属于边缘场景，先记录，不要在 web 擅改协议。
+7. 清理项：steps.ts:154 的 activePrivacyLoanFor 未被任何 src/test 使用，可在 06/07 顺手删除。
+8. 交接项：apps/web/tests/ui-preview.html、ui-preview.tsx、visual/*.png 是未跟踪的开发夹具/截图，
+   不是生产入口；不要把它们当联机金额验证，也不要让它们进部署静态目录。
+
+【测试缺口（建议补的断言）】
+1. 通知去重：同一 ACCEPT FAILED / BANK_LOAN_DEFAULTED / REFUSE 在整页只出现一次关键文案；
+   当前 gameview.test.ts:52 只断言 contains，重复两条也会通过。
+2. 通知生命周期：超过上限只显示最近 N 条；DANGER_RESCUED 离开 TAX 后消失；金币变化后不显示旧“当前金币”；
+   关闭后同一事件回放不重新弹出。当前没有这些测试。
+3. 真实交互：现有 gameview.test.ts 用 renderToStaticMarkup，事件处理器、定时器、点击都不会执行。
+   建议用 @testing-library/react + user-event 覆盖：点“放弃自救”→确认卡→返回；
+   确认卡打开时断网/被替换→操作区消失；连续点击确认只发一条命令。
+4. 50% 提示渲染：steps.test.ts:351 只测常量；应断言银行金额页与本人面板实际包含提示，
+   且资格不合格时显示 blockedBank 而不是提示。
+5. hasJoined 门禁：status=open、hasJoined=false 时渲染与 send 的行为没有测试（T9 只测 connecting/closed/replaced）。
+6. M10 语义：当前 steps.test.ts:442/455-458 明确断言 DEFAULTED/FROZEN/BAD_DEBT 为 true；
+   若按 F4 改为 ACTIVE-only，必须同步改这些断言，并补“只有 DEFAULTED 债务 + 全局计息事件时不显示利息行”。
+7. 晚到事件：结果横幅先显示兜底文案，事件到达后应更新为“已成立/已失信”。目前只有纯函数测试，
+   没有组件级“先结果后事件”的渲染断言。
+8. 05B 真机项无法单测：键盘遮挡、safe-area、弱网倒计时、物理断网/刷新恢复，必须按 05B 清单记录，
+   本轮只能标“未验证”。
+
+【对 05B 手机衔接的判断（只按代码与截图，未真机验证）】
+- 360×640、390×844 抽屉：4 列布局、失信欠款整行、长昵称换行，模拟截图无水平溢出，风险较低。
+- 金额输入：numeric 键盘、18px/48px，聚焦缩放风险低；但键盘弹起后的滚动/遮挡没有任何处理，风险中等。
+- 最大的手机风险是 F1/F2：重复且无限累积的横幅会在小屏上把当前问题推离视口，比抽屉布局更值得先修。
+- 校园网客户端隔离、Quick Tunnel、换域名 token 失效等结论沿用 05C 交接，本轮未重测。
+
+【你实际跑过/复现过的】
+1. pnpm -s test
+   结果：24 个测试文件 / 345 条全部通过（2026-11-04 18:15，Duration 5.68s）；
+   包含 guided-integration 10 条、client 1 条（M2 resume 失败收口）、core/server 既有用例。
+2. pnpm -s typecheck
+   结果：退出码 0，无输出。
+3. pnpm -s build
+   结果：退出码 0；vite 8.3.5，128 modules，132ms；dist CSS 8.71 kB、JS 375.75 kB。
+4. pnpm -s smoke:lan
+   结果：PASS；建房 roomCode=1676；双人加入/开局；借银行 2500 分；第 2 轮结算；
+   过期命令 VERSION_CONFLICT 并补发快照；双方快照 version 单调不降。
+5. 内联 node --import tsx 复现：
+   - ACCEPT FAILED 的 notice 与 commandSuccessText 完全相同，DUPLICATE=true；
+   - DANGER_RESCUED 在 ACTION 阶段仍生成“已解除危险，当前金币 1,500 分。”；
+   - 只有 DEFAULTED 银行贷款时 hasInterestBearingDebt=true，并生成利息行；
+   - 只有 FROZEN 私人合同时 hasInterestBearingDebt=true。
+6. 查看 apps/web/tests/visual/05C-drawer-360.png、05C-drawer-390.png：
+   四列、失信欠款整行、长昵称换行、无水平溢出；这是 ui-preview 组件夹具的模拟视口，不是真机，也不是生产入口。
+7. git status / git diff --stat：
+   修改仅 apps/web/src/{App.tsx,GameView.tsx,net/client.ts,net/wire.ts,styles.css} 与 handoff/项目当前状态.txt；
+   新增 apps/web/src/Countdown.tsx、apps/web/src/game/*、apps/web/tests/{clock,confirmations,gameview,
+   guided-integration,notices,steps}.test.ts、view-fixtures.ts、ui-preview.*、visual/；
+   未发现 packages/game-core、apps/server、packages/shared、package.json、协议版本改动；未 commit。
+8. 未跑/未验证：
+   - 未用真机或手机浏览器验证 360×640/390×844、键盘遮挡、safe-area；
+   - 未做物理断网/弱网/刷新恢复；
+   - 未用 Quick Tunnel 做双真人试玩；
+   - 未做本轮的双标签页手工点击回归（只跑了 smoke 与自动化）；
+   - 未验证 ui-preview 的真实联机行为（它本身不连服务端，提交计数不能当账本金额）。
+
+【建议的下一步】
+1. 先修 F1/F2/F3（通知去重、上限/TTL、DANGER_RESCUED 短期化、方向文案），顺带修 F4。
+2. 补第 1/2/3/4/5 条测试缺口，重跑 pnpm test / typecheck / build / smoke:lan。
+3. 更新 handoff/项目当前状态.txt 到 24/345 与本轮复核结论。
+4. 再按 handoff/单元05B-试玩清单.txt 做真人/真机试玩；手机键盘、弱网、真机仍必须单列“未验证”。

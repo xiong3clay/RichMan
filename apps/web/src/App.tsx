@@ -3,7 +3,7 @@ import { GameView } from "./GameView";
 import { LobbyView } from "./LobbyView";
 import { clearSession, loadSession, RichmanClient } from "./net/client";
 import type { ClientHandlers, ConnectionStatus, StoredSession } from "./net/client";
-import type { JoinedInfo, WireCommandResult, WireRoom, WireSnapshotView } from "./net/wire";
+import type { JoinedInfo, WireCommandResult, WireGameEvent, WireRoom, WireSnapshotView } from "./net/wire";
 import { isSessionError, lobbyErrorText, serverErrorText } from "./net/wire";
 
 interface ServerError {
@@ -25,6 +25,8 @@ export default function App() {
   const [room, setRoom] = useState<WireRoom | null>(null);
   const [joined, setJoined] = useState<JoinedInfo | null>(null);
   const [snapshot, setSnapshot] = useState<WireSnapshotView | null>(null);
+  /** 服务端过滤后的本人可见事件；只给结算卡用，不做规则判定。 */
+  const [events, setEvents] = useState<WireGameEvent[]>([]);
   const [status, setStatus] = useState<ConnectionStatus>("closed");
   const [statusDetail, setStatusDetail] = useState<string | null>(null);
   const [entryError, setEntryError] = useState<string | null>(null);
@@ -59,6 +61,7 @@ export default function App() {
     setRoom(null);
     setJoined(null);
     setSnapshot(null);
+    setEvents([]);
     setResult(null);
     setServerError(null);
     setEntryError(null);
@@ -83,9 +86,14 @@ export default function App() {
       onStarted: () => {
         // started 之后等 snapshot；服务端会在同一提交内推送到所有连接。
         setSnapshot(null);
+        setEvents([]);
       },
       onSnapshot: (view) => {
         setSnapshot(view);
+      },
+      onEvents: (list) => {
+        // 只保留当前对局最近的 300 条，结算卡最多回看一轮，超出无意义。
+        setEvents((current) => [...current, ...list].slice(-300));
       },
       onCommandResult: (nextResult) => {
         if (nextResult.outcome.ok) setServerError(null);
@@ -205,6 +213,7 @@ export default function App() {
     setRoom(null);
     setJoined(null);
     setSnapshot(null);
+    setEvents([]);
     setResult(null);
     setServerError(null);
     setReplaced(false);
@@ -230,8 +239,11 @@ export default function App() {
           roomCode={roomCode}
           view={snapshot}
           client={clientRef.current!}
+          status={status}
+          statusDetail={statusDetail}
           result={result}
           error={serverError}
+          events={events}
         />
       ) : roomCode !== null && room !== null ? (
         <LobbyView room={room} joined={joined} error={lobbyError} onReady={handleReady} onStart={handleStart} />

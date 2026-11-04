@@ -52,20 +52,57 @@ export interface WirePublicPlayer {
   defaultedBankDebtCents: string;
 }
 
+export interface WirePrivateLoan {
+  loanId: string;
+  requestId: string;
+  borrowerId: string;
+  lenderId: string;
+  principalCents: string;
+  remainingCents: string;
+  rateBps: number;
+  issuedRound: number;
+  lastInterestRound: number;
+  /** 与服务端 PRIVATE_LOAN_STATUS 一致：引擎没有 DEFAULTED，破产转 BAD_DEBT/FROZEN。 */
+  status: "ACTIVE" | "REPAID" | "BAD_DEBT" | "FROZEN";
+}
+
+export interface WireLoanRequest {
+  requestId: string;
+  borrowerId: string;
+  lenderId: string;
+  principalCents: string;
+  rateBps: number;
+  createdRound: number;
+  createdAtMs: number;
+  deadlineMs: number;
+  status: "PENDING" | "ACCEPTED" | "REFUSED" | "EXPIRED" | "CANCELLED" | "FAILED";
+  borrowerCredit: "GOOD" | "DEFAULTED";
+  borrowerDefaultedBankDebtCents: string;
+}
+
 export interface WireFinance {
   cents: string;
   bankLoans: WireBankLoan[];
   bankDebtCents: string;
   bankDefaultedDebtCents: string;
+  privateLoans: WirePrivateLoan[];
   privateDebtCents: string;
   receivableCents: string;
   frozenCents: string;
   badDebtCents: string;
-  pendingRequest: unknown | null;
-  incomingRequests: unknown[];
+  pendingRequest: WireLoanRequest | null;
+  incomingRequests: WireLoanRequest[];
   myBet: { betCents: string; guess: 0 | 1; leverage: 1 | 2 } | null;
   betsSubmitted: string[];
   aliveCount: number;
+}
+
+/** 服务端 events 消息的一条事件；金额字段已由服务端转成十进制字符串。 */
+export interface WireGameEvent {
+  seq: number;
+  type: string;
+  at: string;
+  payload: Record<string, unknown>;
 }
 
 export type GamePhase = "INTEREST" | "BANK_DUE" | "ACTION" | "BETTING" | "TAX" | "GAME_OVER";
@@ -140,6 +177,24 @@ export function statusLabel(status: WireMe["status"]): string {
 }
 export function loanStatusLabel(status: WireBankLoan["status"]): string {
   return LOAN_LABELS[status];
+}
+
+const PRIVATE_LOAN_LABELS: Record<WirePrivateLoan["status"], string> = {
+  ACTIVE: "未结清",
+  REPAID: "已还清",
+  BAD_DEBT: "坏账",
+  FROZEN: "冻结",
+};
+
+export function privateLoanStatusLabel(status: WirePrivateLoan["status"]): string {
+  return PRIVATE_LOAN_LABELS[status];
+}
+
+/** 利率以整数基点展示：1000 基点 = 10%。纯整数运算，不经过浮点百分比。 */
+export function rateLabel(rateBps: number): string {
+  const percent = String(Math.trunc(rateBps / 100));
+  const fraction = String(rateBps % 100).padStart(2, "0").replace(/0+$/, "");
+  return fraction === "" ? percent + "%" : percent + "." + fraction + "%";
 }
 
 /** 服务端已给中文 message；这里只补齐大厅错误码的前缀，方便玩家定位。 */

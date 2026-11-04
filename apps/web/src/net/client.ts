@@ -4,6 +4,7 @@ import type {
   GamePhase,
   JoinedInfo,
   WireCommandResult,
+  WireGameEvent,
   WireRoom,
   WireSnapshotView,
 } from "./wire";
@@ -26,6 +27,8 @@ export interface ClientHandlers {
   onRoom: (room: WireRoom) => void;
   onStarted: (gameId: string) => void;
   onSnapshot: (view: WireSnapshotView) => void;
+  /** 服务端过滤后的本人可见事件；用于本轮结算卡，不参与规则判定。 */
+  onEvents?: (events: WireGameEvent[]) => void;
   onCommandResult: (result: WireCommandResult) => void;
   onServerError: (error: { code: string; message: string }) => void;
 }
@@ -172,6 +175,66 @@ export class RichmanClient {
     return this.rawSend(envelope) ? commandId : null;
   }
 
+  /* ---- 05C 引导式界面用到的命令；字段严格沿用服务端 handler 契约 ---- */
+
+  borrowBank(amountCents: string, options: CommandOptions = {}): string | null {
+    return this.sendCommand("BORROW_BANK", { amountCents }, options);
+  }
+
+  requestPrivateLoan(
+    lenderId: string,
+    principalCents: string,
+    rateBps: number,
+    options: CommandOptions = {},
+  ): string | null {
+    return this.sendCommand("REQUEST_PRIVATE_LOAN", { lenderId, principalCents, rateBps }, options);
+  }
+
+  acceptPrivateLoan(requestId: string, options: CommandOptions = {}): string | null {
+    return this.sendCommand("ACCEPT_PRIVATE_LOAN", { requestId }, options);
+  }
+
+  refusePrivateLoan(requestId: string, options: CommandOptions = {}): string | null {
+    return this.sendCommand("REFUSE_PRIVATE_LOAN", { requestId }, options);
+  }
+
+  cancelPrivateLoan(requestId: string, options: CommandOptions = {}): string | null {
+    return this.sendCommand("CANCEL_PRIVATE_LOAN", { requestId }, options);
+  }
+
+  repayBank(loanId: string, cents: string, options: CommandOptions = {}): string | null {
+    return this.sendCommand("REPAY_BANK", { loanId, cents }, options);
+  }
+
+  repayPrivateLoan(loanId: string, cents: string, options: CommandOptions = {}): string | null {
+    return this.sendCommand("REPAY_PRIVATE", { loanId, cents }, options);
+  }
+
+  collectPrivateLoan(loanId: string, cents: string, options: CommandOptions = {}): string | null {
+    return this.sendCommand("COLLECT_PRIVATE", { loanId, cents }, options);
+  }
+
+  endAction(options: CommandOptions = {}): string | null {
+    return this.sendCommand("END_ACTION", {}, options);
+  }
+
+  decideBankDue(loanId: string, decision: "REPAY" | "REFUSE", options: CommandOptions = {}): string | null {
+    return this.sendCommand("BANK_DUE_DECISION", { loanId, decision }, options);
+  }
+
+  giveUpRescue(options: CommandOptions = {}): string | null {
+    return this.sendCommand("RESCUE_GIVE_UP", {}, options);
+  }
+
+  submitBet(
+    betCents: string,
+    guess: 0 | 1,
+    leverage: 1 | 2,
+    options: CommandOptions = {},
+  ): string | null {
+    return this.sendCommand("SUBMIT_BET", { betCents, guess, leverage }, options);
+  }
+
   private rawSend(message: Record<string, unknown>): boolean {
     const socket = this.socket;
     if (socket === null || socket.readyState !== WebSocket.OPEN) return false;
@@ -271,6 +334,12 @@ export class RichmanClient {
 
     if (type === "snapshot") {
       this.acceptSnapshot(message["view"] as WireSnapshotView | undefined);
+      return;
+    }
+
+    if (type === "events") {
+      const list = message["events"];
+      if (Array.isArray(list)) this.handlers.onEvents?.(list as WireGameEvent[]);
       return;
     }
 

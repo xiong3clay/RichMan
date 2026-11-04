@@ -1,0 +1,71 @@
+单元 05C 下一阶段交接
+【2026-11-04 M1-M11修复轮最新交接】
+最新验收：24文件345项通过（core134/server82/web129）、typecheck0、build0、smoke:lan PASS；不commit。
+GameView接线纯展示模块：steps资格/50%文案，notices记住请求参与方与原阶段，results按命令ID对应
+requestId/loanId/afterEventSeq确认结果，confirmations在快照变化时撤下过期确认卡。
+通知可关闭且不会因最近300事件缓冲滚动自动丢失；已知请求归属持续保存在组件ref，未知归属不猜。
+ACCEPT余额不足是服务端ok+FAILED，终结待办、不转账且不建借条；不得把它当作纯拒绝继续显示旧请求。
+Countdown四处共享GameView对serverNow的本地接收样本，重挂载不重置时间；新serverNow才校准。
+settlement只按seq/轮次过滤服务端金额：税centsAfter优先、下注nextCents其次，无则before；
+不使用已包含下一轮交易的快照余额当上一轮结算后余额；利息行仅本人有未结清债务时中性展示。
+手机抽屉四列，player-defaulted-debt全行；360/390模拟视口已验证不水平溢出。
+测试新增guided-integration十项验证真实RichmanClient命令到服务端账本；ui-preview仅组件交互夹具，
+不得把其提交计数当实际联机金额验证，且不是生产构建入口。
+下一入口仍05B真人试玩；手机键盘/弱网/真机未验，协议缺口不在05C擅改。
+按本轮明确写范围，handoff/项目当前状态.txt未写；以本四类05C交接的修复轮摘要为最新。
+以下保留初版交接供追溯。
+
+日期：2026-11-03
+
+【架构与入口】
+- 入口：apps/web/src/App.tsx。持有 RichmanClient、snapshot、events、连接状态。
+- 游戏页：apps/web/src/GameView.tsx。只消费 snapshot + events + 本地 uiState。
+- 引导推导：apps/web/src/game/steps.ts（纯函数）。deriveStep(view, uiState) 返回唯一 GuidedStep。
+- 结算推导：apps/web/src/game/settlement.ts（纯函数）。deriveRoundSettlement(events, round, viewerId)。
+- 网络：apps/web/src/net/client.ts（WS、重连、resume、命令方法、events 分支）。
+- 形状与展示：apps/web/src/net/wire.ts（wire 类型、金额/利率/状态格式化）。
+
+【数据流】
+服务端 commit → 广播 snapshot（本人视图）→ App.setSnapshot → GameView deriveStep。
+服务端同步发送 events（已按可见性过滤）→ client.onEvents → App 累积 → 结算卡展示。
+客户端命令：GameView → client.sendCommand（commandId + protocolVersion + gameId + expectedGameVersion；
+下注额外 roundId/phaseInstanceId）→ 服务端权威校验。
+金额：wire 十进制字符串，界面只用 formatCents/rateLabel 格式化，不做加减乘除。
+
+【引导顺序如何从快照推导】
+1. GAME_OVER 或 winnerId 非空 → 游戏结束视图。
+2. finance.incomingRequests 非空 → 收到的借款请求（同意/拒绝，不消耗行动）。
+3. finance.pendingRequest 非空 → 等待出借人答复（可取消）。
+4. ACTION：
+   currentSeatId ≠ me.seatId，或 actedSeats 含 me.seatId → 等待；
+   否则 → 本人行动，按本地 actionStage 依次问 Q1→Q4；
+   actionStage=askDebt 且 debtOptions 为空 → 自动跳到 endAction。
+5. BANK_DUE：pendingDueLoanId 命中本人银行贷款 → 到期决策；否则等待其他人。
+6. TAX：me.status=DANGER 且存活 → 危险自救（本地 dangerStage）；
+   否则若有其他存活 DANGER 玩家 → 等待对方自救；否则等待税费结算。
+7. BETTING：finance.myBet 非空 → 已锁定；本人已破产 → 等待；否则按下注 stage 依次问。
+8. 其他（INTEREST）→ 通用等待。
+
+本地 uiState 只在“当前阶段内”记录点到了哪一问；phaseInstanceId 变化或命令成功时归零。
+失败不推进 uiState，因此页面停留在原问题并显示失败原因。
+
+【协议/存档格式变化】
+无。未改 packages/shared、apps/server、packages/game-core；snapshot schema 仍为 1。
+web 仅补读 snapshot 中已存在的 finance.privateLoans / pendingRequest / incomingRequests，
+并新增消费服务端已发送但此前忽略的 events 消息。
+
+【迁移/回退】
+无数据迁移。回退方式：丢弃本次未提交的 apps/web 改动即可；服务端与存档不受影响。
+
+【下一单元入口】
+05B：真人/真机试玩，按 handoff/单元05B-试玩清单.txt 执行。
+重点核对：手机触控、只问一个问题、阶段切换、等待答复、银行到期、危险自救、结算卡关闭、断网恢复。
+05B 通过后才可进入 06（持久化/会话去重）。
+
+【不可破坏的不变量】
+- 服务端监听 0.0.0.0，打印实际端口与 LAN 地址。
+- 金额整数分、wire 字符串；客户端不本地算钱。
+- 规则判定只在 game-core/服务端，不进 React 组件。
+- snapshot version 只升不降；commandId 整局去重；expectedGameVersion 来自快照。
+- 自己的请求取消会消耗行动；同意/拒绝别人的请求不消耗行动。
+- 破产后的债务是 BAD_DEBT/FROZEN，不是 REPAID。

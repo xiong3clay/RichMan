@@ -1,0 +1,186 @@
+单元 05C 成果报告
+【2026-11-04 Codex修复轮：最新有效结论】
+依据：单元05C-修复规格.txt；仅修M1-M11与T1-T9，未commit。
+基线HEAD：b16bbdcd58824b87e2b5e4194707fb501539c07f；验证对象为其上的未提交工作区。
+起始实跑260项通过（工单240项以外，工作区已有20项半成品测试）；最终24文件345项全绿。
+核心134、服务端82、Web129，未削弱原240项；修正了半成品中将ACCEPT余额不足虚构成ok:false的假测试，
+用真实客户端ok+FAILED/不转账/不建合同/请求终结替代。原T1增加精确文案与隐私断言。
+
+【每条M对应文件、测试与结果】
+M1 apps/web/src/game/steps.ts bankBlockedReason：信用/finance金币正数/任意未结清银行债务；
+  steps.test.ts「信用已失信时给失信原因」「金币为 0 时拒绝」「以 finance.cents 判断零余额，不误用 me.cents」
+  「负余额也不能申请普通银行贷款」「存在 DEFAULTED 贷款时给出失信欠款原因」
+  「存在 ACTIVE 贷款时给出未结清原因」「未来新增 FROZEN 状态也按未结清拦截，不扩展当前 wire 协议」
+  「信用良好、金币大于 0、无未结清贷款时允许申请」全部通过。
+M2 steps.ts BANK_LOAN_LIMIT_HINT与GameView.tsx统一50%提示；
+  steps.test.ts「银行金额页共用 50% 规则提示，不推算精确额度」通过。
+M3 game/notices.ts、results.ts、GameView.tsx：本人自动/命令失信原因、永久后果、金币与持久可关闭通知；
+  结果按loanId/afterEventSeq判断，不盲称已还款；还款不足先确认，放弃显示破产。
+  notices.test.ts「BANK_DUE ok 配本人失信事件时说明失信原因与当前金币」
+  「BANK_DUE 无事件但本人贷款快照 DEFAULTED 时仍提示永久失信」
+  「BANK_DUE 本人贷款 REPAID 才显示已还款」「RESCUE_GIVE_UP ok 明确已放弃且破产，普通 ok 只写提交」；
+  guided-integration.test.ts「M3到期窗口内还款余额不足，真实ok后提示失信而不是已还款」
+  「M3自动失信没有command_result也能从真实事件提示」与真实放弃自救用例均通过。
+M4 notices.ts、results.ts、GameView.tsx：用可见创建事件/快照记住参与方和原阶段，
+  FAILED/REFUSED/EXPIRED/CANCELLED给双方准确反馈；未知归属不猜、不通知第三人。
+  notices.test.ts「FAILED 出借人看到自己的余额不足，并明确未转账」
+  「FAILED 借款人看到出借人余额不足、未转账与行动已用掉」
+  「合并快照已无请求，仍从历史 LOAN_REQUESTED 取得双方归属」等33项通知/结果用例通过；
+  gameview.test.ts「M4合并快照后请求已消失，仍从可见事件还原未成立通知」通过。
+M5 GameView.tsx二步确认 + game/confirmations.ts绑定有效待办；
+  confirmations.test.ts 16项通过，含「借款人取消/超时后请求从同阶段快照消失，不再显示旧确认」
+  「银行待办已清除、贷款不存在或阶段切换后不能确认旧贷款」
+  「放弃自救确认仅在本人存活且仍处于 TAX/DANGER 时有效」。
+  浏览器夹具验收 M5-出借二步确认 / M5-放弃二步确认：第一步后提交计数0，确认后1；
+  摘要显示双方、金额、利率、信用、失信债务或金币/自救倒计时/破产后果；
+  M5-拒绝还款确认、M3-不足还款警告均可见，请求撤回后旧确认按钮数0。全部通过。
+M6 notices.ts/ GameView.tsx：ACTION取消消耗行动，TAX取消自救继续；
+  gameview.test.ts「M6等待取消文案按ACTION/TAX分开」；
+  notices.test.ts「ACTION 请求结果到达时快照已 TAX，仍告知行动已用掉」
+  「DANGER_RESCUED 使用本人服务端金额，忽略其他人的事件」通过。
+M7 Countdown.tsx、game/clock.ts、GameView.tsx：按serverNow与本地接收时刻校时，
+  同样本不重复重置，向导切换新挂载共用父级接收样本；clock.test.ts 6项通过，
+  含「客户端慢五分钟时使用正 offset，经过20秒只剩40秒」
+  「客户端快七分钟时使用负 offset，经过25秒只剩35秒」及重复/新快照校准与SSR。
+M8 GameView.tsx：connecting/closed隐藏可提交向导并说明原因，send再检查连接/已认证；
+  replaced只显示恢复提示与主动入口，不渲染提交操作；
+  gameview.test.ts T9「connecting没有可提交操作」「closed没有可提交操作」
+  「replaced没有可提交操作」各覆盖5阶段，全部通过；浏览器closed/replaced场景通过。
+M9 styles.css + GameView.tsx player-defaulted-debt：≤560px四列、长昵称折行、欠款独立全行；
+  浏览器 M9-360x640：页面scrollWidth345≤360，抽屉client/scrollWidth=311/311；
+  M9-390x844：页面scrollWidth375≤390，抽屉client/scrollWidth=341/341；无横向溢出。
+  截图 apps/web/tests/visual/05C-drawer-360.png 与05C-drawer-390.png；模拟视口，非真人真机。
+M10 game/settlement.ts、GameView.tsx：仅本人借入且未结清债务有资格显示中性利息行，
+  不把本人债权当债务、不猜具体贷款/金额；steps.test.ts「利息行只对本人有未结清贷款的观看者显示」
+  「私人未结清债务按本人借款人身份过滤，冻结和坏账不冒充 REPAID」通过。
+M11 settlement.ts、GameView.tsx：按seq/轮次取本人税后余额，其次下注余额，无则before；
+  steps.test.ts「合并快照已受下一轮催收改变时仍用上一轮服务端结算事件」
+  「按 seq 归属轮次，合并快照中的下一轮税单不能覆盖本轮税后余额」
+  「没有本人余额事件时保持 before，不采用下一轮快照余额」均通过。
+
+【每条T对应测试与结果】
+T1 steps.test.ts「到期贷款不属于自己时显示明确等待文案，且不泄露任何 loanId」通过。
+T2 steps.test.ts bankBlockedReason上述8种资格/边界通过。
+T3 steps.test.ts「利息行只对本人有未结清贷款的观看者显示」通过。
+T4（可选，已做）gameview.test.ts「%s只渲染一个向导和问题，没有05A常驻操作面板」
+  ACTION/BETTING/BANK_DUE/TAX(DANGER)/GAME_OVER五种SSR渲染均通过。
+T5 notices.test.ts共33项 + steps中原通知测试 + gameview事件渲染 + guided-integration真实事件，全部通过。
+T6（复核建议，已做）guided-integration.test.ts「REQUEST/ACCEPT/REPAY_PRIVATE/COLLECT_PRIVATE字段经过服务端实际入账」
+  「REFUSE真实关闭私人请求且双方不转账」「CANCEL真实关闭私人请求且双方不转账」
+  「BANK_DUE_DECISION真实还款，结果由该贷款状态确认」「RESCUE_GIVE_UP真实破产而不是通用操作成功」均通过。
+  真实双RichmanClient通过当前server/冻结core；不改scripts，未把UI夹具冒充联机验证。
+T7 guided-integration.test.ts三项：「BORROW_BANK超额拒绝不改版本/金币/行动，停留银行金额问题」
+  「REPAY_BANK超过金币拒绝不改账与行动，停留还款金额问题」
+  「ACCEPT余额不足是真实ok+FAILED：不转账、不建合同、明确通知且不保留过期待办」全部通过。
+  工单字面“ACCEPT余额不足停留同一收到请求”与冻结引擎冲突：请求实际FAILED关闭并消耗借款人行动，
+  故不保留可提交旧请求；此处按服务端事实展示，未私改协议/规则或伪造ok:false。
+T8 clock.test.ts正负偏移、重复样本、新校准、到期、SSR六项通过。
+T9 gameview.test.ts三种离线/替换状态×五阶段渲染通过；浏览器可见验证通过。
+
+【最新真实验收】
+pnpm test --reporter=verbose：24文件 / 345 passed (345)，exitCode=0。
+pnpm typecheck：tsc --noEmit -p tsconfig.json，exitCode=0。
+pnpm build：vite8.3.5，128 modules transformed，built in268ms，exitCode=0。
+pnpm smoke:lan：[smoke] PASS，exitCode=0；双真实WS借款/行动/下注/第2轮/过期版本冲突均通过。
+  本次甲12600、乙9900；开奖为服务端随机，验证按实际输赢，不固定结果。
+日志：artifacts/test-logs/05C-{test,typecheck,build,smoke-lan}-final.txt；
+  红绿过程05C-{view,notices,finance,clock,confirmations}-*.txt；UI事实记录05C-browser.txt。
+独立复核：通知/结果/确认绑定/阶段提示接线无剩余阻塞；校时/手机CSS无阻塞。
+  起初非提权网络测试EACCES的44失败已在可访问本机端口环境全量重跑，不当作通过证据。
+
+【本轮修改范围】
+生产：GameView.tsx、Countdown.tsx、game/{steps,settlement,notices,results,confirmations,clock}.ts、styles.css。
+测试：steps.test.ts增强；新增notices/clock/confirmations/gameview/guided-integration.test.ts；
+  view-fixtures.ts与ui-preview.html/tsx、visual截图用于真实组件的浏览器验收（不进生产构建入口）。
+交接：仅handoff/单元05C-*四类文件；项目当前状态与05C复核报告是开工前已有改动，本轮未写。
+未改core/server/shared/docs/scripts/package.json/锁文件；未改协议、未加依赖、未commit。
+
+【未完成与限制】
+真人/真机/实际弱网/键盘弹出遮挡仍待05B，不用组件夹具或模拟视口冒充。
+协议缺口仍未补：精确借款额度、私人贷款期限、逐人在线、利息明细；没有客户端算账。
+校时为单向serverNow估计，网络RTT未补偿；重要通知按已见事件记忆，重载后不做持久化历史。
+本轮T7字面冲突已明确说明，ACCEPT业务终结的真实行为有完整测试。
+以下为2026-11-03初版历史记录；最新结论以上述修复轮为准。
+
+日期：2026-11-03
+执行：Trae CN（DeepSeek Harness）
+依据：handoff/单元05C-引导式界面规格.txt + docs/plans/Richman分阶段联机开发方案_V1.3精简施工版.txt 第六节 3.1
+方案版本：V1.3.3
+规则版本：V1.3.2（未改动）
+
+【结论】
+05C = 代码验证通过。游戏页已从“一屏堆操作”重写为阶段引导式：任何时刻只展示一个问题，
+提交/跳过后才出现下一步；阶段整块切换；银行到期、危险自救、本轮结算与游戏结束均有独立视图。
+自动化测试、类型检查、构建、双客户端冒烟与浏览器双标签实测均通过。
+单元 05 整体仍不能标记完成：真人/真机试玩（05B）尚未进行。
+
+【完成项】
+1. 新增 apps/web/src/game/steps.ts（纯函数，不依赖 DOM/时钟/网络）：
+   - deriveStep(snapshot, uiState) 决定“当前唯一该问哪一步”；
+   - debtOptions / privateLenderOptions / bankBlockedReason 从快照派生可操作项与银行资格；
+   - 覆盖：本人行动回合、等待自己请求、他人回合、下注未锁定/已锁定、银行到期、危险自救、游戏结束。
+2. 新增 apps/web/src/game/settlement.ts：
+   - 只读服务端事件生成“本轮结算”卡（利息、税、下注结果），余额变化以“结算前 → 结算后”展示；
+   - 不计算利息/税/输赢；ROUND_STARTED(round+1) 之前的本轮事件才纳入，避免串轮。
+3. 重写 apps/web/src/GameView.tsx：
+   - 顶栏：第 i 轮 · 阶段（本人/等待）· 剩余时间 + 连接状态（在线/重连中/离线/已替换）；
+   - 固定区：自己金币、银行/私人负债、失信欠款、冻结/坏账、可借额度说明、信用/状态；
+   - 行动：Q1 私人借款 → Q2 银行借款 → Q3 还款或催收 → Q4 结束行动，每步可跳过；
+   - 下注：猜点 → 金额 → 杠杆 → 锁定；锁定后只显示自己的内容与“已提交/存活人数”；
+   - 等待答复：自己的请求显示对方、金额、利率、截止倒计时与取消；收到的请求显示同意/拒绝；
+   - 银行到期：应还金额、余额、到期轮、还款（REPAY）/拒绝（REFUSE）与失信后果；
+   - 危险自救：紧急借款（同 Q1 流程）/催收/放弃自救；
+   - 本轮结算：整轮变化后弹出可关闭摘要卡，点“继续”后才恢复下层交互；
+   - 其他玩家查询抽屉：不消耗行动、不改变当前引导步骤；
+   - 结果条与服务端错误条均可关闭；成功显示当前金币，失败停留原问题并显示 code+message。
+4. apps/web/src/net/client.ts：
+   - 新增 onEvents 处理服务端 events 消息；
+   - 补齐 BORROW_BANK / REQUEST_PRIVATE_LOAN / ACCEPT / REFUSE / CANCEL / REPAY_BANK /
+     REPAY_PRIVATE / COLLECT_PRIVATE / END_ACTION / BANK_DUE_DECISION / RESCUE_GIVE_UP / SUBMIT_BET。
+5. apps/web/src/net/wire.ts：
+   - 补齐私人与银行贷款状态类型（ACTIVE/REPAID/BAD_DEBT/FROZEN；请求含 FAILED）；
+   - 新增 rateLabel（整数基点显示百分比）与 privateLoanStatusLabel。
+6. apps/web/src/App.tsx：接入 events 累积（上限 300 条）与连接状态，进房/重开/返回大厅时清空。
+7. apps/web/src/styles.css：引导卡、选项按钮、顶栏、抽屉、结算 overlay、阶段提示；
+   主按钮/选项按钮最小高度 44px，输入框 48px。
+8. 新增 apps/web/tests/steps.test.ts：18 条不依赖 DOM 的纯函数测试（含结算卡串轮隔离）。
+
+【改动文件】
+- apps/web/src/game/steps.ts（新增）
+- apps/web/src/game/settlement.ts（新增）
+- apps/web/tests/steps.test.ts（新增）
+- apps/web/src/GameView.tsx（整页重写）
+- apps/web/src/net/client.ts（onEvents + 命令方法）
+- apps/web/src/net/wire.ts（类型与展示工具）
+- apps/web/src/App.tsx（events/status props）
+- apps/web/src/styles.css（引导式样式）
+
+未改动：packages/game-core/**、apps/server/**、packages/shared/**、docs/**。
+
+【验证结果（真实输出）】
+pnpm test        → 19 文件 / 240 条通过（core 134、server 82、web 24）
+pnpm typecheck   → 退出码 0
+pnpm build       → 退出码 0（vite 123 modules，dist js 363.88 kB）
+pnpm smoke:lan   → PASS（两个真实 WS 客户端跑借银行、双方行动、下注、第 2 轮结算与 VERSION_CONFLICT 补发）
+浏览器实测       → PASS：双标签建房/加入/开局；玩家页仅显示单个问题“是否向其他玩家借款？”；
+                   另一玩家显示“等待 玩家乙 行动”；控制台无报错、无错误横幅。
+
+【未完成项】
+1. 真人/真机试玩（05B）：手机 + 电脑完整一轮、刷新/断网恢复、真人卡点记录。
+2. 10 客户端压力验证（仍属 05B/06 范围）。
+3. 提交（本次按要求不 commit）。
+
+【已知问题 / 协议缺口（未擅改协议）】
+1. 快照没有 borrowableCents：无法显示“可借额度 X”，界面只提示“普通贷款上限为金币 50%，以服务端为准”。
+2. PublicPlayerView 没有金币字段：无法显示其他玩家余额、结算卡无法展示他人余额变化、催收上限只能提示“以服务端为准”。
+3. 私人贷款没有“期限”字段：Q1 只问金额与利率，不提供期限。
+4. 快照没有逐玩家在线字段：抽屉无法标注“离线”，仅有顶栏连接状态。
+5. INTEREST_ACCRUED 事件不带利息金额：结算卡显示“本轮已计息”，不臆造数值。
+6. 服务端在第 2 轮开始时自动推进；结算卡是覆盖层，关闭后恢复下层交互（不是真正阻塞阶段推进）。
+
+【复核结论】
+本轮未安排独立 agent 复核；已用纯函数测试、浏览器双标签实测与 smoke:lan 作为交叉验证。
+建议 05B 前由另一 agent 按规格逐条核对“只问一个问题”与阶段切换。
+
+【提交】
+无（按要求不 commit）。可回退点：工作区未提交改动。

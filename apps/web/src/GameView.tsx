@@ -1,5 +1,7 @@
-import { useEffect, useState } from "react";
-import type { WireCommandResult, WireSnapshotView } from "./net/wire";
+import { useEffect, useRef, useState } from "react";
+import type { ConnectionStatus, CommandOptions, RichmanClient } from "./net/client";
+import { clearSession } from "./net/client";
+import { Countdown } from "./Countdown";
 import {
   creditLabel,
   formatCents,
@@ -7,174 +9,1218 @@ import {
   isPositiveCents,
   loanStatusLabel,
   phaseLabel,
+  privateLoanStatusLabel,
+  rateLabel,
   statusLabel,
 } from "./net/wire";
-import type { CommandOptions, RichmanClient } from "./net/client";
+import type { WireCommandResult, WireGameEvent, WireLoanRequest, WireSnapshotView } from "./net/wire";
+import { deriveStep } from "./game/steps";
+import type { ActionStage, DebtOption, GuidedStep, UiState } from "./game/steps";
+import {
+  INITIAL_UI_STATE,
+  debtOptions,
+  playerName,
+  privateLenderOptions,
+  bankBlockedReason,
+  uiAfterOutcome,
+  BANK_LOAN_LIMIT_HINT,
+} from "./game/steps";
+import { deriveRoundSettlement, deriveSettlementBalance, hasInterestBearingDebt } from "./game/settlement";
+import type { RoundSettlement } from "./game/settlement";
+import { rememberLoanRequests } from "./game/notices";
+import type { KnownLoanRequest } from "./game/notices";
+import { createNoticeHistory, coverCommandNotices, dismissEventNotice, updateNoticeHistory } from "./game/notice-history";
+import { commandSuccessText } from "./game/results";
+import type { CommandKind, CommandSuccessContext } from "./game/results";
+import { confirmationIsCurrent } from "./game/confirmations";
+import type { ConfirmAction } from "./game/confirmations";
 
 export interface GameViewProps {
   roomCode: string;
   view: WireSnapshotView;
   client: RichmanClient;
+  status: ConnectionStatus;
+  statusDetail: string | null;
   result: WireCommandResult | null;
   /** 服务端推送的 error 消息（非 command_result），需在游戏内可见。 */
   error: { code: string; message: string } | null;
+  /** 服务端过滤后的本人可见事件；只用于本轮结算卡。 */
+  events: WireGameEvent[];
 }
 
-function Countdown({ deadlineAt }: { deadlineAt: string | null }) {
-  const [text, setText] = useState("—");
-
-  useEffect(() => {
-    if (deadlineAt === null) {
-      setText("—");
-      return;
-    }
-    const target = Date.parse(deadlineAt);
-    const tick = () => {
-      const remaining = target - Date.now();
-      if (!Number.isFinite(remaining) || remaining <= 0) {
-        setText("0:00");
-        return;
-      }
-      const totalSeconds = Math.floor(remaining / 1000);
-      setText(String(Math.floor(totalSeconds / 60)) + ":" + String(totalSeconds % 60).padStart(2, "0"));
-    };
-    tick();
-    const timer = window.setInterval(tick, 250);
-    return () => window.clearInterval(timer);
-  }, [deadlineAt]);
-
-  return <span className="countdown">{text}</span>;
-}
+const CONN_LABELS: Record<ConnectionStatus, string> = {
+  connecting: "重连中",
+  open: "在线",
+  closed: "离线",
+  replaced: "已替换",
+};
 
 const MONEY_LIMIT_TEXT = formatCents("1000000000000");
 
-/** 金额只做“规范整数分且不超过上限”的本地提示；真正校验与扣款全部由服务端完成。 */
-export function GameView({ roomCode, view, client, result, error }: GameViewProps) {
-  const [borrowInput, setBorrowInput] = useState("");
-  const [repayInput, setRepayInput] = useState("");
-  const [betInput, setBetInput] = useState("0");
+function stageHeadline(view: WireSnapshotView): string {
+  if (view.phase === "ACTION") {
+    return view.currentSeatId === view.me.seatId ? "你的操作阶段" : "等待行动阶段";
+  }
+  if (view.phase === "BETTING") {
+    return view.finance.myBet === null ? "你的下注阶段" : "你的下注阶段（已锁定）";
+  }
+  if (view.phase === "BANK_DUE") return "银行到期";
+  if (view.phase === "TAX") return view.me.status === "DANGER" ? "危险自救" : "交税与自救";
+  if (view.phase === "INTEREST") return "计息";
+  return "对局结束";
+}
+
+function parseRateBps(text: string): number | null {
+  if (!/^(0|[1-9][0-9]*)$/.test(text)) return null;
+  const value = Number(text);
+  return Number.isSafeInteger(value) && value >= 0 && value <= 10_000 ? value : null;
+}
+
+/** 仅比较整数分字符串大小，用于提示“余额可能不足”，不做金额运算。 */
+function centsLessThan(left: string, right: string): boolean {
+  const leftNegative = left.startsWith("-");
+  const rightNegative = right.startsWith("-");
+  if (leftNegative !== rightNegative) return leftNegative;
+  const leftAbs = leftNegative ? left.slice(1) : left;
+  const rightAbs = rightNegative ? right.slice(1) : right;
+  if (leftAbs.length !== rightAbs.length) {
+    return leftNegative ? leftAbs.length > rightAbs.length : leftAbs.length < rightAbs.length;
+  }
+  return leftNegative ? leftAbs > rightAbs : leftAbs < rightAbs;
+}
+
+interface ChoiceProps {
+  label: string;
+  hint?: string;
+  onClick: () => void;
+  disabled?: boolean;
+  tone?: "primary" | "ghost" | "danger";
+}
+
+function Choice({ label, hint, onClick, disabled = false, tone = "primary" }: ChoiceProps) {
+  return (
+    <button
+      type="button"
+      className={"choice " + tone}
+      onClick={onClick}
+      disabled={disabled}
+    >
+      <span className="choice-label">{label}</span>
+      {hint !== undefined ? <span className="choice-hint">{hint}</span> : null}
+    </button>
+  );
+}
+
+export function GameView({ roomCode, view, client, status, statusDetail, result, error, events }: GameViewProps) {
+  const [ui, setUi] = useState<UiState>(INITIAL_UI_STATE);
+  const [amount, setAmount] = useState("");
+  const [rateText, setRateText] = useState("1000");
+  const [lenderId, setLenderId] = useState<string | null>(null);
+  const [debtLoanId, setDebtLoanId] = useState<string | null>(null);
   const [guess, setGuess] = useState<0 | 1>(0);
   const [leverage, setLeverage] = useState<1 | 2>(1);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [dismissedResult, setDismissedResult] = useState<string | null>(null);
+  const [dismissedError, setDismissedError] = useState<string | null>(null);
+  const [phaseToast, setPhaseToast] = useState<string | null>(null);
+  const [settlement, setSettlement] = useState<{ round: number; before: string } | null>(null);
+  const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
+  const [, refreshNotices] = useState(0);
+
+  const prevRoundRef = useRef(view.round);
+  const prevCentsRef = useRef(view.finance.cents);
+  const prevPhaseRef = useRef(view.phase);
+  const prevPendingRef = useRef(view.finance.pendingRequest?.requestId ?? null);
+  type SentCommand = { commandId: string; kind: CommandKind } & CommandSuccessContext;
+  const pendingCommandsRef = useRef(new Map<string, SentCommand>());
+  const resultCommandRef = useRef<SentCommand | null>(null);
+  /** 记录曾出现在快照里的请求参与方；过期事件只有 requestId，需要它来定向提示。 */
+  const knownRequestsRef = useRef<Record<string, KnownLoanRequest>>({});
+  const noticeHistoryRef = useRef(createNoticeHistory());
+  const snapshotClockRef = useRef({ serverNow: view.serverNow, receivedAtMs: Date.now() });
+  if (snapshotClockRef.current.serverNow !== view.serverNow) {
+    snapshotClockRef.current = { serverNow: view.serverNow, receivedAtMs: Date.now() };
+  }
+  const countdownProps = { serverNow: view.serverNow, receivedAtMs: snapshotClockRef.current.receivedAtMs };
 
   const finance = view.finance;
-  const currentSeatId = view.currentSeatId;
-  const currentActor =
-    currentSeatId === null
+  const step = deriveStep(view, ui);
+  const currentConfirmation = confirmAction !== null && confirmationIsCurrent(confirmAction, view) ? confirmAction : null;
+  const blockedBank = bankBlockedReason(view);
+  const selfOptions = debtOptions(view);
+
+  if (result !== null && resultCommandRef.current?.commandId !== result.commandId) {
+    resultCommandRef.current = pendingCommandsRef.current.get(result.commandId) ?? null;
+    pendingCommandsRef.current.delete(result.commandId);
+  }
+  const resultCommand = result !== null && resultCommandRef.current?.commandId === result.commandId
+    ? resultCommandRef.current : null;
+  if (result?.outcome.ok && resultCommand !== null) {
+    coverCommandNotices(noticeHistoryRef.current, resultCommand);
+    // 结果横幅也保留语义事件；事件滚出缓冲后仍可更新当前金币，且不会退回“已提交”。
+    resultCommand.events = [...new Map([...(resultCommand.events ?? []), ...events]
+      .filter(event => event.seq > (resultCommand.afterEventSeq ?? -1) &&
+        ((resultCommand.requestId !== undefined && event.payload["requestId"] === resultCommand.requestId) ||
+          (resultCommand.loanId !== undefined && event.payload["loanId"] === resultCommand.loanId)))
+      .map(event => [event.seq, event])).values()];
+  }
+  knownRequestsRef.current = rememberLoanRequests(knownRequestsRef.current, events, view);
+  const { notices: eventNotices, nextExpiry } = updateNoticeHistory(noticeHistoryRef.current, events,
+    view.me.playerId, knownRequestsRef.current, { phase: view.phase, phaseInstanceId: view.phaseInstanceId,
+      inDanger: view.me.status === "DANGER", currentCents: finance.cents }, Date.now());
+  // 只保留当前请求、缓冲事件及未关闭通知需要的请求归属。
+  const referencedRequests = new Set([
+    ...events, ...[...noticeHistoryRef.current.records.values()].map(record => record.event),
+  ].map(event => event.payload["requestId"]).filter((id): id is string => typeof id === "string"));
+  for (const request of finance.incomingRequests) referencedRequests.add(request.requestId);
+  if (finance.pendingRequest !== null) referencedRequests.add(finance.pendingRequest.requestId);
+  knownRequestsRef.current = Object.fromEntries(Object.entries(knownRequestsRef.current)
+    .filter(([id, known]) => known.closedSeq === undefined || referencedRequests.has(id)));
+
+  useEffect(() => {
+    if (nextExpiry === null) return;
+    const timer = globalThis.setTimeout(() => refreshNotices(tick => tick + 1), Math.max(0, nextExpiry - Date.now()));
+    return () => globalThis.clearTimeout(timer);
+  }, [nextExpiry]);
+
+  /** 结算卡只做事件推导与快照过滤；利息行仅对本人有未结清贷款的观看者显示。 */
+  const settlementCard =
+    settlement === null
       ? null
-      : view.publicPlayers.find((player) => player.seatId === currentSeatId) ?? null;
+      : deriveRoundSettlement(events, settlement.round, view.me.playerId, {
+          hasOutstandingLoans: hasInterestBearingDebt(view),
+        });
 
-  let actionReason: string | null = null;
-  if (view.phase !== "ACTION") {
-    actionReason = "当前阶段是「" + phaseLabel(view.phase) + "」，不能执行行动";
-  } else if (currentSeatId !== view.me.seatId) {
-    actionReason = "还没轮到你，当前行动者是 " + (currentActor?.nickname ?? "其他玩家");
-  } else if (finance.pendingRequest !== null) {
-    actionReason = "正在等待出借人答复，暂不能继续行动";
-  } else if (!view.me.alive) {
-    actionReason = "已破产，不能行动";
-  }
+  /** 阶段切换时把引导步骤归零，避免上一阶段的输入残留。 */
+  useEffect(() => {
+    setUi(INITIAL_UI_STATE);
+    setAmount("");
+    setLenderId(null);
+    setDebtLoanId(null);
+    setNotice(null);
+  }, [view.phaseInstanceId]);
 
-  let betReason: string | null = null;
-  if (view.phase !== "BETTING") {
-    betReason = "当前阶段是「" + phaseLabel(view.phase) + "」，只有下注阶段可以下注";
-  } else if (finance.myBet !== null) {
-    betReason = "本轮下注已锁定，不能修改";
-  } else if (!view.me.alive) {
-    betReason = "已破产，不能下注";
-  }
+  useEffect(() => {
+    setConfirmAction(current => current !== null && !confirmationIsCurrent(current, view) ? null : current);
+  }, [view]);
 
-  const actionBlocked = actionReason !== null;
-  const betBlocked = betReason !== null;
+  /** 提交成功：行动/自救/下注都进入“等待或锁定”，本地步骤回到 Q1；失败则停留原问题。 */
+  useEffect(() => {
+    if (result === null) return;
+    setConfirmAction(null);
+    setUi((current) => uiAfterOutcome(current, result.outcome.ok));
+    if (result.outcome.ok !== true) return;
+    setAmount("");
+    setLenderId(null);
+    setDebtLoanId(null);
+    setNotice(null);
+  }, [result]);
 
-  const send = (type: string, payload: Record<string, unknown>, options: CommandOptions) => {
-    const commandId = client.sendCommand(type, payload, options);
+  /** 自己的待处理请求结束后（对方同意/拒绝/过期），回到自救或下一步。 */
+  const pendingRequestId = finance.pendingRequest?.requestId ?? null;
+  useEffect(() => {
+    if (prevPendingRef.current !== null && pendingRequestId === null) {
+      setUi(INITIAL_UI_STATE);
+      setAmount("");
+      setNotice(null);
+      setConfirmAction(null);
+    }
+    prevPendingRef.current = pendingRequestId;
+  }, [pendingRequestId]);
+
+  /** 轮次变化：弹出本轮结算卡，并短暂提示进入新阶段。 */
+  useEffect(() => {
+    if (view.round === prevRoundRef.current) {
+      prevCentsRef.current = finance.cents;
+      return;
+    }
+    const completed = prevRoundRef.current;
+    const before = prevCentsRef.current;
+    prevRoundRef.current = view.round;
+    prevCentsRef.current = finance.cents;
+    setSettlement({ round: completed, before });
+    setPhaseToast("第 " + String(view.round) + " 轮开始");
+  }, [view.round, finance.cents]);
+
+  useEffect(() => {
+    if (view.phase === prevPhaseRef.current) return;
+    prevPhaseRef.current = view.phase;
+    setConfirmAction(null);
+    if (view.phase !== "GAME_OVER") setPhaseToast("进入「" + phaseLabel(view.phase) + "」阶段");
+  }, [view.phase]);
+
+  useEffect(() => {
+    if (phaseToast === null) return;
+    const timer = window.setTimeout(() => setPhaseToast(null), 2200);
+    return () => window.clearTimeout(timer);
+  }, [phaseToast]);
+
+  const send = (run: () => string | null, kind: CommandKind = "generic", context: CommandSuccessContext = {}): void => {
+    if (status !== "open" || !client.hasJoined) {
+      setNotice("连接未就绪，当前不能提交；恢复连接后请重新确认");
+      return;
+    }
+    const commandId = run();
     if (commandId === null) {
       setNotice("连接未就绪或快照尚未到达，命令未发送");
       return;
     }
+    pendingCommandsRef.current.set(commandId, { commandId, kind, ...context, afterEventSeq: view.eventSeq });
     setNotice(null);
   };
 
-  const borrow = () => {
-    if (!isPositiveCents(borrowInput)) {
+  const versionOptions: CommandOptions = { expectedGameVersion: view.version };
+
+  const setActionStage = (stage: ActionStage) => {
+    setUi((current) => ({ ...current, actionStage: stage }));
+    setNotice(null);
+  };
+
+  const privateLenders = privateLenderOptions(view);
+  const chosenLender = privateLenders.find((player) => player.playerId === lenderId) ?? null;
+  const chosenDebt = selfOptions.find((option) => option.loanId === debtLoanId) ?? null;
+  const collectOptions = selfOptions.filter((option) => option.kind === "collectPrivate");
+
+  const rateValue = parseRateBps(rateText);
+  const amountValid = isPositiveCents(amount);
+
+  function submitPrivateRequest(): void {
+    if (lenderId === null || chosenLender === null) {
+      setNotice("请先选择出借人");
+      return;
+    }
+    if (!amountValid) {
       setNotice("借款金额必须是大于 0 且不超过 " + MONEY_LIMIT_TEXT + " 的整数");
       return;
     }
-    send("BORROW_BANK", { amountCents: borrowInput }, { expectedGameVersion: view.version });
-  };
-
-  const repay = (loanId: string) => {
-    if (!isPositiveCents(repayInput)) {
-      setNotice("还款金额必须是大于 0 且不超过 " + MONEY_LIMIT_TEXT + " 的整数");
+    if (rateValue === null) {
+      setNotice("利率必须是 0～10000 的整数基点（1000 基点 = 10%）");
       return;
     }
-    send("REPAY_BANK", { loanId, cents: repayInput }, { expectedGameVersion: view.version });
-  };
+    send(() => client.requestPrivateLoan(lenderId, amount, rateValue, versionOptions));
+  }
 
-  const endAction = () => {
-    send("END_ACTION", {}, { expectedGameVersion: view.version });
-  };
+  function submitDebt(): void {
+    if (chosenDebt === null) {
+      setNotice("没有可操作的贷款或合同");
+      return;
+    }
+    if (!amountValid) {
+      setNotice("还款/催收金额必须是大于 0 且不超过 " + MONEY_LIMIT_TEXT + " 的整数");
+      return;
+    }
+    if (chosenDebt.kind === "repayBank") {
+      send(() => client.repayBank(chosenDebt.loanId, amount, versionOptions));
+      return;
+    }
+    if (chosenDebt.kind === "repayPrivate") {
+      send(() => client.repayPrivateLoan(chosenDebt.loanId, amount, versionOptions));
+      return;
+    }
+    send(() => client.collectPrivateLoan(chosenDebt.loanId, amount, versionOptions));
+  }
 
-  const submitBet = () => {
-    if (!isNonNegativeCents(betInput)) {
+  function submitBet(): void {
+    if (!isNonNegativeCents(amount)) {
       setNotice("下注金额必须是不超过 " + MONEY_LIMIT_TEXT + " 的非负整数");
       return;
     }
-    send(
-      "SUBMIT_BET",
-      { betCents: betInput, guess, leverage },
-      { roundId: view.round, phaseInstanceId: view.phaseInstanceId },
+    send(() =>
+      client.submitBet(amount, guess, leverage, {
+        roundId: view.round,
+        phaseInstanceId: view.phaseInstanceId,
+      }),
     );
-  };
+  }
+
+  const resultVisible = result !== null && dismissedResult !== result.commandId;
+  const resultKind = resultCommand?.kind;
+  const errorVisible = error !== null && dismissedError !== error.code + "|" + error.message;
+
+  /** 高风险动作的第二步：显示关键后果，确认后立即发送；不是层层弹窗。 */
+  function renderConfirm(current: ConfirmAction) {
+    if (current.kind === "giveUp") {
+      return (
+        <section className="panel wizard">
+          <p className="eyebrow">危险自救 · 第 2 步确认</p>
+          <h2 className="question">确认放弃自救？</h2>
+          <p className="step-hint">
+            当前金币 {formatCents(finance.cents)} · 自救剩余{" "}
+            <Countdown deadlineAt={view.deadlineAt} {...countdownProps} />
+          </p>
+          <p className="step-hint danger-text">
+            确认后立即破产结算，无法撤销；银行贷款转为失信欠款，私人合同转为坏账或冻结。
+          </p>
+          <div className="choice-grid">
+            <Choice
+              label="确认放弃并立即破产"
+              tone="danger"
+              onClick={() => {
+                setConfirmAction(null);
+                send(() => client.giveUpRescue(versionOptions), "giveUp");
+              }}
+            />
+            <Choice label="返回" tone="ghost" onClick={() => setConfirmAction(null)} />
+          </div>
+        </section>
+      );
+    }
+
+    if (current.kind === "acceptLoan") {
+      const request = current.request;
+      const shortOnCash = centsLessThan(finance.cents, request.principalCents);
+      return (
+        <section className="panel wizard">
+          <p className="eyebrow">收到借款请求 · 第 2 步确认</p>
+          <h2 className="question">确认同意借款？</h2>
+          <p className="step-hint">
+            出借人：{view.me.nickname}（你） · 借款人：{playerName(view, request.borrowerId)}
+          </p>
+          <p className="step-hint">
+            金额 {formatCents(request.principalCents)} · 利率 {rateLabel(request.rateBps)}
+          </p>
+          <p className="step-hint">
+            对方信用 {creditLabel(request.borrowerCredit)} · 失信银行欠款{" "}
+            {formatCents(request.borrowerDefaultedBankDebtCents)}
+          </p>
+          <p className="step-hint danger-text">
+            确认后立即从你的金币转出 {formatCents(request.principalCents)} 并生成对方的私人借条，无法撤销。
+          </p>
+          {shortOnCash ? (
+            <p className="step-hint danger-text">
+              你的金币 {formatCents(finance.cents)} 少于出借金额；确认后请求会以“未成立”关闭，不会转账。
+            </p>
+          ) : null}
+          <div className="choice-grid">
+            <Choice
+              label="确认同意并立即转账"
+              onClick={() => {
+                setConfirmAction(null);
+                send(() => client.acceptPrivateLoan(request.requestId, versionOptions), "accept", { requestId: request.requestId });
+              }}
+            />
+            <Choice label="返回" tone="ghost" onClick={() => setConfirmAction(null)} />
+          </div>
+        </section>
+      );
+    }
+
+    const repay = current.kind === "bankRepay";
+    const shortOnCash = repay && centsLessThan(finance.cents, current.remaining);
+    return (
+      <section className="panel wizard">
+        <p className="eyebrow">银行到期 · 第 2 步确认</p>
+        <h2 className="question">{repay ? "确认还款？" : "确认拒绝还款？"}</h2>
+        <p className="step-hint">
+          应还 {formatCents(current.remaining)} · 当前金币 {formatCents(finance.cents)}
+        </p>
+        {repay ? (
+          shortOnCash ? (
+            <p className="step-hint danger-text">
+              余额不足：确认后服务端会按“余额不足”判失信，欠款保留且本局信用不再恢复。
+            </p>
+          ) : (
+            <p className="step-hint">确认后立即从金币扣除应还金额；服务端仍会最终裁决。</p>
+          )
+        ) : (
+          <p className="step-hint danger-text">
+            拒绝还款会立即记为失信：失信欠款保留、本局信用不再恢复，并影响后续借款。
+          </p>
+        )}
+        <div className="choice-grid">
+          <Choice
+            label={repay ? (shortOnCash ? "仍要还款" : "确认还款") : "确认拒绝并失信"}
+            tone={repay ? "primary" : "danger"}
+            onClick={() => {
+              setConfirmAction(null);
+              send(
+                () => client.decideBankDue(current.loanId, repay ? "REPAY" : "REFUSE", versionOptions),
+                "bankDue",
+                { loanId: current.loanId },
+              );
+            }}
+          />
+          <Choice label="返回" tone="ghost" onClick={() => setConfirmAction(null)} />
+        </div>
+      </section>
+    );
+  }
+
+  function renderStep(current: GuidedStep) {
+    if (current.kind === "gameOver") {
+      return (
+        <section className="panel wizard">
+          <p className="eyebrow">对局结束</p>
+          <h2 className="question">
+            {current.winnerId === null
+              ? "本局没有胜者"
+              : current.winnerId === view.me.playerId
+                ? "你赢了"
+                : current.winnerName === null
+                  ? "胜者未知"
+                  : current.winnerName + " 获胜"}
+          </h2>
+          <p className="step-hint">你的最终金币：{formatCents(finance.cents)}</p>
+          <p className="step-hint">本局已结束，不再显示任何操作。</p>
+        </section>
+      );
+    }
+
+    if (current.kind === "bankDue") {
+      return (
+        <section className="panel wizard">
+          <p className="eyebrow">银行到期</p>
+          <h2 className="question">有一笔银行贷款已到期</h2>
+          <p className="step-hint">
+            应还 {formatCents(current.loan.remainingCents)}，当前金币 {formatCents(finance.cents)}
+            {current.loan.origin === "OVERDRAFT" ? "（透支贷款）" : ""}
+            ，第 {current.loan.dueRound} 轮到期。
+          </p>
+          <p className="step-hint danger-text">
+            拒绝还款会立即记为失信：失信欠款保留、本局信用不再恢复，并影响后续借款。
+          </p>
+          <div className="choice-grid">
+            <Choice
+              label="还款"
+              hint={formatCents(current.loan.remainingCents) + "；确认后扣款，余额不足会判失信"}
+              onClick={() =>
+                setConfirmAction({
+                  kind: "bankRepay",
+                  loanId: current.loan.loanId,
+                  remaining: current.loan.remainingCents,
+                })
+              }
+            />
+            <Choice
+              label="拒绝还款"
+              hint="确认后立即转为失信欠款"
+              tone="danger"
+              onClick={() =>
+                setConfirmAction({
+                  kind: "bankRefuse",
+                  loanId: current.loan.loanId,
+                  remaining: current.loan.remainingCents,
+                })
+              }
+            />
+          </div>
+        </section>
+      );
+    }
+
+    if (current.kind === "requestBorrower") {
+      const cancelHint =
+        view.phase === "TAX"
+          ? "取消只关闭本次请求，自救继续，仍可再次发起"
+          : "取消会消耗本次行动，且不退还";
+      return (
+        <section className="panel wizard">
+          <p className="eyebrow">等待答复</p>
+          <h2 className="question">等待 {playerName(view, current.request.lenderId)} 确认</h2>
+          <p className="step-hint">
+            借款 {formatCents(current.request.principalCents)} · 利率 {rateLabel(current.request.rateBps)}
+          </p>
+          <p className="step-hint">
+            请求截止：<Countdown deadlineAt={view.deadlineAt} {...countdownProps} />
+          </p>
+          <p className="step-hint">{cancelHint}。</p>
+          <div className="choice-grid">
+            <Choice
+              label="取消请求"
+              hint={cancelHint}
+              tone="ghost"
+              onClick={() =>
+                send(() => client.cancelPrivateLoan(current.request.requestId, versionOptions), "cancel",
+                  { requestId: current.request.requestId, requestPhase: view.phase, requestPhaseInstanceId: view.phaseInstanceId })
+              }
+            />
+          </div>
+        </section>
+      );
+    }
+
+    if (current.kind === "requestLender") {
+      const request = current.request;
+      return (
+        <section className="panel wizard">
+          <p className="eyebrow">收到借款请求</p>
+          <h2 className="question">{playerName(view, request.borrowerId)} 想向你借款</h2>
+          <p className="step-hint">
+            金额 {formatCents(request.principalCents)} · 利率 {rateLabel(request.rateBps)} · 信用{" "}
+            {creditLabel(request.borrowerCredit)}
+          </p>
+          <p className="step-hint">
+            失信银行欠款：{formatCents(request.borrowerDefaultedBankDebtCents)}；同意/拒绝都不消耗你的行动。
+          </p>
+          <div className="choice-grid">
+            <Choice
+              label="同意借款"
+              hint="下一步确认金额、利率与对方信用"
+              onClick={() => setConfirmAction({ kind: "acceptLoan", request })}
+            />
+            <Choice
+              label="拒绝"
+              hint="请求关闭，不转账"
+              tone="ghost"
+              onClick={() =>
+                send(() => client.refusePrivateLoan(request.requestId, versionOptions), "refuse", { requestId: request.requestId })
+              }
+            />
+          </div>
+        </section>
+      );
+    }
+
+    if (current.kind === "actionWait") {
+      return (
+        <section className="panel wizard">
+          <p className="eyebrow">等待</p>
+          <h2 className="question">
+            {current.acted
+              ? "你已完成本轮行动"
+              : current.nickname === null
+                ? "等待其他玩家行动"
+                : "等待 " + current.nickname + " 行动"}
+          </h2>
+          <p className="step-hint">
+            {current.acted
+              ? "本轮不再给你新的问题；阶段推进后会自动出现下一步。"
+              : current.seatId === null
+                ? "本轮行动即将结束。"
+                : "其他玩家完成后会依次轮到你。"}
+          </p>
+        </section>
+      );
+    }
+
+    if (current.kind === "betting") {
+      if (current.stage === "guess") {
+        return (
+          <section className="panel wizard">
+            <p className="eyebrow">下注 · 第 1 问</p>
+            <h2 className="question">猜哪个点？</h2>
+            <div className="choice-grid two">
+              <Choice
+                label="猜 0"
+                onClick={() => {
+                  setGuess(0);
+                  setUi((state) => ({ ...state, betStage: "amount" }));
+                }}
+              />
+              <Choice
+                label="猜 1"
+                onClick={() => {
+                  setGuess(1);
+                  setUi((state) => ({ ...state, betStage: "amount" }));
+                }}
+              />
+            </div>
+          </section>
+        );
+      }
+      if (current.stage === "amount") {
+        return (
+          <section className="panel wizard">
+            <p className="eyebrow">下注 · 第 2 问</p>
+            <h2 className="question">下注多少？</h2>
+            <p className="step-hint">
+              可押 0～当前金币 {formatCents(finance.cents)}；输入 0 表示本轮不押。
+              {view.me.credit === "DEFAULTED" ? " 失信玩家只能押 1 倍。" : ""}
+            </p>
+            <input
+              className="input amount-input"
+              inputMode="numeric"
+              placeholder="下注金额（分）"
+              value={amount}
+              onChange={(event) => setAmount(event.target.value.trim())}
+            />
+            <div className="choice-grid">
+              <Choice
+                label="下一步"
+                hint={"猜 " + String(guess)}
+                onClick={() => {
+                  if (!isNonNegativeCents(amount)) {
+                    setNotice("下注金额必须是不超过 " + MONEY_LIMIT_TEXT + " 的非负整数");
+                    return;
+                  }
+                  setNotice(null);
+                  setUi((state) => ({ ...state, betStage: "leverage" }));
+                }}
+              />
+              <Choice
+                label="返回"
+                tone="ghost"
+                onClick={() => setUi((state) => ({ ...state, betStage: "guess" }))}
+              />
+            </div>
+          </section>
+        );
+      }
+      if (current.stage === "leverage") {
+        const defaulted = view.me.credit === "DEFAULTED";
+        return (
+          <section className="panel wizard">
+            <p className="eyebrow">下注 · 第 3 问</p>
+            <h2 className="question">用几倍杠杆？</h2>
+            <div className="choice-grid two">
+              <Choice
+                label="1 倍"
+                onClick={() => {
+                  setLeverage(1);
+                  setUi((state) => ({ ...state, betStage: "confirm" }));
+                }}
+              />
+              <Choice
+                label="2 倍"
+                hint={defaulted ? "失信玩家不可选" : "输赢翻倍"}
+                disabled={defaulted}
+                onClick={() => {
+                  setLeverage(2);
+                  setUi((state) => ({ ...state, betStage: "confirm" }));
+                }}
+              />
+            </div>
+            <div className="choice-grid">
+              <Choice
+                label="返回"
+                tone="ghost"
+                onClick={() => setUi((state) => ({ ...state, betStage: "amount" }))}
+              />
+            </div>
+          </section>
+        );
+      }
+      return (
+        <section className="panel wizard">
+          <p className="eyebrow">下注 · 第 4 问</p>
+          <h2 className="question">确认锁定？</h2>
+          <p className="step-hint">
+            猜 {String(guess)} · 押 {isNonNegativeCents(amount) ? formatCents(amount) : "（未填写）"} · {String(leverage)} 倍
+          </p>
+          <p className="step-hint">锁定后不可修改；开奖前别人看不到你的金额、猜测与杠杆。</p>
+          <div className="choice-grid">
+            <Choice
+              label="锁定下注"
+              onClick={() => {
+                submitBet();
+                setUi((state) => ({ ...state, betStage: "confirm" }));
+              }}
+            />
+            <Choice
+              label="返回修改"
+              tone="ghost"
+              onClick={() => setUi((state) => ({ ...state, betStage: "leverage" }))}
+            />
+          </div>
+        </section>
+      );
+    }
+
+    if (current.kind === "betLocked") {
+      const others = view.publicPlayers.filter(
+        (player) => player.alive && player.playerId !== view.me.playerId,
+      );
+      return (
+        <section className="panel wizard">
+          <p className="eyebrow">已锁定</p>
+          <h2 className="question">已锁定，等待其他玩家</h2>
+          <p className="step-hint">
+            你押了 {formatCents(current.bet.betCents)}，猜 {String(current.bet.guess)}，{String(current.bet.leverage)} 倍。
+          </p>
+          <p className="step-hint">
+            已提交 {String(current.submitted)} / {String(current.alive)} 人。锁定后不可修改。
+          </p>
+          <div className="loan-list">
+            {others.map((player) => (
+              <div className="loan-row" key={player.playerId}>
+                <span>{player.nickname}</span>
+                <span>{finance.betsSubmitted.includes(player.playerId) ? "已提交" : "未提交"}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      );
+    }
+
+    if (current.kind === "danger") {
+      if (current.stage === "ask") {
+        return (
+          <section className="panel wizard">
+            <p className="eyebrow">危险自救</p>
+            <h2 className="question">金币为负，需要自救</h2>
+            <p className="step-hint">
+              当前金币 {formatCents(finance.cents)} · 自救剩余 <Countdown deadlineAt={view.deadlineAt} {...countdownProps} />
+            </p>
+            <p className="step-hint">补到 0 以上即解除危险；放弃或超时会被破产结算。</p>
+            <div className="choice-grid">
+              <Choice
+                label="紧急借款"
+                hint="向其他玩家发起请求"
+                onClick={() => setUi((state) => ({ ...state, dangerStage: "privateLender" }))}
+              />
+              {collectOptions.length > 0 ? (
+                <Choice
+                  label="催收"
+                  hint="收回别人欠你的私人借款"
+                  onClick={() => setUi((state) => ({ ...state, dangerStage: "collect" }))}
+                />
+              ) : null}
+              <Choice
+                label="放弃自救"
+                hint="下一步确认后立即破产"
+                tone="danger"
+                onClick={() => setConfirmAction({ kind: "giveUp" })}
+              />
+            </div>
+          </section>
+        );
+      }
+      if (current.stage === "privateLender") {
+        return (
+          <section className="panel wizard">
+            <p className="eyebrow">紧急借款 · 选择出借人</p>
+            <h2 className="question">向谁借款？</h2>
+            <div className="choice-grid">
+              {privateLenders.map((player) => (
+                <Choice
+                  key={player.playerId}
+                  label={player.nickname + "（座位 " + String(player.seatId) + "）"}
+                  hint={"信用 " + creditLabel(player.credit) + " · 失信欠款 " + formatCents(player.defaultedBankDebtCents)}
+                  onClick={() => {
+                    setLenderId(player.playerId);
+                    setUi((state) => ({ ...state, dangerStage: "privateAmount" }));
+                  }}
+                />
+              ))}
+            </div>
+            <div className="choice-grid">
+              <Choice
+                label="返回"
+                tone="ghost"
+                onClick={() => setUi((state) => ({ ...state, dangerStage: "ask" }))}
+              />
+            </div>
+          </section>
+        );
+      }
+      if (current.stage === "privateAmount") {
+        return (
+          <section className="panel wizard">
+            <p className="eyebrow">紧急借款 · 金额与利率</p>
+            <h2 className="question">
+              向 {chosenLender === null ? "出借人" : chosenLender.nickname} 借多少？
+            </h2>
+            <input
+              className="input amount-input"
+              inputMode="numeric"
+              placeholder="借款金额（分）"
+              value={amount}
+              onChange={(event) => setAmount(event.target.value.trim())}
+            />
+            <input
+              className="input"
+              inputMode="numeric"
+              placeholder="利率（基点，1000 = 10%）"
+              value={rateText}
+              onChange={(event) => setRateText(event.target.value.trim())}
+            />
+            <div className="choice-grid">
+              <Choice label="发起请求" onClick={submitPrivateRequest} />
+              <Choice
+                label="返回"
+                tone="ghost"
+                onClick={() => setUi((state) => ({ ...state, dangerStage: "privateLender" }))}
+              />
+            </div>
+          </section>
+        );
+      }
+      if (current.stage === "collect") {
+        return (
+          <section className="panel wizard">
+            <p className="eyebrow">催收</p>
+            <h2 className="question">催收哪一笔？</h2>
+            <div className="choice-grid">
+              {collectOptions.map((option) => (
+                <Choice
+                  key={option.loanId}
+                  label={playerName(view, option.counterpartyId) + " 欠你 " + formatCents(option.remainingCents)}
+                  hint={"利率 " + rateLabel(option.rateBps) + "；实际可收以服务端为准"}
+                  onClick={() => {
+                    setDebtLoanId(option.loanId);
+                    setUi((state) => ({ ...state, dangerStage: "collectAmount" }));
+                  }}
+                />
+              ))}
+            </div>
+            <div className="choice-grid">
+              <Choice
+                label="返回"
+                tone="ghost"
+                onClick={() => setUi((state) => ({ ...state, dangerStage: "ask" }))}
+              />
+            </div>
+          </section>
+        );
+      }
+      return (
+        <section className="panel wizard">
+          <p className="eyebrow">催收 · 金额</p>
+          <h2 className="question">催收多少？</h2>
+          <p className="step-hint">
+            {chosenDebt === null
+              ? "请选择要催收的合同"
+              : playerName(view, chosenDebt.counterpartyId) + " 剩余 " + formatCents(chosenDebt.remainingCents)}
+          </p>
+          <p className="step-hint">催收上限为“剩余欠款”与对方当前金币中的较小值，最终以服务端为准。</p>
+          <input
+            className="input amount-input"
+            inputMode="numeric"
+            placeholder="催收金额（分）"
+            value={amount}
+            onChange={(event) => setAmount(event.target.value.trim())}
+          />
+          <div className="choice-grid">
+            <Choice
+              label="确认催收"
+              disabled={chosenDebt === null}
+              onClick={() => {
+                if (chosenDebt === null) {
+                  setNotice("请先选择要催收的合同");
+                  return;
+                }
+                if (!amountValid) {
+                  setNotice("催收金额必须是大于 0 且不超过 " + MONEY_LIMIT_TEXT + " 的整数");
+                  return;
+                }
+                send(() => client.collectPrivateLoan(chosenDebt.loanId, amount, versionOptions));
+              }}
+            />
+            <Choice
+              label="返回"
+              tone="ghost"
+              onClick={() => setUi((state) => ({ ...state, dangerStage: "collect" }))}
+            />
+          </div>
+        </section>
+      );
+    }
+
+    if (current.kind === "actionOwn") {
+      const stage = current.stage;
+      const debtList = current.debtOptions;
+
+      if (stage === "askPrivate") {
+        return (
+          <section className="panel wizard">
+            <p className="eyebrow">行动 · 第 1 问</p>
+            <h2 className="question">是否向其他玩家借款？</h2>
+            <p className="step-hint">
+              跳过不消耗行动；提交成功后行动立即用掉，并进入等待。
+            </p>
+            <div className="choice-grid">
+              <Choice
+                label="是，查看可借玩家"
+                hint={privateLenders.length === 0 ? "当前没有存活的其他玩家" : "共 " + String(privateLenders.length) + " 人"}
+                disabled={privateLenders.length === 0}
+                onClick={() => {
+                  if (privateLenders.length === 0) {
+                    setNotice("当前没有可借款的存活玩家");
+                    return;
+                  }
+                  setActionStage("privateLender");
+                }}
+              />
+              <Choice label="跳过" hint="进入 Q2" tone="ghost" onClick={() => setActionStage("askBank")} />
+            </div>
+          </section>
+        );
+      }
+
+      if (stage === "privateLender") {
+        return (
+          <section className="panel wizard">
+            <p className="eyebrow">行动 · Q1 选择出借人</p>
+            <h2 className="question">向谁借款？</h2>
+            <div className="choice-grid">
+              {privateLenders.map((player) => (
+                <Choice
+                  key={player.playerId}
+                  label={player.nickname + "（座位 " + String(player.seatId) + "）"}
+                  hint={"信用 " + creditLabel(player.credit) + " · 失信欠款 " + formatCents(player.defaultedBankDebtCents)}
+                  onClick={() => {
+                    setLenderId(player.playerId);
+                    setActionStage("privateAmount");
+                  }}
+                />
+              ))}
+            </div>
+            <div className="choice-grid">
+              <Choice label="取消（跳过 Q1）" tone="ghost" onClick={() => setActionStage("askBank")} />
+            </div>
+          </section>
+        );
+      }
+
+      if (stage === "privateAmount") {
+        return (
+          <section className="panel wizard">
+            <p className="eyebrow">行动 · Q1 金额与利率</p>
+            <h2 className="question">
+              向 {chosenLender === null ? "出借人" : chosenLender.nickname} 借多少？
+            </h2>
+            <p className="step-hint">
+              金额上限以服务端为准；利率 0～10000 基点，本局标准利率为 10%（1000 基点）。
+            </p>
+            <input
+              className="input amount-input"
+              inputMode="numeric"
+              placeholder="借款金额（分）"
+              value={amount}
+              onChange={(event) => setAmount(event.target.value.trim())}
+            />
+            <input
+              className="input"
+              inputMode="numeric"
+              placeholder="利率（基点，1000 = 10%）"
+              value={rateText}
+              onChange={(event) => setRateText(event.target.value.trim())}
+            />
+            <div className="choice-grid">
+              <Choice label="提交借款请求" onClick={submitPrivateRequest} />
+              <Choice label="返回" tone="ghost" onClick={() => setActionStage("privateLender")} />
+            </div>
+          </section>
+        );
+      }
+
+      if (stage === "askBank") {
+        return (
+          <section className="panel wizard">
+            <p className="eyebrow">行动 · 第 2 问</p>
+            <h2 className="question">是否向银行借款？</h2>
+            <p className="step-hint">
+              当前金币 {formatCents(finance.cents)}；{BANK_LOAN_LIMIT_HINT}。
+            </p>
+            {blockedBank !== null ? <p className="step-hint danger-text">{blockedBank}</p> : null}
+            <div className="choice-grid">
+              <Choice
+                label="是，输入金额"
+                disabled={blockedBank !== null}
+                onClick={() => setActionStage("bankAmount")}
+              />
+              <Choice label="不需要" hint="进入 Q3" tone="ghost" onClick={() => setActionStage("askDebt")} />
+            </div>
+          </section>
+        );
+      }
+
+      if (stage === "bankAmount") {
+        return (
+          <section className="panel wizard">
+            <p className="eyebrow">行动 · Q2 银行金额</p>
+            <h2 className="question">向银行借多少？</h2>
+            <p className="step-hint">
+              当前金币 {formatCents(finance.cents)}；{BANK_LOAN_LIMIT_HINT}。
+            </p>
+            <input
+              className="input amount-input"
+              inputMode="numeric"
+              placeholder="借款金额（分）"
+              value={amount}
+              onChange={(event) => setAmount(event.target.value.trim())}
+            />
+            <div className="choice-grid">
+              <Choice
+                label="确认借款"
+                disabled={blockedBank !== null}
+                onClick={() => {
+                  if (!amountValid) {
+                    setNotice("借款金额必须是大于 0 且不超过 " + MONEY_LIMIT_TEXT + " 的整数");
+                    return;
+                  }
+                  send(() => client.borrowBank(amount, versionOptions));
+                }}
+              />
+              <Choice label="返回" tone="ghost" onClick={() => setActionStage("askBank")} />
+            </div>
+          </section>
+        );
+      }
+
+      if (stage === "askDebt") {
+        return (
+          <section className="panel wizard">
+            <p className="eyebrow">行动 · 第 3 问</p>
+            <h2 className="question">是否还款或催收？</h2>
+            <div className="choice-grid">
+              {debtList.map((option) => (
+                <Choice
+                  key={option.kind + ":" + option.loanId}
+                  label={debtOptionLabel(view, option)}
+                  hint={debtOptionHint(option)}
+                  onClick={() => {
+                    setDebtLoanId(option.loanId);
+                    setActionStage("debtAmount");
+                  }}
+                />
+              ))}
+            </div>
+            <div className="choice-grid">
+              <Choice label="跳过" hint="进入 Q4" tone="ghost" onClick={() => setActionStage("endAction")} />
+            </div>
+          </section>
+        );
+      }
+
+      if (stage === "debtAmount") {
+        return (
+          <section className="panel wizard">
+            <p className="eyebrow">行动 · Q3 金额</p>
+            <h2 className="question">
+              {chosenDebt === null ? "选择一笔贷款或合同" : debtOptionLabel(view, chosenDebt) + "：还/收多少？"}
+            </h2>
+            {chosenDebt !== null ? <p className="step-hint">{debtOptionHint(chosenDebt)}</p> : null}
+            <input
+              className="input amount-input"
+              inputMode="numeric"
+              placeholder="金额（分）"
+              value={amount}
+              onChange={(event) => setAmount(event.target.value.trim())}
+            />
+            <div className="choice-grid">
+              <Choice
+                label={chosenDebt !== null && chosenDebt.kind === "collectPrivate" ? "确认催收" : "确认还款"}
+                disabled={chosenDebt === null}
+                onClick={submitDebt}
+              />
+              <Choice label="返回" tone="ghost" onClick={() => setActionStage("askDebt")} />
+            </div>
+          </section>
+        );
+      }
+
+      return (
+        <section className="panel wizard">
+          <p className="eyebrow">行动 · 第 4 问</p>
+          <h2 className="question">结束行动？</h2>
+          <p className="step-hint">确认后本轮行动用掉，等待其他玩家完成行动。</p>
+          <div className="choice-grid">
+            <Choice
+              label="确认结束行动"
+              onClick={() => send(() => client.endAction(versionOptions))}
+            />
+            {debtList.length > 0 ? (
+              <Choice label="返回 Q3" tone="ghost" onClick={() => setActionStage("askDebt")} />
+            ) : null}
+          </div>
+        </section>
+      );
+    }
+
+    return (
+      <section className="panel wizard">
+        <p className="eyebrow">等待</p>
+        <h2 className="question">{current.title}</h2>
+        <p className="step-hint">{current.detail}</p>
+      </section>
+    );
+  }
+
+  if (status === "replaced") {
+    return <section className="panel replaced">
+      <h1>已在另一页面恢复</h1>
+      <p>当前页面已停止操作；请在接管页面继续，或主动返回恢复入口。</p>
+      <button type="button" className="primary" onClick={() => { clearSession(); window.location.reload(); }}>返回恢复入口</button>
+    </section>;
+  }
 
   return (
     <div className="game">
       <header className="game-top">
-        <div className="game-title">
-          <p className="eyebrow">房间码</p>
-          <h1 className="room-code small">{roomCode}</h1>
+        <div>
+          <p className="eyebrow">房间 {roomCode}</p>
+          <p className="top-line">
+            第 {view.round} 轮 · {stageHeadline(view)}
+            <span className="top-sep">·</span>
+            剩余 <Countdown deadlineAt={view.deadlineAt} {...countdownProps} />
+          </p>
         </div>
-        <div className="game-meta">
-          <span>第 {view.round} 轮</span>
-          <span>阶段：{phaseLabel(view.phase)}</span>
-          <span>
-            当前行动者：{currentActor === null ? "无（等待阶段推进）" : currentActor.nickname}
-          </span>
-          <span>
-            倒计时：<Countdown deadlineAt={view.deadlineAt} />
-          </span>
+        <div className={"conn " + status} title={statusDetail ?? undefined}>
+          <span className={"dot " + status} />
+          {CONN_LABELS[status]}
         </div>
       </header>
 
-      {result !== null ? (
-        <div className={result.outcome.ok ? "banner ok" : "banner fail"}>
-          {result.outcome.ok
-            ? "操作成功（状态版本 " + String(result.gameVersion) + "）"
-            : result.outcome.code + "：" + result.outcome.message}
-        </div>
-      ) : null}
-      {error !== null ? (
-        <div className="banner fail">
-          {error.code}：{error.message}
-        </div>
-      ) : null}
-      {notice !== null ? <div className="banner fail">{notice}</div> : null}
+      {phaseToast !== null ? <div className="phase-toast">{phaseToast}</div> : null}
 
-      <section className="panel">
-        <h2>我的资产</h2>
+      {resultVisible && result !== null ? (
+        <div className={"banner " + (result.outcome.ok ? (resultKind === "accept" || resultKind === "bankDue" || resultKind === "giveUp" ? "info" : "ok") : "fail")}>
+          <span>
+            {result.outcome.ok
+              ? commandSuccessText(resultKind, view, { ...resultCommand, events: [...(resultCommand?.events ?? []), ...events] })
+              : result.outcome.code + "：" + result.outcome.message}
+          </span>
+          <button type="button" className="link" onClick={() => setDismissedResult(result.commandId)}>
+            关闭
+          </button>
+        </div>
+      ) : null}
+      {errorVisible && error !== null ? (
+        <div className="banner fail">
+          <span>
+            {error.code}：{error.message}
+          </span>
+          <button
+            type="button"
+            className="link"
+            onClick={() => setDismissedError(error.code + "|" + error.message)}
+          >
+            关闭
+          </button>
+        </div>
+      ) : null}
+      {notice !== null ? (
+        <div className="banner fail">
+          <span>{notice}</span>
+          <button type="button" className="link" onClick={() => setNotice(null)}>
+            关闭
+          </button>
+        </div>
+      ) : null}
+      {eventNotices.map((item) => (
+        <div className={"banner " + item.tone} role="status" key={item.id}>
+          <span>{item.text}</span>
+          <button
+            type="button"
+            className="link"
+            onClick={() => {
+              dismissEventNotice(noticeHistoryRef.current, item.id);
+              refreshNotices(tick => tick + 1);
+            }}
+          >
+            关闭
+          </button>
+        </div>
+      ))}
+
+      <section className="panel self-panel">
+        <div className="self-head">
+          <div>
+            <p className="eyebrow">我</p>
+            <p className="self-name">
+              {view.me.nickname} · 座位 {view.me.seatId}
+            </p>
+          </div>
+          <button type="button" className="topbar-btn" onClick={() => setDrawerOpen(true)}>
+            查看其他玩家（不消耗行动）
+          </button>
+        </div>
         <div className="stats">
           <div className="stat">
             <span className="stat-label">金币</span>
             <span className="stat-value">{formatCents(finance.cents)}</span>
-          </div>
-          <div className="stat">
-            <span className="stat-label">信用</span>
-            <span className="stat-value">{creditLabel(view.me.credit)}</span>
-          </div>
-          <div className="stat">
-            <span className="stat-label">失信银行欠款</span>
-            <span className="stat-value">{formatCents(finance.bankDefaultedDebtCents)}</span>
           </div>
           <div className="stat">
             <span className="stat-label">总负债</span>
@@ -182,163 +1228,165 @@ export function GameView({ roomCode, view, client, result, error }: GameViewProp
               银行 {formatCents(finance.bankDebtCents)} · 私人 {formatCents(finance.privateDebtCents)}
             </span>
           </div>
-        </div>
-      </section>
-
-      <section className="panel">
-        <h2>玩家</h2>
-        <div className="player-table">
-          <div className="player-row player-head">
-            <span>座位</span>
-            <span>昵称</span>
-            <span>信用</span>
-            <span>状态</span>
-            <span>失信欠款</span>
+          <div className="stat">
+            <span className="stat-label">失信银行欠款</span>
+            <span className="stat-value">{formatCents(finance.bankDefaultedDebtCents)}</span>
           </div>
-          {view.publicPlayers.map((player) => (
-            <div
-              className={"player-row" + (player.seatId === currentSeatId ? " current" : "")}
-              key={player.playerId}
-            >
-              <span>#{player.seatId}</span>
-              <span>
-                {player.nickname}
-                {player.playerId === view.me.playerId ? <span className="tag me">我</span> : null}
-                {!player.alive ? <span className="tag">出局</span> : null}
-              </span>
-              <span>{creditLabel(player.credit)}</span>
-              <span>{statusLabel(player.status)}</span>
-              <span>{formatCents(player.defaultedBankDebtCents)}</span>
-            </div>
-          ))}
+          <div className="stat">
+            <span className="stat-label">冻结 / 坏账</span>
+            <span className="stat-value">
+              {formatCents(finance.frozenCents)} / {formatCents(finance.badDebtCents)}
+            </span>
+          </div>
+          <div className="stat">
+            <span className="stat-label">可借额度</span>
+            <span className="stat-value small">
+              {blockedBank ?? BANK_LOAN_LIMIT_HINT}
+            </span>
+          </div>
+          <div className="stat">
+            <span className="stat-label">信用 / 状态</span>
+            <span className="stat-value small">
+              {creditLabel(view.me.credit)} / {statusLabel(view.me.status)}
+            </span>
+          </div>
         </div>
       </section>
 
-      <section className="panel">
-        <h2>我的行动</h2>
-        {view.pendingDueLoanId !== null ? (
-          <p className="reason">
-            你有一笔到期贷款等待决策；05 最小版本未提供决策按钮，超时后会按“拒绝还款”自动结算。
-          </p>
-        ) : null}
-        <div className="row">
-          <input
-            className="input"
-            inputMode="numeric"
-            placeholder="借款金额（分）"
-            value={borrowInput}
-            onChange={(event) => setBorrowInput(event.target.value.trim())}
-            disabled={actionBlocked}
-          />
-          <button type="button" className="primary" onClick={borrow} disabled={actionBlocked}>
-            借银行
-          </button>
-          <button type="button" className="primary" onClick={endAction} disabled={actionBlocked}>
-            结束行动
-          </button>
-        </div>
-        <p className="hint">金额单位为分：1 金币 = 100 分，输入十进制整数。</p>
-        {actionReason !== null ? <p className="reason">{actionReason}</p> : null}
-      </section>
+      {status !== "open" || !client.hasJoined ? <section className="panel wizard">
+        <p className="eyebrow">连接未就绪</p><h2 className="question">连接恢复后才能继续操作</h2>
+        <p className="step-hint">当前仅显示最后一次快照；重连后以服务端最新状态重新确认。</p>
+      </section> : currentConfirmation !== null ? renderConfirm(currentConfirmation) : renderStep(step)}
 
-      <section className="panel">
-        <h2>银行贷款</h2>
-        {finance.bankLoans.length === 0 ? (
-          <p className="hint">暂无银行贷款。</p>
-        ) : (
-          <>
-            <div className="row">
-              <input
-                className="input"
-                inputMode="numeric"
-                placeholder="还款金额（分）"
-                value={repayInput}
-                onChange={(event) => setRepayInput(event.target.value.trim())}
-                disabled={actionBlocked}
-              />
-              <span className="hint">填好金额后点某一笔贷款右侧的“还这笔”。</span>
+      {finance.privateLoans.length > 0 ? (
+        <section className="panel">
+          <h2>我的私人合同</h2>
+          <div className="loan-list">
+            {finance.privateLoans.map((loan) => (
+              <div className="loan-row" key={loan.loanId}>
+                <span>
+                  {loan.borrowerId === view.me.playerId
+                    ? "我欠 " + playerName(view, loan.lenderId)
+                    : playerName(view, loan.borrowerId) + " 欠我"}
+                </span>
+                <span>剩余 {formatCents(loan.remainingCents)}</span>
+                <span>利率 {rateLabel(loan.rateBps)}</span>
+                <span>{privateLoanStatusLabel(loan.status)}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {finance.bankLoans.length > 0 ? (
+        <section className="panel">
+          <h2>我的银行贷款</h2>
+          <div className="loan-list">
+            {finance.bankLoans.map((loan) => (
+              <div className="loan-row" key={loan.loanId}>
+                <span>{loan.origin === "OVERDRAFT" ? "透支贷款" : "普通贷款"}</span>
+                <span>剩余 {formatCents(loan.remainingCents)}</span>
+                <span>第 {loan.dueRound} 轮到期</span>
+                <span>{loanStatusLabel(loan.status)}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {drawerOpen ? (
+        <div className="overlay" role="dialog" aria-modal="true" onClick={() => setDrawerOpen(false)}>
+          <aside className="drawer" onClick={(event) => event.stopPropagation()}>
+            <div className="drawer-head">
+              <h2>其他玩家</h2>
+              <button type="button" className="link" onClick={() => setDrawerOpen(false)}>
+                关闭
+              </button>
             </div>
-            <div className="loan-list">
-              {finance.bankLoans.map((loan) => (
-                <div className="loan-row" key={loan.loanId}>
-                  <span className="mono">{loan.loanId}</span>
-                  <span>剩余 {formatCents(loan.remainingCents)}</span>
-                  <span>第 {loan.dueRound} 轮到期</span>
-                  <span>{loanStatusLabel(loan.status)}</span>
-                  <button
-                    type="button"
-                    className="primary"
-                    onClick={() => repay(loan.loanId)}
-                    disabled={actionBlocked || loan.status !== "ACTIVE"}
-                  >
-                    还这笔
-                  </button>
+            <div className="player-table">
+              <div className="player-row player-head">
+                <span>座位</span>
+                <span>昵称</span>
+                <span>状态</span>
+                <span>信用</span>
+                <span className="player-defaulted-debt">失信欠款</span>
+              </div>
+              {view.publicPlayers.map((player) => (
+                <div
+                  className={"player-row" + (player.seatId === view.currentSeatId ? " current" : "")}
+                  key={player.playerId}
+                >
+                  <span>#{player.seatId}</span>
+                  <span>
+                    {player.nickname}
+                    {player.playerId === view.me.playerId ? <span className="tag me">我</span> : null}
+                    {!player.alive ? <span className="tag">出局</span> : null}
+                  </span>
+                  <span>{statusLabel(player.status)}</span>
+                  <span>{creditLabel(player.credit)}</span>
+                  <span className="player-defaulted-debt">{formatCents(player.defaultedBankDebtCents)}</span>
                 </div>
               ))}
             </div>
-          </>
-        )}
-      </section>
-
-      <section className={"panel" + (view.phase === "BETTING" ? " active-panel" : "")}>
-        <h2>下注</h2>
-        <div className="row">
-          <input
-            className="input"
-            inputMode="numeric"
-            placeholder="下注金额（分）"
-            value={betInput}
-            onChange={(event) => setBetInput(event.target.value.trim())}
-            disabled={betBlocked}
-          />
-          <select
-            className="input"
-            value={guess}
-            onChange={(event) => setGuess(event.target.value === "1" ? 1 : 0)}
-            disabled={betBlocked}
-          >
-            <option value="0">猜 0</option>
-            <option value="1">猜 1</option>
-          </select>
-          <select
-            className="input"
-            value={leverage}
-            onChange={(event) => setLeverage(event.target.value === "2" ? 2 : 1)}
-            disabled={betBlocked}
-          >
-            <option value="1">杠杆 1 倍</option>
-            <option value="2">杠杆 2 倍</option>
-          </select>
-          <button type="button" className="primary" onClick={submitBet} disabled={betBlocked}>
-            提交下注
-          </button>
+            <p className="hint">查询不消耗行动，也不会打断当前引导步骤。</p>
+          </aside>
         </div>
-        <p className="hint">
-          已提交下注：{finance.betsSubmitted.length} / {finance.aliveCount}
-          {finance.myBet !== null
-            ? "；我已锁定 " +
-              formatCents(finance.myBet.betCents) +
-              "，猜 " +
-              String(finance.myBet.guess) +
-              "，杠杆 " +
-              String(finance.myBet.leverage) +
-              " 倍"
-            : ""}
-        </p>
-        {betReason !== null ? <p className="reason">{betReason}</p> : null}
-      </section>
-
-      {view.phase === "GAME_OVER" ? (
-        <section className="panel">
-          <h2>对局结束</h2>
-          <p>
-            胜者：
-            {view.winnerId === null
-              ? "无"
-              : view.publicPlayers.find((player) => player.playerId === view.winnerId)?.nickname ?? view.winnerId}
-          </p>
-        </section>
       ) : null}
+
+      {settlement !== null && settlementCard !== null ? (
+        <div className="overlay" role="dialog" aria-modal="true">
+          <div className="overlay-card">
+            <p className="eyebrow">第 {settlement.round} 轮结算</p>
+            <h2>本轮结束</h2>
+            <SettlementBody card={settlementCard} />
+            <div className="settle-balance">
+              <span className="stat-label">余额变化</span>
+              <span>
+                {formatCents(settlement.before)} <span className="arrow">→</span>{" "}
+                {formatCents(deriveSettlementBalance(settlement.before, settlementCard))}
+              </span>
+            </div>
+            <button type="button" className="primary wide" onClick={() => setSettlement(null)}>
+              继续
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function debtOptionLabel(view: WireSnapshotView, option: DebtOption): string {
+  if (option.kind === "repayBank") {
+    return "还银行贷款 " + formatCents(option.remainingCents);
+  }
+  if (option.kind === "repayPrivate") {
+    return "还 " + playerName(view, option.counterpartyId) + " " + formatCents(option.remainingCents);
+  }
+  return "向 " + playerName(view, option.counterpartyId) + " 催收 " + formatCents(option.remainingCents);
+}
+
+function debtOptionHint(option: DebtOption): string {
+  const base = "利率 " + rateLabel(option.rateBps);
+  if (option.kind === "repayBank") {
+    return base + " · 第 " + String(option.dueRound ?? 0) + " 轮到期";
+  }
+  if (option.kind === "repayPrivate") return base + " · 私人合同";
+  return base + " · 实际可收以服务端为准";
+}
+
+function SettlementBody({ card }: { card: RoundSettlement }) {
+  if (!card.hasData) {
+    return <p className="step-hint">本轮没有利息、税或下注结算事件。</p>;
+  }
+  return (
+    <div className="settle-lines">
+      {card.lines.map((line) => (
+        <div className={"settle-line " + line.tone} key={line.label}>
+          <span className="stat-label">{line.label}</span>
+          <span>{line.value}</span>
+        </div>
+      ))}
     </div>
   );
 }

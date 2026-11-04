@@ -279,10 +279,23 @@ p {
   border-color: #2c6a48;
 }
 
-.banner.fail {
+.banner.fail,
+.banner.danger {
   color: #ffb0b0;
   background: #2a1515;
   border-color: #6a2c2c;
+}
+
+.banner.info {
+  color: #a9d4ff;
+  background: #12202a;
+  border-color: #2c4a6a;
+}
+
+.banner.warn {
+  color: #ffd28f;
+  background: #2a2415;
+  border-color: #6a552c;
 }
 
 .stats {
@@ -389,6 +402,320 @@ p {
   margin-left: auto;
 }
 
+/* ------------------------------------------------------------------ */
+/* 05C 引导式操作界面                                                    */
+/* ------------------------------------------------------------------ */
+
+.game-top {
+  align-items: center;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  backdrop-filter: blur(6px);
+}
+
+.top-line {
+  font-size: 17px;
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.top-sep {
+  margin: 0 8px;
+  color: #5f7288;
+}
+
+.conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  color: #b9c7d6;
+}
+
+.conn.open {
+  color: #8ff0b5;
+}
+
+.conn.connecting {
+  color: #ffd28f;
+}
+
+.conn.closed,
+.conn.replaced {
+  color: #ff9a9a;
+}
+
+.topbar-btn,
+.primary,
+.choice {
+  min-height: 44px;
+}
+
+.topbar-btn {
+  background: #12222e;
+  border: 1px solid #2f6c96;
+  color: #8fd0ff;
+  border-radius: 9px;
+  padding: 9px 14px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.topbar-btn:hover {
+  background: #16303f;
+}
+
+.self-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.self-name {
+  font-size: 16px;
+  margin-top: 4px;
+}
+
+.stat-value.small {
+  font-size: 13px;
+  line-height: 1.5;
+  color: #b9c7d6;
+}
+
+.wizard {
+  border-color: #3d7fae;
+  box-shadow: 0 0 0 1px #2f6c96 inset;
+  scroll-margin-top: 96px;
+}
+
+.wizard .eyebrow {
+  margin-bottom: 8px;
+}
+
+.question {
+  font-size: 22px;
+  line-height: 1.35;
+  margin-bottom: 10px;
+  color: #f2f8ff;
+}
+
+.step-hint {
+  color: #9fb0c3;
+  font-size: 13px;
+  line-height: 1.65;
+  margin-top: 6px;
+}
+
+.danger-text {
+  color: #ffb0b0;
+}
+
+.choice-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.choice-grid.two {
+  grid-template-columns: 1fr 1fr;
+}
+
+.choice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  text-align: left;
+  background: #1b2c3b;
+  border: 1px solid #3f93c6;
+  color: #f4fbff;
+  border-radius: 11px;
+  padding: 12px 16px;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.choice:hover:not(:disabled) {
+  background: #21405a;
+}
+
+.choice:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.choice.ghost {
+  background: #0d1620;
+  border-color: #2b3f54;
+  color: #b9c7d6;
+}
+
+.choice.danger {
+  background: #2a1515;
+  border-color: #6a2c2c;
+  color: #ffb0b0;
+}
+
+.choice-label {
+  font-weight: 600;
+}
+
+.choice-hint {
+  font-size: 12px;
+  color: #9fb0c3;
+  line-height: 1.5;
+}
+
+.choice.danger .choice-hint {
+  color: #d99a9a;
+}
+
+.amount-input {
+  width: 100%;
+  margin-top: 12px;
+  font-size: 18px;
+  padding: 12px 14px;
+  min-height: 48px;
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.banner .link {
+  flex: none;
+}
+
+.phase-toast {
+  position: fixed;
+  top: 84px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  background: #12222e;
+  border: 1px solid #3f93c6;
+  color: #8fd0ff;
+  border-radius: 999px;
+  padding: 8px 18px;
+  font-size: 13px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: rgba(5, 10, 16, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.overlay-card {
+  width: min(520px, 100%);
+  max-height: 86vh;
+  overflow-y: auto;
+  background: #16222e;
+  border: 1px solid #3d7fae;
+  border-radius: 16px;
+  padding: 20px 22px;
+}
+
+.overlay-card h2 {
+  font-size: 22px;
+  color: #f2f8ff;
+  margin-bottom: 10px;
+}
+
+.overlay-card .primary.wide {
+  width: 100%;
+  margin-top: 18px;
+}
+
+.settle-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.settle-line {
+  background: #0d1620;
+  border: 1px solid #24374a;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.settle-line.good {
+  border-color: #2c6a48;
+}
+
+.settle-line.bad {
+  border-color: #6a2c2c;
+}
+
+.settle-balance {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #24374a;
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+
+.settle-balance .stat-label {
+  display: inline;
+  margin: 0;
+}
+
+.arrow {
+  color: #8fd0ff;
+  margin: 0 6px;
+}
+
+.drawer {
+  width: min(560px, 100%);
+  min-width: 0;
+  max-height: 86vh;
+  overflow-y: auto;
+  background: #16222e;
+  border: 1px solid #3d7fae;
+  border-radius: 16px;
+  padding: 20px 22px;
+}
+
+.drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.drawer .player-row {
+  grid-template-columns: 40px minmax(0, 1fr) 56px 56px minmax(0, 96px);
+  min-width: 0;
+}
+
+.drawer .player-row > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 560px) {
   .player-row {
     grid-template-columns: 44px minmax(120px, 1fr) 64px 64px;
@@ -397,5 +724,31 @@ p {
 
   .game-meta {
     font-size: 13px;
+  }
+
+  .question {
+    font-size: 19px;
+  }
+
+  .choice-grid.two {
+    grid-template-columns: 1fr;
+  }
+
+  .drawer .player-row {
+    grid-template-columns: 32px minmax(0, 1fr) 48px 48px;
+    column-gap: 6px;
+  }
+
+  .drawer .player-defaulted-debt {
+    grid-column: 1 / -1;
+  }
+
+  .drawer .player-head .player-defaulted-debt {
+    display: none;
+  }
+
+  .drawer .player-row:not(.player-head) .player-defaulted-debt::before {
+    content: "失信欠款：";
+    color: #9fb0c3;
   }
 }
