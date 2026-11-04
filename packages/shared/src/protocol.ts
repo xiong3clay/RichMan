@@ -79,6 +79,7 @@ export const LobbyJoinSchema = z
 export const LobbyReadySchema = z.object({ type: z.literal("ready"), ready: z.boolean() }).strict();
 export const LobbyLeaveSchema = z.object({ type: z.literal("leave") }).strict();
 export const LobbyStartSchema = z.object({ type: z.literal("start") }).strict();
+export const RematchSchema = z.object({ type: z.literal("rematch") }).strict();
 export const ResumeSchema = z.object({
   type: z.literal("resume"),
   roomCode: RoomCodeSchema,
@@ -111,12 +112,14 @@ export const ClientLobbyMessageSchema = z.discriminatedUnion("type", [
   LobbyReadySchema,
   LobbyLeaveSchema,
   LobbyStartSchema,
+  RematchSchema,
   ResumeSchema,
 ]);
 export type ClientLobbyMessage = z.infer<typeof ClientLobbyMessageSchema>;
 
 export const LOBBY_ERROR_CODES = [
   "INVALID_MESSAGE",
+  "INVALID_STATE",
   "INVALID_NICKNAME",
   "ROOM_NOT_FOUND",
   "ROOM_FULL",
@@ -173,7 +176,7 @@ export const RoomMessageSchema = z
   .strict();
 
 export const StartedMessageSchema = z
-  .object({ type: z.literal("started"), gameId: z.string().min(1).max(64) })
+  .object({ type: z.literal("started"), gameId: z.string().min(1).max(64), roomCode: RoomCodeSchema.optional() })
   .strict();
 
 export const PeerLeftMessageSchema = z

@@ -1,0 +1,41 @@
+# 单元05D Implementation Plan
+For agentic workers: subagent-driven-development；逐项TDD与独立复核，不commit。
+Goal：BETTING猜点阶段直接确认提交0注；GAME_OVER房主保留原名单开启新gameId。
+Architecture：冻结引擎沿用SUBMIT_BET和createInitialState；WS仍在每房间队列认证调度；新gameId驱动客户端和React局内视图重建。
+Tech Stack：现有TypeScript/React/ws/Zod/Vitest，无新增依赖。
+Spec：handoff/单元05D-放弃下注与再来一局.txt。
+
+全局约束：仅apps/web/**、apps/server/**、shared/src/protocol.ts、handoff/单元05D-*；不改core/docs/scripts/依赖，不commit。
+基线：HEAD 15b32c5，工作区干净；原24文件370条。验收pnpm test/typecheck/build/smoke:lan及允许目录内扩展smoke。
+
+任务1（server agent）：
+- 文件：server ws.ts、rooms/manager.ts/session.ts（scheduler按需要）、shared protocol.ts、server/tests/rematch.test.ts。
+- 接口：消息strict {type:rematch}；SessionRegistry.rematch→manager.rematchFor→新gameId；广播started/room/snapshot。
+- [x] 写6项真实WS测试并跑红：房主结束再开/非房主/非结束/连续两局/去重跨gameId/新timer与旧回调隔离。
+- [x] 最小实现，保留含离线与空洞座位名单，重置状态且不回放旧事件。
+- [x] targeted green并交独立复核。
+
+任务2（client agent）：
+- 文件：App.tsx、net/client.ts（wire按需要）、tests/rematch-client.test.ts。
+- 接口：RichmanClient.rematch():boolean；App向GameView传hostId:string|null并以gameId作key。
+- [x] 先红：准确rematch消息、未joined/断线/替换不发、新started清理、低版本新快照接受且旧局消息不污染。
+- [x] 实现消息生命周期；App清旧snapshot/events/result/error，恢复时识别断线期间换局。
+- [x] 真实React App挂载/换局测试green。
+
+任务3（root）：
+- 文件：GameView.tsx、game/steps.ts/confirmations.ts按需要、web测试。
+- [x] 先红：未锁定猜点可放弃；确认文字；一次0/0/1消息；成功锁定显示已放弃；失败重试；离线替换不可提交。
+- [x] 先红：结束对话框房主/非房主、点击一次发送pending禁用、失败code+中文、新gameId清向导/结算/通知/锁注。
+- [x] 最小实现；最终余额只展示本人服务端金额，不猜他人财务排名。
+- [x] targeted green。
+
+任务4（smoke agent）：
+- 文件：apps/server/tests/rematch-smoke.ts；不改scripts入口。
+- [x] 用真实双WS经HTTP建房，下注0/0/1锁定，再以仅测试fixture设置结束并真实rematch核对身份/新局/后续命令。
+- [x] pnpm exec tsx apps/server/tests/rematch-smoke.ts红→绿。
+
+复核重点：旧timer不跨局；新局低version不被旧门限丢弃；断线时已换局恢复；多次点击只发一次；原名单/隐私/离线不变。
+收尾：独立复核；四项最终验收原始输出存artifacts/test-logs/05D-*；范围检查；写四类05D交接。
+用户作用域不含handoff/项目当前状态.txt，本轮不修改，最新摘要写05D成果报告与下一阶段交接。
+
+完成记录（2026-11-05）：全部任务与独立复核完成。pnpm test 27文件399条、typecheck/build退出0、smoke:lan与独立rematch smoke均PASS；四类交接已写，未commit。

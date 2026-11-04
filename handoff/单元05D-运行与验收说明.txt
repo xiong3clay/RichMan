@@ -1,0 +1,60 @@
+RichMan 单元05D 运行与验收说明
+日期：2026-11-05
+环境：Node v24.18.0；pnpm 11.7.0；Windows PowerShell。
+依赖未变，不需要新安装。HEAD定位15b32c52541166a3166a0aa2df6f6c2b8511febd，修改未commit。
+
+一、启动
+仓库：D:\Lianjunjie\biancheng\RichMan。
+pnpm build
+pnpm start
+服务器沿用0.0.0.0:8000；本机http://localhost:8000/，其他设备使用启动日志中的LAN地址。
+不要把前端开发端口当正式联机入口。
+
+二、放弃本轮下注
+1. 两位玩家建房/加入、准备，房主开始；按现有向导完成行动，进入BETTING。
+2. 在“猜哪个点？”点击次要按钮“放弃本轮下注”。
+3. 确认卡显示“放弃后本轮不押注，等待开奖”；此时尚未发下注，可返回。
+4. 点击“确认放弃”：只发送一次SUBMIT_BET，betCents="0"、guess=0、leverage=1，
+   同时携带当前服务器roundId与phaseInstanceId。等待确认期间按钮禁用。
+5. 收到服务端myBet快照后显示“已放弃（0 注）”、已锁定/等待其他玩家，不可修改。
+   若本人是最后一位提交者，服务器会直接开奖并前进，界面按新阶段显示，不强留过期锁注视图。
+6. 断线/替换不允许提交。普通command_result失败或RATE_LIMITED原始error显示原因并解除等待，
+   恢复后以最新快照为准；未锁定才可再次确认。
+
+三、再来一局
+1. 正常游戏至GAME_OVER。生产服务没有人为结束游戏的后门。
+2. 自动弹出结束对话框，显示胜者或无胜者，以及本人最终金币。
+   他人余额没有公开，不显示猜测的财务排名。
+3. 房主有“再来一局”；非房主显示“等待房主开始新一局”。
+4. 房主点击后按钮禁用并显示“正在开始新一局…”。失败时在对话框显示code+中文原因，可重试。
+5. 新started广播后，所有在线玩家收到新gameId及新快照；回到第1轮，初始100金币，旧债/锁注/通知/
+   向导输入/确认卡/轮末结算不残留。会话和原座位、昵称不变，不需要重新准备。
+6. 离线玩家保留座位，新局按原名单开始；不因离线剔除，由既有系统倒计时推进。
+   离线房主需恢复本座位后才能发起，非房主不能代开。
+7. 断线期间房主已开启新局，旧玩家恢复时会识别首张权威快照的新gameId并清理旧局。
+
+四、自动化验收命令与本次真实结果
+pnpm test --reporter=verbose：27文件399条通过，退出0（原370+新增29）。
+pnpm typecheck：退出0。
+pnpm build：129 modules，built in694ms，退出0。
+pnpm smoke:lan：PASS，退出0。
+pnpm exec tsx apps/server/tests/rematch-smoke.ts：PASS，退出0。
+最后一条为允许目录内的独立05D扩展冒烟；scripts不在本轮写作用域，未改原脚本入口。
+
+扩展冒烟通过真实HTTP/双WS验证零注锁定、拒绝改锁、再来一局、身份保留、清债清注、
+新局命令与旧commandId隔离、旧事件不重放。
+其中GAME_OVER由明确的测试侧manager fixture构造，不能当作真人整局完成记录。
+Vitest服务端六项也使用测试fixture设置旧局结束，其余网络/认证/新引擎/调度均真实。
+
+五、证据
+artifacts/test-logs/05D-test-final.txt
+artifacts/test-logs/05D-typecheck-final.txt
+artifacts/test-logs/05D-build-final.txt
+artifacts/test-logs/05D-smoke-lan-final.txt
+artifacts/test-logs/05D-smoke-rematch-final.txt
+每条需求和具体测试名见handoff/单元05D-成果报告.txt。
+
+六、未验证
+本轮没有新增真人/真机记录，未测手机键盘、焦点/屏幕阅读器、物理断线/弱网和双真人隧道试玩。
+真实React+最小DOM适配只验证组件逻辑/渲染/点击/effect，不能替代浏览器布局或手机体验。
+状态：代码验证通过，人工验收仍按05B清单继续。

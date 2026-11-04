@@ -37,6 +37,7 @@ import type { ConfirmAction } from "./game/confirmations";
 
 export interface GameViewProps {
   roomCode: string;
+  hostId?: string | null;
   view: WireSnapshotView;
   client: RichmanClient;
   status: ConnectionStatus;
@@ -111,7 +112,12 @@ function Choice({ label, hint, onClick, disabled = false, tone = "primary" }: Ch
   );
 }
 
-export function GameView({ roomCode, view, client, status, statusDetail, result, error, events }: GameViewProps) {
+export function GameView(props: GameViewProps) {
+  // 新gameId代表全新对局；卸载所有局内state/ref/timer，避免旧通知和结算混进新局。
+  return <GameSessionView key={props.view.gameId} {...props} />;
+}
+
+function GameSessionView({ roomCode, hostId = null, view, client, status, statusDetail, result, error, events }: GameViewProps) {
   const [ui, setUi] = useState<UiState>(INITIAL_UI_STATE);
   const [amount, setAmount] = useState("");
   const [rateText, setRateText] = useState("1000");
@@ -126,6 +132,10 @@ export function GameView({ roomCode, view, client, status, statusDetail, result,
   const [phaseToast, setPhaseToast] = useState<string | null>(null);
   const [settlement, setSettlement] = useState<{ round: number; before: string } | null>(null);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
+  const [abandonPending, setAbandonPending] = useState(false);
+  const abandonCommandRef = useRef<{ commandId: string; phaseInstanceId: string } | null>(null);
+  const [rematchPending, setRematchPending] = useState(false);
+  const rematchPendingRef = useRef(false);
   const [, refreshNotices] = useState(0);
 
   const prevRoundRef = useRef(view.round);
@@ -145,6 +155,7 @@ export function GameView({ roomCode, view, client, status, statusDetail, result,
   const countdownProps = { serverNow: view.serverNow, receivedAtMs: snapshotClockRef.current.receivedAtMs };
 
   const finance = view.finance;
+  const canSubmit = status === "open" && client.hasJoined;
   const step = deriveStep(view, ui);
   const currentConfirmation = confirmAction !== null && confirmationIsCurrent(confirmAction, view) ? confirmAction : null;
   const blockedBank = bankBlockedReason(view);
@@ -205,6 +216,28 @@ export function GameView({ roomCode, view, client, status, statusDetail, result,
     setConfirmAction(current => current !== null && !confirmationIsCurrent(current, view) ? null : current);
   }, [view]);
 
+  useEffect(() => {
+    if (!canSubmit || view.phase !== "BETTING" || finance.myBet !== null ||
+      (abandonCommandRef.current !== null && abandonCommandRef.current.phaseInstanceId !== view.phaseInstanceId) ||
+      (result?.commandId === abandonCommandRef.current?.commandId && result !== null && !result.outcome.ok)) {
+      abandonCommandRef.current = null;
+      setAbandonPending(false);
+      setConfirmAction(current => current?.kind === "abandonBet" ? null : current);
+    }
+  }, [canSubmit, view.phase, view.phaseInstanceId, finance.myBet, result]);
+
+  useEffect(() => {
+    if (error !== null || !canSubmit) {
+      rematchPendingRef.current = false;
+      setRematchPending(false);
+    }
+    if (error !== null) {
+      abandonCommandRef.current = null;
+      setAbandonPending(false);
+      setConfirmAction(current => current?.kind === "abandonBet" ? null : current);
+    }
+  }, [error, canSubmit]);
+
   /** 提交成功：行动/自救/下注都进入“等待或锁定”，本地步骤回到 Q1；失败则停留原问题。 */
   useEffect(() => {
     if (result === null) return;
@@ -247,6 +280,7 @@ export function GameView({ roomCode, view, client, status, statusDetail, result,
     if (view.phase === prevPhaseRef.current) return;
     prevPhaseRef.current = view.phase;
     setConfirmAction(null);
+    if (view.phase === "GAME_OVER") setDrawerOpen(false);
     if (view.phase !== "GAME_OVER") setPhaseToast("进入「" + phaseLabel(view.phase) + "」阶段");
   }, [view.phase]);
 
@@ -256,18 +290,19 @@ export function GameView({ roomCode, view, client, status, statusDetail, result,
     return () => window.clearTimeout(timer);
   }, [phaseToast]);
 
-  const send = (run: () => string | null, kind: CommandKind = "generic", context: CommandSuccessContext = {}): void => {
+  const send = (run: () => string | null, kind: CommandKind = "generic", context: CommandSuccessContext = {}): string | null => {
     if (status !== "open" || !client.hasJoined) {
       setNotice("连接未就绪，当前不能提交；恢复连接后请重新确认");
-      return;
+      return null;
     }
     const commandId = run();
     if (commandId === null) {
       setNotice("连接未就绪或快照尚未到达，命令未发送");
-      return;
+      return null;
     }
     pendingCommandsRef.current.set(commandId, { commandId, kind, ...context, afterEventSeq: view.eventSeq });
     setNotice(null);
+    return commandId;
   };
 
   const versionOptions: CommandOptions = { expectedGameVersion: view.version };
@@ -340,6 +375,29 @@ export function GameView({ roomCode, view, client, status, statusDetail, result,
 
   /** 高风险动作的第二步：显示关键后果，确认后立即发送；不是层层弹窗。 */
   function renderConfirm(current: ConfirmAction) {
+    if (current.kind === "abandonBet") {
+      return (
+        <section className="panel wizard">
+          <p className="eyebrow">下注 · 放弃确认</p>
+          <h2 className="question">放弃本轮下注？</h2>
+          <p className="step-hint">放弃后本轮不押注，等待开奖</p>
+          <div className="choice-grid">
+            <Choice label={abandonPending ? "正在提交放弃…" : "确认放弃"} tone="ghost" disabled={abandonPending}
+              onClick={() => {
+                if (abandonCommandRef.current !== null) return;
+                const commandId = send(() => client.submitBet("0", 0, 1, {
+                  roundId: view.round, phaseInstanceId: view.phaseInstanceId,
+                }));
+                if (commandId !== null) {
+                  abandonCommandRef.current = { commandId, phaseInstanceId: view.phaseInstanceId };
+                  setAbandonPending(true);
+                }
+              }} />
+            <Choice label="返回" tone="ghost" disabled={abandonPending} onClick={() => setConfirmAction(null)} />
+          </div>
+        </section>
+      );
+    }
     if (current.kind === "giveUp") {
       return (
         <section className="panel wizard">
@@ -450,9 +508,11 @@ export function GameView({ roomCode, view, client, status, statusDetail, result,
   function renderStep(current: GuidedStep) {
     if (current.kind === "gameOver") {
       return (
+        <div className="overlay" role="dialog" aria-modal="true" aria-labelledby="game-over-title">
+        <div className="overlay-card">
         <section className="panel wizard">
           <p className="eyebrow">对局结束</p>
-          <h2 className="question">
+          <h2 className="question" id="game-over-title">
             {current.winnerId === null
               ? "本局没有胜者"
               : current.winnerId === view.me.playerId
@@ -462,8 +522,28 @@ export function GameView({ roomCode, view, client, status, statusDetail, result,
                   : current.winnerName + " 获胜"}
           </h2>
           <p className="step-hint">你的最终金币：{formatCents(finance.cents)}</p>
-          <p className="step-hint">本局已结束，不再显示任何操作。</p>
+          {hostId === view.me.playerId ? (
+            <button type="button" className="primary wide" disabled={!canSubmit || rematchPending}
+              onClick={() => {
+                if (!canSubmit || rematchPendingRef.current) return;
+                rematchPendingRef.current = true;
+                setRematchPending(true);
+                setNotice(null);
+                if (!client.rematch()) {
+                  rematchPendingRef.current = false;
+                  setRematchPending(false);
+                  setNotice("连接未就绪，新一局请求未发送，请恢复连接后重试");
+                }
+              }}>
+              {rematchPending ? "正在开始新一局…" : "再来一局"}
+            </button>
+          ) : <p className="step-hint">等待房主开始新一局</p>}
+          {!canSubmit ? <p className="step-hint">连接恢复后才能继续操作；当前不能开始新一局。</p> : null}
+          {!rematchPending && error !== null ? <p className="reason" role="alert">{error.code}：{error.message}</p> : null}
+          {notice !== null ? <p className="reason" role="alert">{notice}</p> : null}
         </section>
+        </div>
+        </div>
       );
     }
 
@@ -616,6 +696,10 @@ export function GameView({ roomCode, view, client, status, statusDetail, result,
                 }}
               />
             </div>
+            <div className="choice-grid">
+              <Choice label="放弃本轮下注" tone="ghost" onClick={() => setConfirmAction({ kind: "abandonBet",
+                round: view.round, phaseInstanceId: view.phaseInstanceId })} />
+            </div>
           </section>
         );
       }
@@ -726,7 +810,8 @@ export function GameView({ roomCode, view, client, status, statusDetail, result,
           <p className="eyebrow">已锁定</p>
           <h2 className="question">已锁定，等待其他玩家</h2>
           <p className="step-hint">
-            你押了 {formatCents(current.bet.betCents)}，猜 {String(current.bet.guess)}，{String(current.bet.leverage)} 倍。
+            {current.bet.betCents === "0" ? "已放弃（0 注）" :
+              "你押了 " + formatCents(current.bet.betCents) + "，猜 " + String(current.bet.guess) + "，" + String(current.bet.leverage) + " 倍。"}
           </p>
           <p className="step-hint">
             已提交 {String(current.submitted)} / {String(current.alive)} 人。锁定后不可修改。
@@ -1167,7 +1252,7 @@ export function GameView({ roomCode, view, client, status, statusDetail, result,
           </button>
         </div>
       ) : null}
-      {errorVisible && error !== null ? (
+      {errorVisible && error !== null && step.kind !== "gameOver" ? (
         <div className="banner fail">
           <span>
             {error.code}：{error.message}
@@ -1181,7 +1266,7 @@ export function GameView({ roomCode, view, client, status, statusDetail, result,
           </button>
         </div>
       ) : null}
-      {notice !== null ? (
+      {notice !== null && step.kind !== "gameOver" ? (
         <div className="banner fail">
           <span>{notice}</span>
           <button type="button" className="link" onClick={() => setNotice(null)}>
@@ -1253,10 +1338,12 @@ export function GameView({ roomCode, view, client, status, statusDetail, result,
         </div>
       </section>
 
-      {status !== "open" || !client.hasJoined ? <section className="panel wizard">
+      {step.kind === "gameOver" ? renderStep(step) : !canSubmit ? <section className="panel wizard">
         <p className="eyebrow">连接未就绪</p><h2 className="question">连接恢复后才能继续操作</h2>
         <p className="step-hint">当前仅显示最后一次快照；重连后以服务端最新状态重新确认。</p>
-      </section> : currentConfirmation !== null ? renderConfirm(currentConfirmation) : renderStep(step)}
+      </section> : currentConfirmation !== null ? renderConfirm(currentConfirmation) : abandonPending && step.kind === "betting" ?
+        <section className="panel wizard"><p className="eyebrow">下注</p><h2 className="question">正在提交放弃…</h2>
+          <p className="step-hint">等待服务端确认锁定。</p></section> : renderStep(step)}
 
       {finance.privateLoans.length > 0 ? (
         <section className="panel">
@@ -1294,7 +1381,7 @@ export function GameView({ roomCode, view, client, status, statusDetail, result,
         </section>
       ) : null}
 
-      {drawerOpen ? (
+      {drawerOpen && step.kind !== "gameOver" ? (
         <div className="overlay" role="dialog" aria-modal="true" onClick={() => setDrawerOpen(false)}>
           <aside className="drawer" onClick={(event) => event.stopPropagation()}>
             <div className="drawer-head">
@@ -1333,7 +1420,7 @@ export function GameView({ roomCode, view, client, status, statusDetail, result,
         </div>
       ) : null}
 
-      {settlement !== null && settlementCard !== null ? (
+      {settlement !== null && settlementCard !== null && step.kind !== "gameOver" ? (
         <div className="overlay" role="dialog" aria-modal="true">
           <div className="overlay-card">
             <p className="eyebrow">第 {settlement.round} 轮结算</p>

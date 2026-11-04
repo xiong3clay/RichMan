@@ -70,6 +70,7 @@ interface RoomRecord {
   players: RoomPlayerRecord[];
   gameId: string | null;
   game: EngineState | null;
+  usedGameIds: Set<string>;
 }
 
 function digestToken(token: string): string {
@@ -139,6 +140,7 @@ export class RoomManager {
           players: [],
           gameId: null,
           game: null,
+          usedGameIds: new Set(),
         });
         return code;
       }
@@ -236,7 +238,23 @@ export class RoomManager {
     if (room.players.length < RULES.playerMin) throw new LobbyError("NOT_ENOUGH_PLAYERS", "至少需要 2 名玩家");
     if (!room.players.every((item) => item.ready)) throw new LobbyError("NOT_ALL_READY", "还有玩家未准备");
 
+    return this.createGame(room);
+  }
+
+  /** 已认证房主在结算后复用冻结名单；在线状态不影响再开资格。 */
+  rematchFor(roomCode: string, playerId: string): string {
+    const { room, player } = this.resolvePlayer(roomCode, playerId);
+    if (room.hostId !== player.playerId) throw new LobbyError("NOT_HOST", "只有房主可以再来一局");
+    if (room.state !== ROOM_STATE.PLAYING || room.game?.phase !== "GAME_OVER") {
+      throw new LobbyError("INVALID_STATE", "本局尚未结束，不能再来一局");
+    }
+    return this.createGame(room);
+  }
+
+  private createGame(room: RoomRecord): string {
     const gameId = this.generateGameId();
+    // 去重以 gameId 隔离；拒绝复用历史 ID，不能让旧结果污染任何一局。
+    if (room.usedGameIds.has(gameId)) throw new LobbyError("INVALID_STATE", "未能生成新的对局标识，请重试");
     const roster = [...room.players].sort((a, b) => a.seatId - b.seatId);
     const seeds = roster.map((item) => ({ nickname: item.nickname }));
     const game = this.createGameState(gameId, DEFAULT_ROOM_CONFIG, seeds);
@@ -247,6 +265,7 @@ export class RoomManager {
     });
     room.gameId = gameId;
     room.game = game;
+    room.usedGameIds.add(gameId);
     room.state = ROOM_STATE.PLAYING;
     this.emit({ type: "room", roomCode: room.roomCode, room: this.viewOf(room) });
     this.emit({ type: "started", roomCode: room.roomCode, gameId });

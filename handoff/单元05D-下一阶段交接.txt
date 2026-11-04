@@ -1,0 +1,54 @@
+RichMan 单元05D 下一阶段交接
+日期：2026-11-05
+当前验证：27文件/399条（core/shared134、server88、web177），typecheck/build退出0；两类冒烟PASS。
+代码未commit；HEAD基线15b32c52541166a3166a0aa2df6f6c2b8511febd不包含本轮工作区实现。
+本轮作用域不含handoff/项目当前状态.txt，最新05D摘要以本文件和05D成果报告为准。
+
+一、入口与数据流
+放弃下注：GameView猜点页→abandonBet确认→client.submitBet("0",0,1,{roundId,phaseInstanceId})。
+确认绑定当前round/phaseInstanceId及本人未锁注事实。pending防重复发送，错误/断线/实例变更可解除。
+成功只由服务器myBet显示已锁定；0注统一显示“已放弃（0 注）”。
+
+再来一局：GameView结束对话框→client.rematch()→strict {type:"rematch"}→WS同房间queue→
+SessionRegistry.rematch认证→RoomManager.rematchFor房主和GAME_OVER校验→createGame共用构造→
+room/started广播→scheduler.advanceDue初始INTEREST→新snapshot/events→scheduler.schedule新deadline。
+房间仍PLAYING，roster与身份/连接不换；离线席位照常保留。
+
+二、服务端不变量
+manager.createGame使用createInitialState，按原seat顺序映射playerId/seatId/昵称，支持座位空洞。
+usedGameIds防止任何历史gameId复用，避免旧去重结果污染。
+新gameId以既有[gameId,playerId,commandId]隔离去重；旧局命令先被游戏身份检查拒绝，不能命中旧结果。
+scheduler源码未改：已有epoch/gameId/phaseInstanceId/deadlineAt四重目标检查，schedule会取消/替换旧目标。
+旧回调已进入queue后仍需检查目标，不能仅在入队之前判断。
+新gameId初始化后只能广播新状态与本次advance事件，不能重放旧事件。
+原sessionToken/recoveryCode/epoch继续有效，无重新join或ready流程。
+
+三、客户端生命周期
+App.onStarted清snapshot/events/result/error/lobbyError，并以snapshot.gameId作GameView的key。
+GameView本身还以gameId作GameSessionView的key，保证直接换props也卸载旧state/ref/timer。
+client.beginGame切换当前gameId，清latest和版本门限；新局低version可接收。
+重复同gameId started不重置高水位；旧gameId snapshot/events/command_result丢弃。
+恢复连接后的首个joined snapshot可提供断线期间的新局号；同局恢复不清高水位或局内UI。
+旧socket回调检查是否仍是当前socket，不能把新局切回旧局。
+结束对话框优先于旧抽屉/轮末结算；原始error在对话框可见，失败解锁重试。
+
+四、协议与隐私
+protocolVersion仍1；新增客户端rematch消息、Lobby INVALID_STATE错误。
+新服务端started实际含roomCode/gameId，schema可接受旧无roomCode的started，属加法兼容。
+未改变snapshot/财务协议，最终金币仅本人，未计算或公开他人余额排名。
+
+五、测试入口
+server/tests/rematch.test.ts：六个真实WS必过场景，含离线/空洞/拒绝无副作用/历史ID/旧timer。
+web/tests/unit05d-gameview.test.ts：16项零注与结束对话框/局内重建/错误恢复测试。
+web/tests/rematch-client.test.ts：7项真实client消息生命周期及真实React App重建。
+server/tests/rematch-smoke.ts：独立双WS冒烟，pnpm exec tsx apps/server/tests/rematch-smoke.ts。
+最终原始输出、独立复核与红绿证据在artifacts/test-logs/05D-*。
+既有370用例没有修改或削弱，本轮新增29条。
+
+六、迁移与回退
+本轮内存状态加usedGameIds；尚无持久化迁移，服务重启仍丢房间/会话/去重，留06处理。
+未commit；回退需仅针对本轮列出的文件，保留此前05C成果，不要泛用git reset/clean删除用户工作。
+
+七、下一入口
+仍为05B真人/真机试玩：零注确认后锁定、两设备同步再来一局、断线期间换局恢复、手机结束框和输入体验。
+完成真人记录后再进入06。不要将自动化GAME_OVER fixture冒充真人打完一局。

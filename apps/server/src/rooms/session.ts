@@ -153,6 +153,11 @@ export class SessionRegistry {
     return this.manager.startFor(identity.roomCode, identity.playerId);
   }
 
+  rematch(identity: SessionIdentity): string {
+    this.resolve(identity);
+    return this.manager.rematchFor(identity.roomCode, identity.playerId);
+  }
+
   disconnect(identity: SessionIdentity): string {
     this.resolve(identity);
     return this.manager.disconnectFor(identity.roomCode, identity.playerId);

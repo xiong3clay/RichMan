@@ -134,7 +134,7 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
     for (const conn of connections.values()) {
       if (!current(conn) || conn.identity!.roomCode !== event.roomCode) continue;
       if (event.type === "room") send(conn, { type: "room", players: event.room.players, hostId: event.room.hostId, state: event.room.state });
-      else if (event.type === "started") send(conn, { type: "started", gameId: event.gameId });
+      else if (event.type === "started") send(conn, { type: "started", roomCode: event.roomCode, gameId: event.gameId });
       else send(conn, { type: "peer_left", playerId: event.playerId });
     }
   };
@@ -183,8 +183,9 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
     const identity = conn.identity!;
     if (message.type === "ready") sessions.setReady(identity, message.ready);
     else if (message.type === "leave") { detach(conn); sessions.leave(identity); }
-    else if (message.type === "start") {
-      sessions.start(identity);
+    else if (message.type === "start" || message.type === "rematch") {
+      if (message.type === "start") sessions.start(identity);
+      else sessions.rematch(identity);
       await scheduler.advanceDue(identity.roomCode);
       scheduler.schedule(identity.roomCode);
     }

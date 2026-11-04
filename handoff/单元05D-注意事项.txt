@@ -1,0 +1,33 @@
+RichMan 单元05D 注意事项
+日期：2026-11-05
+状态：自动化验收通过；真人/真机待05B；未commit。
+
+1. 只新增零注快捷入口，没有改赌博规则。SUBMIT_BET必须仍为规范字符串"0"、guess=0、leverage=1，
+   并带当前roundId/phaseInstanceId。服务端锁注前不乐观伪造myBet。
+2. 0注一律显示“已放弃（0 注）”；手动走完整下注向导填0也表示不押，不需要新增协议flag。
+3. 最后一位玩家提交会立刻开奖/推进；界面按当前快照走，不能为了显示“已锁定”延迟或覆盖服务器状态。
+4. 零注pending需要在command_result失败和原始error（如RATE_LIMITED）时都解锁；断线、BETTING实例变化也要解除。
+   只靠同名phase判断会把旧等待带到下一次BETTING；确认必须绑定实例。
+5. rematch是房间控制消息，不是game-core命令；不要向冻结引擎增加规则。
+   前端是否显示房主按钮只为展示；服务端必须再次检查认证、房主和GAME_OVER。
+6. 房间保持PLAYING，不返回LOBBY，不重新要求准备。不因离线过滤名单。
+   离线房主需恢复后发起，其他人不能越权。新局含离线席，既有超时机制照常推进。
+7. 每次createInitialState都要新gameId，并保持原playerId/seatId/昵称映射。不要把空洞座位压成连续座位。
+8. scheduler和command-queue本轮没改：已有gameId隔离必须保留；旧timer入队后再检目标，不能让它作用于新局。
+   usedGameIds拒绝复用历史ID；旧去重存储可在内存保留，但不能被新局命中。
+9. started后要同时清App的events/result/error和局内组件state/ref/timer；仅清snapshot会在同一React批次残留向导。
+   新局version回1，不能沿用旧局高水位；也不能因此接受旧局迟到snapshot把界面切回。
+10. resume当前不推started；client在重新joined后的首个权威snapshot识别新gameId，同局则保留高水位。
+11. 结束框优先于旧抽屉/轮末结算；否则同z-index的抽屉会遮住“再来一局”。错误必须在对话框内可见。
+12. 余额只显示本人finance.cents。现有publicPlayers不含他人金币，禁止在前端猜财务排名或公开他人私密账本。
+13. StartedMessageSchema兼容旧无roomCode消息；新广播始终带roomCode。协议版本仍1，依赖不变。
+14. 扩展smoke位于apps/server/tests/rematch-smoke.ts，独立运行；scripts不在本轮范围，原pnpm smoke:lan未改。
+    两类smoke均需跑，不可只用新增smoke代替既有回归。
+15. rematch测试/扩展smoke只有GAME_OVER使用明确的测试fixture；不能将它当作真人整局/真机体验证据。
+    DOM适配测试不是完整浏览器，不验证布局、焦点陷阱、软键盘、安全区、物理断网或弱网。
+16. 受限沙箱内本地监听可能EACCES/超时；最终验收在获授权环境完成，限制失败不算通过。
+17. 本轮严格未改core/docs/scripts/依赖/锁文件/旧测试/项目当前状态；只新增05D交接记录最新27文件/399条。
+18. 未commit；现有HEAD只是实施基线。没有声称该提交包含本轮修复，不能用提交号代替工作区验证证据。
+
+本轮未完成项：无规格内功能/测试未完成。待验证：05B真人、真机、真实弱网/物理断线和双真人隧道试玩。
+证据：artifacts/test-logs/05D-*-final.txt；独立复核05D-review-web.txt、05D-review-server.txt。

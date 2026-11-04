@@ -103,6 +103,10 @@ export class RichmanClient {
   private readonly handlers: ClientHandlers;
   private latest: WireSnapshotView | null = null;
   private lastVersion = -1;
+  /** started 确定当前局号；同一连接不能被旧局快照切回。 */
+  private gameId: string | null = null;
+  /** resume 没有 started，重新 joined 后的首张快照是恢复时的权威局号。 */
+  private awaitingJoinedSnapshot = false;
   private attempts = 0;
   private retryTimer: number | null = null;
   private disposed = false;
@@ -155,6 +159,12 @@ export class RichmanClient {
 
   sendLobby(message: Record<string, unknown>): boolean {
     return this.rawSend(message);
+  }
+
+  /** 只发送房间级请求；是否房主、是否结束由服务端裁决。 */
+  rematch(): boolean {
+    if (!this.joined || this.disposed || this.replaced) return false;
+    return this.rawSend({ type: "rematch" });
   }
 
   /** 组命令信封；version/roundId/phaseInstanceId 全部来自服务端 snapshot。 */
@@ -253,6 +263,7 @@ export class RichmanClient {
     this.socket = socket;
 
     socket.onopen = () => {
+      if (this.socket !== socket || this.disposed || this.replaced) return;
       this.attempts = 0;
       this.handlers.onStatus("open");
       // 04B 的重连协议：token 只在消息体里带，URL 永远只有房间码。
@@ -265,11 +276,14 @@ export class RichmanClient {
     };
 
     socket.onmessage = (event: MessageEvent) => {
+      if (this.socket !== socket || this.disposed || this.replaced) return;
       if (typeof event.data === "string") this.handleRaw(event.data);
     };
 
     socket.onclose = () => {
-      if (this.socket === socket) this.socket = null;
+      if (this.socket !== socket) return;
+      this.socket = null;
+      this.joined = false;
       if (this.disposed || this.replaced) return;
       this.scheduleReconnect();
     };
@@ -315,6 +329,7 @@ export class RichmanClient {
         sessionToken: joined.sessionToken,
       };
       this.joined = true;
+      this.awaitingJoinedSnapshot = true;
       saveSession(this.session);
       this.handlers.onJoined(joined);
       return;
@@ -326,9 +341,10 @@ export class RichmanClient {
     }
 
     if (type === "started") {
-      this.lastVersion = -1;
-      this.latest = null;
-      this.handlers.onStarted(String(message["gameId"]));
+      const gameId = message["gameId"];
+      if (typeof gameId !== "string" || gameId === "") return;
+      this.awaitingJoinedSnapshot = false;
+      this.beginGame(gameId);
       return;
     }
 
@@ -338,12 +354,14 @@ export class RichmanClient {
     }
 
     if (type === "events") {
+      if (message["gameId"] !== this.gameId) return;
       const list = message["events"];
       if (Array.isArray(list)) this.handlers.onEvents?.(list as WireGameEvent[]);
       return;
     }
 
     if (type === "command_result") {
+      if (message["gameId"] !== this.gameId) return;
       this.handlers.onCommandResult(message as unknown as WireCommandResult);
       return;
     }
@@ -380,11 +398,22 @@ export class RichmanClient {
     if (socket !== null && socket.readyState <= WebSocket.OPEN) socket.close();
   }
 
+  private beginGame(gameId: string): void {
+    if (gameId === this.gameId) return;
+    this.gameId = gameId;
+    this.lastVersion = -1;
+    this.latest = null;
+    this.handlers.onStarted(gameId);
+  }
+
   private acceptSnapshot(view: WireSnapshotView | undefined): void {
-    if (view === undefined || typeof view.version !== "number") return;
-    if (view.gameId !== this.latest?.gameId) {
-      this.lastVersion = -1;
+    if (view === undefined || view === null || typeof view.version !== "number" ||
+      typeof view.gameId !== "string" || view.gameId === "") return;
+    if (view.gameId !== this.gameId) {
+      if (this.gameId !== null && !this.awaitingJoinedSnapshot) return;
+      this.beginGame(view.gameId);
     }
+    this.awaitingJoinedSnapshot = false;
     if (view.version < this.lastVersion) return;
     this.lastVersion = view.version;
     this.latest = view;

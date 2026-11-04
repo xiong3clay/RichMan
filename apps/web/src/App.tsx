@@ -87,6 +87,9 @@ export default function App() {
         // started 之后等 snapshot；服务端会在同一提交内推送到所有连接。
         setSnapshot(null);
         setEvents([]);
+        setResult(null);
+        setServerError(null);
+        setLobbyError(null);
       },
       onSnapshot: (view) => {
         setSnapshot(view);
@@ -236,7 +239,9 @@ export default function App() {
         </section>
       ) : snapshot !== null && roomCode !== null ? (
         <GameView
+          key={snapshot.gameId}
           roomCode={roomCode}
+          hostId={room?.hostId ?? null}
           view={snapshot}
           client={clientRef.current!}
           status={status}

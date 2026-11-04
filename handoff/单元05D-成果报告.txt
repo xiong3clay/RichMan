@@ -1,0 +1,128 @@
+RichMan 单元05D 成果报告
+日期：2026-11-05（任务于2026-11-04启动，跨午夜完成）
+状态：代码验证通过，人工验收待完成；未commit。
+唯一规格：handoff/单元05D-放弃下注与再来一局.txt。
+基线HEAD：15b32c52541166a3166a0aa2df6f6c2b8511febd；基线24文件/370条。
+验证对象：此HEAD上的未提交工作区；该HEAD本身不包含本次实现。
+
+一、需求、文件、测试的对应关系
+A1 未锁定猜点页次要入口、确认语句与0注提交：
+  文件：apps/web/src/GameView.tsx、game/confirmations.ts。
+  apps/web/tests/unit05d-gameview.test.ts：
+  “只在未锁定的猜点步骤出现，确认后只提交一次0/0/1并按快照锁定”
+  断言确认前不发、重复确认只发一次，参数精确为betCents="0"/guess=0/leverage=1及当前roundId/phaseInstanceId。
+A2 成功后按服务端快照显示已放弃（0注）、锁定不可改；不伪造本地成功：
+  同上测试断言myBet服务端快照后显示“已放弃（0 注）”“锁定后不可修改”，按钮消失。
+  “进入金额步骤后不显示放弃按钮，返回猜点可选；新锁注撤下旧确认”覆盖入口限制和确认过期。
+A3 连接/等待/错误处理：
+  “connecting时不能发放弃下注”“closed时不能发放弃下注”“replaced时不能发放弃下注”。
+  “放弃命令失败显示code与原因，保留服务端未锁定事实并允许重试”。
+  “放弃提交收到原始RATE_LIMITED error也解除pending并能重试”。
+  “放弃提交后断线，恢复快照仍未锁注时可以重新确认”。
+  “跳过中间快照直接到下一BETTING实例，不保留上次放弃pending”。
+  等待回执期间确认禁用；失败/断线/阶段实例变化解除pending，再次提交仍需确认。
+
+B1 rematch协议与房主/结束权限：
+  文件：packages/shared/src/protocol.ts，apps/server/src/rooms/manager.ts、session.ts、ws.ts。
+  strict {type:"rematch"}；NOT_HOST/INVALID_STATE等均是服务端判定。
+  新started实际广播含roomCode和新gameId；schema允许旧started无roomCode，以兼容现有接收者。
+  apps/server/tests/rematch.test.ts六个必过测试：
+  1. “房主 GAME_OVER 再开：新 gameId、初始账本、原昵称和空洞座位，离线席保留且不重放旧事件”
+     还验证未认证NOT_JOINED、伪造额外playerId字段被schema拒绝、room/started/snapshot广播。
+  2. “非房主再开返回 NOT_HOST，旧局及所有房间状态不变”
+  3. “大厅和非 GAME_OVER 时房主再开返回 INVALID_STATE，不改状态或截止时间”
+  4. “两次结束后连续再开各有新 gameId，拒绝生成器重复使用历史 gameId 且不改旧局”
+  5. “旧 commandId 在新局重新执行；旧 gameId 重发拒绝，不能返回旧成功结果或改新账本”
+  6. “再开按新 deadline 调度，已排队旧 timer 回调即使到期也不能触发新局”
+  六项均为真实WS；仅GAME_OVER状态通过测试fixture设置，权限/消息/新引擎/广播/调度真实执行。
+
+B2 新局初始状态、身份与调度：
+  manager.createGame共用start/rematch的createInitialState；按原seatId顺序恢复playerId/seatId/昵称。
+  usedGameIds拒绝任何历史gameId复用。新局无旧债/请求/下注/winner，余额10000分。
+  保留sessionToken、recoveryCode、connectionEpoch和在线/离线状态；不要求离线玩家重新准备，不剔除离线席。
+  既有scheduler.schedule以gameId/phaseInstanceId/deadlineAt替换旧目标；旧epoch/gameId回调守卫继续生效。
+  既有command-queue去重键[gameId,playerId,commandId]继续隔离；无需改scheduler或去重实现。
+  对应server测试1/4/5/6。
+
+B3 结束对话框与房主发起、pending、失败重试：
+  文件：apps/web/src/GameView.tsx、App.tsx、net/client.ts。
+  unit05d-gameview.test.ts：
+  “GAME_OVER房主对话框含胜者、本人最终余额与再来一局，重复点击只发一次”。
+  “非房主只等待房主，不能发送rematch”。
+  “房主断线时结束对话框按钮禁用并给连接理由”。
+  “rematch失败在对话框显示code和中文原因，解锁按钮重试”。
+  “游戏结束时关闭原玩家抽屉，只保留可见的结束对话框”。
+  金额仅展示服务端给本人的最终金币；未公开其他玩家余额，也未臆造财务排名。
+
+B4 新局清理与恢复：
+  GameView内的GameSessionView和App均按gameId作React key；所有向导/金额输入/确认/结算/通知/ref/timer重建。
+  App.onStarted清snapshot/events/result/error；client.beginGame清版本门限与latest，拒收旧局snapshot/events/command_result。
+  重新joined后首个权威snapshot可识别断线期间换局；同局重连保留版本高水位；旧socket回调忽略。
+  apps/web/tests/rematch-client.test.ts七项：
+  “连接且joined后只发送rematch；连接未就绪或关闭时不发送”。
+  “REPLACED即使socket仍open也不发送rematch”。
+  “新started先清空旧snapshot，允许新局低version；重复started不倒退版本”。
+  “新started后旧snapshot、events、command_result不能污染新局，当前局消息仍正常”。
+  “重新joined后的首snapshot可恢复断线期间的新局；旧socket迟到消息被忽略”。
+  “重新joined后同局首snapshot保留版本高水位与局内UI”。
+  “05D App新started同批收到snapshot后重建向导与抽屉，并清旧通知、结果和原始错误”。
+  另unit05d-gameview.test.ts：
+  “gameId变化重建向导和通知，旧局步骤与已锁注不残留”。
+  “新gameId不生成旧轮结算卡，并清除旧结束对话框与pending”。
+
+C 冒烟扩展：
+  新增apps/server/tests/rematch-smoke.ts；因scripts不在用户作用域，未改原smoke脚本/命令。
+  真实HTTP建房+双WS+银行旧债+0/0/1锁注，改锁注返回ALREADY_LOCKED；
+  GAME_OVER测试fixture后真实rematch，新ID/原座位昵称/在线身份/清债清锁注/新局可继续发命令/同ID去重隔离/旧事件不重放。
+  扩展独立命令：pnpm exec tsx apps/server/tests/rematch-smoke.ts。
+
+二、本轮变更文件
+已修改8个：
+  apps/server/src/rooms/manager.ts
+  apps/server/src/rooms/session.ts
+  apps/server/src/ws.ts
+  apps/web/src/App.tsx
+  apps/web/src/GameView.tsx
+  apps/web/src/game/confirmations.ts
+  apps/web/src/net/client.ts
+  packages/shared/src/protocol.ts
+新增4个源码/测试：
+  apps/server/tests/rematch.test.ts（6项）
+  apps/server/tests/rematch-smoke.ts（独立冒烟，不计Vitest测试数）
+  apps/web/tests/rematch-client.test.ts（7项）
+  apps/web/tests/unit05d-gameview.test.ts（16项）
+新增本单元四类交接及实施记录；原规格只读。
+未修改旧测试；未改game-core/docs/scripts/依赖/锁文件；协议版本仍1；未commit。
+写作用域不含handoff/项目当前状态.txt，因此本轮不改它；本报告和05D下一阶段交接记录最新27/399摘要。
+
+三、真实最终结果（2026-11-05）
+pnpm test --reporter=verbose：退出0。
+  Test Files 27 passed (27)
+  Tests 399 passed (399)
+  Duration 14.86s。
+  原370全部继续通过；新增29=server6+client7+UI16。
+  core/shared 134；server 88；web 177。
+pnpm typecheck：tsc --noEmit -p tsconfig.json，退出0。
+pnpm build：vite8.3.5，129 modules transformed，built in694ms，退出0。
+pnpm smoke:lan：退出0，[smoke] PASS。
+  room=9882；旧局借款10000→12500；第2轮甲12400/乙10100；VERSION_CONFLICT补发version5；双方快照版本单调。
+pnpm exec tsx apps/server/tests/rematch-smoke.ts：退出0，[05D-smoke] PASS，服务/连接自动关闭。
+
+四、证据与复核
+最终原始日志：
+  artifacts/test-logs/05D-test-final.txt
+  artifacts/test-logs/05D-typecheck-final.txt
+  artifacts/test-logs/05D-build-final.txt
+  artifacts/test-logs/05D-smoke-lan-final.txt
+  artifacts/test-logs/05D-smoke-rematch-final.txt
+红灯：05D-server-red.txt、05D-client-red.txt、05D-view-red.txt、05D-view-pending-red.txt、05D-view-review-red.txt、05D-smoke-rematch-red.txt。
+前端独立复核：05D-review-web.txt；RATE_LIMITED卡pending和旧抽屉遮挡结束框均已修复并回归。
+服务端独立复核：05D-review-server.txt；另根代理逐段检查了四个服务端/协议diff与六场景测试。
+本地网络测试在受限沙箱可能EACCES/监听超时；最终真实网络验收均在获授权的执行环境跑完，未把限制失败计作通过。
+
+五、未完成与边界
+本轮规格要求和自动化验收无未完成项。
+未进行真人/真机、实际手机软键盘、物理断线/弱网与双真人隧道试玩，仍属于05B。
+前端交互测试使用真实React+最小DOM适配，不能替代浏览器布局/焦点或真机体验。
+最终余额只展示本人服务端可见值；没有公开他人余额或添加财务排名规则。
+离线房主需先恢复本座位再发起rematch，其他玩家不能越权代开。
