@@ -10,7 +10,7 @@ RichMan 项目当前状态
 
 【进度与范围】
 已完成代码单元：00、01、02、03、04、05A、05C。
-当前子任务：05C F1-F4自动化验证通过；下一入口仍为05B真人/真机试玩。
+当前子任务：05C 已提交（cc61048，370 测试全绿）；下一入口为 05B 真人/真机试玩（公网隧道）。
 本轮仅改 apps/web/** 与用户明确要求更新的本文件；未改协议/server/core/shared/docs/scripts/依赖；未commit。
 会话与命令去重仍仅内存，持久化留06。
 
@@ -38,55 +38,3 @@ apps/web/src/game/notice-history.ts（新增语义通知生命周期管理）
 apps/web/src/game/results.ts
 apps/web/src/game/settlement.ts
 apps/web/tests/gameview.test.ts
-apps/web/tests/notices.test.ts
-apps/web/tests/steps.test.ts
-apps/web/tests/dom-harness.ts（新增；无新依赖；真实React渲染/effects/委托事件的最小DOM适配）
-handoff/项目当前状态.txt
-此前已有未提交05C实现与其他交接文件保留。
-
-【验证状态：真实最终结果】
-修复前基线：24文件 / 345条（core/shared 134、server 82、web 129），替代旧19文件/240条记录。
-本轮新增25条；F4及动态阶段相关错误期望按复核修正；没有删除用例、skip或弱化金融断言。
-pnpm test --reporter=verbose：24文件 / 370条全部通过，0失败，退出码0，Duration 5.93s。
-  core/shared 134；server 82；web 154。
-pnpm typecheck：tsc --noEmit -p tsconfig.json，退出码0。
-pnpm build：vite 8.3.5，129 modules，built in 126ms，退出码0。
-pnpm smoke:lan：PASS，退出码0。
-  room=1480；两人加入开局；借银行2500分（10000→12500）；第2轮甲12600/乙9900；
-  VERSION_CONFLICT补发version=5；双方快照版本单调不降。
-最终原始日志：
-  artifacts/test-logs/05C-F-test-final.txt
-  artifacts/test-logs/05C-F-typecheck-final.txt
-  artifacts/test-logs/05C-F-build-final.txt
-  artifacts/test-logs/05C-F-smoke-lan-final.txt
-独立复核：artifacts/test-logs/05C-F-review.txt。
-红灯、范围与DOM适配证据：artifacts/test-logs/05C-F*.txt、05C-F-dom-harness-probe.log。
-上一轮四类05C交接中的345条属于修复前记录；本轮以本文件和上述最终日志为准。
-
-【测试对应】
-gameview.test.ts（30条）：F1整页“未转账”只出现一次、BANK_DUE失信只出现一次、REFUSED/CANCELLED，
-  晚到回执按commandId匹配；F2最近4条、动态金币、关闭回放、快照先于事件、2.5秒TTL、
-  离TAX/跨TAX实例、旧阶段文案失效、关键FAILED/REFUSED持久；50%渲染；hasJoined门禁；
-  F3结果与通知渲染顺序；F4只有DEFAULTED+全局计息时结算卡不显示利息行。
-notices.test.ts（36条）：双方归属、动态阶段、同请求EXPIRED/CLOSED合并、终态覆盖回收、
-  dismissed Set清理后旧seq仍不复活。
-steps.test.ts（50条）：银行/私人ACTIVE，DEFAULTED/FROZEN/BAD_DEBT不计息，
-  仅失信债务+全局INTEREST_ACCRUED不产生本人利息行；其余既有步骤/结算/失败语义回归。
-所有具体测试名和真实逐条输出见05C-F-test-final.txt。
-
-【未完成/未验证】
-本轮F1-F4与所列测试无未完成项。
-真人/真机、手机软键盘遮挡、safe-area、物理断网/弱网、双真人Quick Tunnel试玩仍未验证（05B）。
-DOM适配只验证组件交互、渲染和定时生命周期，不验证浏览器布局或真机体验。
-通知仅当前页面内存，刷新不保留；跨刷新通知历史未做新定义。
-
-【环境与命令】
-Node v24.18.0；pnpm 11.7.0。
-pnpm build；pnpm start（0.0.0.0:8000）；本机 http://localhost:8000/。
-公网：D:\Lianjunjie\tools\cloudflared.exe tunnel --url http://127.0.0.1:8000。
-校园网sdu_net客户端隔离、Quick Tunnel/WSS可通、换域名需恢复码等结论沿用2026-11-03记录，本轮未重测。
-
-【提交与下一入口】
-未commit（按用户要求）。验证对象为当前未提交工作区。
-HEAD定位：b16bbdcd58824b87e2b5e4194707fb501539c07f；该提交不包含本轮未提交修复。
-05B：按 handoff/单元05B-试玩清单.txt 做真人/真机试玩；通过后进入06。
