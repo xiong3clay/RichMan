@@ -763,6 +763,164 @@ p {
   overflow-wrap: anywhere;
 }
 
+.self-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* 单元 07A 债务中心：360px 下不设固定最小宽度，长昵称/大金额在抽屉内换行。 */
+.debt-drawer {
+  width: min(620px, 100%);
+  min-width: 0;
+  max-height: 88vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+  background: #16222e;
+  border: 1px solid #3d7fae;
+  border-radius: 16px;
+  padding: 20px 22px;
+}
+
+.debt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.debt-head h2 {
+  font-size: 22px;
+  color: #f2f8ff;
+}
+
+.debt-close {
+  min-width: 44px;
+  min-height: 44px;
+  display: grid;
+  place-items: center;
+}
+
+.debt-section {
+  margin-top: 16px;
+  min-width: 0;
+}
+
+.debt-section h3 {
+  font-size: 15px;
+  color: #8fd0ff;
+  margin-bottom: 8px;
+}
+
+.debt-section h4 {
+  font-size: 13px;
+  color: #9fb0c3;
+  margin: 10px 0 6px;
+}
+
+.debt-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px 14px;
+}
+
+.debt-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.debt-stat-value {
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.debt-group,
+.debt-request {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.debt-request {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  background: #0d1620;
+  border: 1px solid #24374a;
+  border-radius: 9px;
+  padding: 10px 12px;
+  margin-top: 8px;
+}
+
+.debt-row {
+  overflow-wrap: anywhere;
+}
+
+.debt-tag {
+  color: #8fd0ff;
+}
+
+.debt-overdue,
+.debt-risk {
+  color: #ffb0b0;
+  font-size: 13px;
+}
+
+.debt-empty {
+  color: #7f8fa3;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.debt-line,
+.debt-note {
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.debt-note {
+  color: #9fb0c3;
+}
+
+/* 他人公开信息沿用 .player-table 语义，但列宽必须受抽屉宽度约束，360px 不得横向滚动。 */
+.debt-drawer .player-row {
+  grid-template-columns: 40px minmax(0, 1fr) 56px 56px minmax(0, 96px);
+  min-width: 0;
+}
+
+.debt-drawer .player-row > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 560px) {
+  .debt-drawer {
+    padding: 16px;
+  }
+
+  .debt-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .debt-drawer .player-row {
+    grid-template-columns: 32px minmax(0, 1fr) 48px 48px;
+    column-gap: 6px;
+  }
+
+  .debt-drawer .player-defaulted-debt {
+    grid-column: 1 / -1;
+  }
+
+  .debt-drawer .player-head .player-defaulted-debt {
+    display: none;
+  }
+}
+
 @media (max-width: 560px) {
   .player-row {
     grid-template-columns: 44px minmax(120px, 1fr) 64px 64px;

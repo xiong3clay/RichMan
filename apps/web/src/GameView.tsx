@@ -7,9 +7,7 @@ import {
   formatCents,
   isNonNegativeCents,
   isPositiveCents,
-  loanStatusLabel,
   phaseLabel,
-  privateLoanStatusLabel,
   rateLabel,
   statusLabel,
 } from "./net/wire";
@@ -34,6 +32,7 @@ import { deriveRoundSettlement, deriveSettlementBalance, hasInterestBearingDebt 
 import type { RoundSettlement } from "./game/settlement";
 import { rememberLoanRequests } from "./game/notices";
 import type { KnownLoanRequest } from "./game/notices";
+import { DebtCenter } from "./game/DebtCenter";
 import { createNoticeHistory, coverCommandNotices, dismissEventNotice, updateNoticeHistory } from "./game/notice-history";
 import { commandSuccessText } from "./game/results";
 import type { CommandKind, CommandSuccessContext } from "./game/results";
@@ -132,6 +131,7 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
   const [guess, setGuess] = useState<0 | 1>(0);
   const [leverage, setLeverage] = useState<1 | 2>(1);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [debtOpen, setDebtOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [dismissedResult, setDismissedResult] = useState<string | null>(null);
   const [dismissedError, setDismissedError] = useState<string | null>(null);
@@ -302,6 +302,16 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
     const timer = window.setTimeout(() => setPhaseToast(null), 2200);
     return () => window.clearTimeout(timer);
   }, [phaseToast]);
+
+  /** 债务中心只读抽屉：Esc 关闭；打开状态不改动引导步骤与倒计时。 */
+  useEffect(() => {
+    if (!debtOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setDebtOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [debtOpen]);
 
   const send = (run: () => string | null, kind: CommandKind = "generic", context: CommandSuccessContext = {}): string | null => {
     if (status !== "open" || !client.hasJoined) {
@@ -558,6 +568,11 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
               {rematchPending ? "正在开始新一局…" : "再来一局"}
             </button>
           ) : <p className="step-hint">等待房主开始新一局</p>}
+          <div className="choice-grid">
+            <button type="button" className="link" onClick={() => setDebtOpen(true)}>
+              债务中心（只读）
+            </button>
+          </div>
           {!canSubmit ? <p className="step-hint">连接恢复后才能继续操作；当前不能开始新一局。</p> : null}
           {!rematchPending && error !== null ? <p className="reason" role="alert">{error.code}：{error.message}</p> : null}
           {notice !== null ? <p className="reason" role="alert">{notice}</p> : null}
@@ -1386,9 +1401,14 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
               {view.me.nickname} · 座位 {view.me.seatId}
             </p>
           </div>
-          <button type="button" className="topbar-btn" onClick={() => setDrawerOpen(true)}>
-            查看其他玩家（不消耗行动）
-          </button>
+          <div className="self-actions">
+            <button type="button" className="topbar-btn" onClick={() => setDrawerOpen(true)}>
+              查看其他玩家（不消耗行动）
+            </button>
+            <button type="button" className="topbar-btn" onClick={() => setDebtOpen(true)}>
+              债务中心（不消耗行动）
+            </button>
+          </div>
         </div>
         <div className="stats">
           <div className="stat">
@@ -1440,42 +1460,6 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
             <p className="step-hint">等待服务端确认锁定。</p></section> : renderStep(step)}
       </section>
 
-      {finance.privateLoans.length > 0 ? (
-        <section className="panel">
-          <h2>我的私人合同</h2>
-          <div className="loan-list">
-            {finance.privateLoans.map((loan) => (
-              <div className="loan-row" key={loan.loanId}>
-                <span>
-                  {loan.borrowerId === view.me.playerId
-                    ? "我欠 " + playerName(view, loan.lenderId)
-                    : playerName(view, loan.borrowerId) + " 欠我"}
-                </span>
-                <span>剩余 {formatCents(loan.remainingCents)}</span>
-                <span>利率 {rateLabel(loan.rateBps)}</span>
-                <span>{privateLoanStatusLabel(loan.status)}</span>
-              </div>
-            ))}
-          </div>
-        </section>
-      ) : null}
-
-      {finance.bankLoans.length > 0 ? (
-        <section className="panel">
-          <h2>我的银行贷款</h2>
-          <div className="loan-list">
-            {finance.bankLoans.map((loan) => (
-              <div className="loan-row" key={loan.loanId}>
-                <span>{loan.origin === "OVERDRAFT" ? "透支贷款" : "普通贷款"}</span>
-                <span>剩余 {formatCents(loan.remainingCents)}</span>
-                <span>第 {loan.dueRound} 轮到期</span>
-                <span>{loanStatusLabel(loan.status)}</span>
-              </div>
-            ))}
-          </div>
-        </section>
-      ) : null}
-
       {drawerOpen && step.kind !== "gameOver" ? (
         <div className="overlay" role="dialog" aria-modal="true" onClick={() => setDrawerOpen(false)}>
           <aside className="drawer" onClick={(event) => event.stopPropagation()}>
@@ -1514,6 +1498,8 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
           </aside>
         </div>
       ) : null}
+
+      {debtOpen ? <DebtCenter view={view} onClose={() => setDebtOpen(false)} /> : null}
 
       {settlement !== null && settlementCard !== null && step.kind !== "gameOver" ? (
         <div className="overlay" role="dialog" aria-modal="true">
