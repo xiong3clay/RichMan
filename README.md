@@ -9,14 +9,14 @@
 
 - 方案版本：V1.3.3（施工版）
 - 已实现单元：00、01、02、03、04、05A、05C、05D
-- 测试：27 文件 / 399 条（core 134、server 111、web 154）
+- 测试：27 文件 / 404 条（core 134、server 111、web 159）
 - 双客户端冒烟：pnpm smoke:lan
 - 代码提交：见 git log
 
 ## 快速开始
 
     pnpm install
-    pnpm test          # 27 文件 / 399 条测试
+    pnpm test          # 27 文件 / 404 条测试
     pnpm smoke:lan     # 双客户端冒烟（真实服务 + 两个 WS）
     pnpm typecheck
     pnpm build

@@ -1,0 +1,24 @@
+单元 05E 注意事项
+
+1. jsdom 没有布局引擎：测试只能断言 DOM 位置与选择器，不能证明“首屏可见”。
+   360×640 的真实位置必须人工/截图验收，勿用测试全绿替代。
+2. sticky 高度预算：header 106px + 结果横幅 66px + 通知架 60px ≈ 232px；360×640 实测吸顶区 288px、
+   390×844 为 294px，均在 max-height:45vh 内。.game-sticky 自身 overflow-y:auto + 子项 flex:none，
+   .notice-shelf 另设 32vh/内部滚动；给 header 或横幅加行必须重新核对 45vh 上限。
+   实测 288px 已占 640 屏的 45%，若再高会挤掉操作卡，不能再往上加内容。
+3. 关闭按钮 44×44 会把单条 banner 高度抬到约 64px；4 条时通知架内部滚动是预期行为，
+   不是 bug。不要把按钮触控区改回小尺寸。
+4. .notice-shelf 渲染时已 slice(0,4) 兜底；通知历史本身也限制 4 条。两处都保留，防止未来
+   派生逻辑变化后通知架无限增高。
+5. 结果 banner 色：accept/bankDue/giveUp 为 info，普通成功 ok，失败 fail；位置移动不改颜色语义。
+   结果横幅现在与通知架同处 .game-sticky（header→结果横幅→通知架），不要再挪回 .stage：
+   放在下面会被吸顶区遮住下半截，正是 05B 反馈的问题。
+6. .stage 现在只承载当前步骤卡（renderStep/确认卡/连接未就绪/放弃下注中），不再放提示条；
+   测试依赖“stage 在 .game 直接子节点中位于 .self-panel 之后”，不要改成别的容器。
+7. 不要再给 .game-top 加 position:sticky；吸顶由 .game-sticky 单独承担，否则两层叠加错位。
+   .game-sticky 的内边距是 padding:8px 0 4px，左右留白由 .app 的 padding 提供，别在 sticky 上加重排
+   导致与页面左右边距不一致。
+8. phase-toast 仍是 fixed 顶部 84px 的临时提示（既有实现），它不覆盖操作卡按钮；
+   若未来调整，需避免与 .game-sticky 重叠。
+9. 视觉验收脚本（Edge headless CDP + 临时 fixture）不提交；验收后必须 git checkout 还原
+   apps/web/tests/ui-preview.tsx，并用 git status 确认它不在改动列表里。

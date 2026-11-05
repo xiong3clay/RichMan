@@ -1,40 +1,46 @@
 RichMan 项目当前状态
-更新日期：2026-11-04
-更新者：Codex（单元05C Qoder复核 F1-F4 修复）
+更新日期：2026-11-05
+更新者：Lead（DSH 统筹；Trae 实现 05E，Lead 验收修订）
 
 【版本】
 方案版本：V1.3.3（V1.3.2 + 引导式界面 + 连接实测）
 规则版本：V1.3.2（本轮未改规则）
-协议版本：1（本轮未改协议）
+协议版本：1（05D/05E 均未改协议）
 游戏版本：未发布，目标 V1.0
 
 【进度与范围】
-已完成代码单元：00、01、02、03、04、05A、05C。
-当前子任务：05C 已提交（cc61048，370 测试全绿）；下一入口为 05B 真人/真机试玩（公网隧道）。
-本轮仅改 apps/web/** 与用户明确要求更新的本文件；未改协议/server/core/shared/docs/scripts/依赖；未commit。
-会话与命令去重仍仅内存，持久化留06。
+已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E。
+当前子任务：05B 真人/真机试玩——已完成第一轮手机反馈（提示看不见）→ 立 05E 修复并验收；
+下一入口为 06 可靠存档与重启恢复（计划交 Codex），05B 剩余真机复测。
+05D 新增：放弃本轮下注（BETTING 猜点步直接提交 0 注）+ 游戏结束后房主再来一局（rematch）。
+05E 新增：顶部吸顶提示区——header + 结果/错误/校验横幅 + 事件通知架同处 .game-sticky，
+       .stage 只放当前步骤卡；滚到操作卡后提示仍可见。
+会话与命令去重仍仅内存，持久化留 06。
 
-【本轮复核结论】
-F1：本人命令结果优先，按commandId保存在途上下文，按requestId/loanId及发送时seq覆盖对应事件通知。
-    ACCEPT FAILED、BANK_DUE失信、REFUSE、CANCEL均只有一个结果横幅。
-    支持事件/回执先后到达及前一回执晚于后一次发送；不笼统吞掉其他请求与历史seq。
-F2：最多同时显示最近4条未关闭通知；关键失败不设TTL，保留语义至手动关闭。
-    DANGER_RESCUED显示2.5秒，离开TAX或切换TAX实例即失效，快照更新不延长TTL。
-    缓存原始事件语义，金币和阶段后果随快照重算；旧自救请求不会在下一TAX复活“自救继续”。
-    dismissed使用Set，id离开缓冲后清理；已处理seq高水位防止关闭后回放复活。
-    TTL/关闭删除记录，成立/到期结清回收覆盖记录；请求归属直到真实终态到达且无引用才清理，
-    避免服务端先发关闭snapshot、后发events时漏通知。
-    未关闭关键失败超过4条只显示最近4条；关闭后可显示此前仍未关闭的失败，避免默默丢弃重要结果。
-F3：到期决策兜底去掉方向词；测试确认结果横幅渲染在事件通知之前。
-F4：仅本人借入且status===ACTIVE的银行贷款/私人合同标记计息；
-    DEFAULTED/FROZEN/BAD_DEBT及本人出借债权均不标记计息。
-补充：50%提示覆盖本人面板、银行问题与金额页真实React渲染；open但hasJoined=false操作区只读。
-独立agent复核：无显示行为阻塞；发现的在途命令、跨TAX实例、快照/事件先后与终态清理均修复并补回归。
+【测试与构建（2026-11-05 实测）】
+pnpm test      27 文件 / 404 条（core 134、server 111、web 159）
+pnpm typecheck 退出码 0
+pnpm build     退出码 0（apps/web/dist/assets/index-Z0VPCPB8.css 9.32kB、index-BWNTgKj-.js 383.73kB）
+pnpm smoke:lan PASS（05D 验收时）
 
-【本轮改动文件】
-apps/web/src/GameView.tsx
-apps/web/src/game/notices.ts
-apps/web/src/game/notice-history.ts（新增语义通知生命周期管理）
-apps/web/src/game/results.ts
-apps/web/src/game/settlement.ts
-apps/web/tests/gameview.test.ts
+【05E 复核要点（后续不得回退）】
+- 结果/错误/本地校验横幅必须在 .game-sticky 内（header→横幅→通知架），不要移回 .stage：
+  放在下面会被 45vh 吸顶区遮住，正是 05B 手机反馈的问题。
+- jsdom 不做布局断言；可见性用 Edge headless + CDP 截图验收（临时 fixture 需还原，不提交）。
+- .game-sticky：position:sticky; top:0; z-index:6; max-height:45vh; gap:6px; overflow-y:auto。
+- .notice-shelf：最多 4 条、max-height:32vh、内部滚动、可关闭、无通知不渲染。
+- 关闭按钮 ≥44×44；banner 文本 overflow-wrap:anywhere；360px 无横向滚动。
+- 通知去重/TTL/关闭语义（05C F1/F2）未改。
+
+【运行环境】
+服务器与隧道由 Windows 计划任务托管（RichManServer / RichManTunnel，需 -AllowStartIfOnBatteries
+-DontStopIfGoingOnBatteries）。最近隧道地址：
+https://bernard-earned-starring-gender.trycloudflare.com
+校园网 sdu_net 有客户端隔离，手机必须走隧道，不能直连 10.25.241.x:8000；
+换域名后 sessionStorage token 失效，用「房间码 + 恢复码」恢复。
+
+【待办】
+1) 05B 真机复测：把新隧道地址给手机，按 handoff/单元05B-试玩清单.txt 记录等待/卡点/提示可见性。
+2) 05E 交 Qoder 独立复核（复核意见写 handoff/复核-单元05E.txt）。
+3) 单元 06 可靠存档与重启恢复（交 Codex）：房间/对局快照落盘、重启恢复、冷启动一致性。
+4) 07 完整借贷/赌博交互与债务中心；08 教程/手机适配/音频；09 加固/跨网验证/一键发布包。

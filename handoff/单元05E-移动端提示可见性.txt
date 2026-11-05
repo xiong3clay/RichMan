@@ -1,0 +1,112 @@
+单元 05E：手机端提示可见性修复（规格，交给 Trae）
+依据：2026-11-05 用户 05B 真机试玩反馈——“手机上‘借款失败’等提示出现在最上面，但操作时经常下滑到操作框里，导致看不见提示”
+基线：HEAD 19c5fbb（399 测试全绿），工作区干净
+写作用域：apps/web/src/**、apps/web/tests/**、handoff/单元05E-*
+禁止：apps/server/**、packages/**、协议、依赖、docs；不改通知去重与生命周期语义（05C F1/F2 已修，禁止回退）
+不 commit。
+
+============================================================
+一、根因（已核对代码）
+============================================================
+1. apps/web/src/GameView.tsx 第 1224–1291 行：页面顺序是
+   header(.game-top) → phaseToast → 结果 banner → error banner → 本地 notice banner → eventNotices → .self-panel → 操作卡 .panel.wizard。
+   四个提示全部渲染在页面顶部；页面用 body 整体滚动（.app 只有 padding，CSS 第 23–27 行），
+   用户滑到下方操作卡时这些提示已经滚出视口。
+2. 只有 .game-top 是 position: sticky; top: 0（styles.css 第 409–415 行），提示条不是，所以不会跟随。
+3. 现有事件通知（失信、请求被拒/过期、解除危险）本身语义正确，只是位置不对。
+
+============================================================
+二、R1 命令结果与本地校验：就地显示（最高优先级）
+============================================================
+- 这三类提示改为渲染在“当前操作区”：
+  a) resultVisible 的结果 banner（成功/失败，第 1243–1254 行）；
+  b) errorVisible 的 error banner（第 1255–1268 行）；
+  c) 本地 notice banner（第 1269–1276 行，校验/连接未就绪等）。
+- 位置：紧贴当前步骤卡上方。做法二选一，优先第二个：
+  1) 直接用一层 .stage 包裹“提示 + renderStep(step)”，提示在步骤卡前面；
+  2) 把提示插进每个 .panel.wizard 内部、.eyebrow 之前（改动面更大，不推荐）。
+  推荐结构：
+    <section className="stage">
+      {feedback}
+      {step.kind === "gameOver" ? ... : renderStep(step)}
+    </section>
+  要求：提示在“本轮操作”区域内（用户正在看的地方），且出现在 .self-panel 之后（DOM 顺序断言用）。
+- 结果 banner 语义保持不变：同一 commandId 只显示一次、关闭按钮生效、coverCommandNotices 去重不动。
+- 重开一局弹框（rematch overlay）里已有的内联 error/notice（第 542–543 行）保持原样，不要变成两处重复。
+
+============================================================
+三、R2 服务端事件提示：常驻可见
+============================================================
+- eventNotices（第 1277–1291 行）不再放在会滚走的顶部，改为放在与 header 同一个 sticky 容器里：
+    <div className="game-sticky">
+      <header className="game-top">…</header>
+      <div className="notice-shelf" role="status">…最多 4 条…</div>
+    </div>
+  .game-sticky { position: sticky; top: 0; z-index: 6; background:#0f1720; padding-top: 8px; }
+  .game-top 去掉自身的 position: sticky / top / z-index（避免叠加错位），其余样式不动。
+- .notice-shelf：
+  display: flex; flex-direction: column; gap: 6px; margin: 6px 0 10px;
+  max-height: 32vh; overflow-y: auto; overscroll-behavior: contain;
+  无通知时不渲染（不占高度）。
+- 数量仍用 NOTICE_LIMIT = 4（apps/web/src/game/notice-history.ts 第 6 行），不改 TTL/去重/关闭逻辑。
+- 关闭按钮触控区 ≥ 44×44（手机上 .banner .link min-width/min-height 44px、display:grid/place-items:center）。
+
+============================================================
+四、R3 手机可读性
+============================================================
+- .banner { align-items: flex-start; } 文本容器 flex:1 1 auto; min-width:0; overflow-wrap:anywhere; line-height:1.5;
+  关闭按钮 flex:none。
+- 360px 宽不出现横向滚动；长文案（如“INVALID_AMOUNT：金额必须是…”）要换行不撑破。
+- sticky 区域总高（header + shelf）不超过 45vh；超出由 shelf 内部滚动，不能把操作卡挤出屏幕。
+
+============================================================
+五、R4 不做的事（避免新问题）
+============================================================
+- 不要用 window.scrollTo/scrollIntoView 强制跳回顶部或跳到底部；不要因此打断用户当前滚动位置。
+- 不要用 position: fixed 的浮层盖住操作卡按钮或底部状态栏。
+- 不改 game/steps.ts 派生逻辑、不改命令提交流程、不改协议。
+
+============================================================
+六、R5 测试（apps/web/tests）
+============================================================
+现有断言会因位置变化失败，允许调整选择器，但断言强度不得降低：
+- tests/gameview.test.ts 第 119、138、251–255 行的全局 .banner 查询，改为新容器范围内查询（如 .stage .banner / .notice-shelf .banner），
+  并保留“同一失败整页只出现一次”“顺序/文案正确”的语义。
+
+新增用例：
+1) 借款失败（BORROW_BANK 返回 ok=false）：结果 banner 位于操作区（.stage .banner），
+   且 DOM 中在 .self-panel 之后（证明不在页面顶部）。
+2) 本地校验失败（金额非法/超过上限）：notice banner 同样在 .stage 内可见。
+3) 事件提示常驻：收到 REFUSED/EXPIRED 事件后，.notice-shelf 内含该文案；快照推进（phase 变化）后仍在；
+   点击关闭后消失。
+4) 去重不回退：同一失败在整页只出现一次（沿用 05C 断言）。
+5) 无事件提示时 .notice-shelf 不渲染。
+6) 若现有 dom-harness 能测 360px 布局，加“无横向溢出”断言；不能测则在验收里用截图记录（360×640、390×844）。
+
+============================================================
+七、验收
+============================================================
+- pnpm test：399 条 + 新增全绿，不得削弱旧测试。
+- pnpm typecheck、pnpm build：0。
+- 手工/预览：
+  a) 360×640 下滚到“向银行借款”操作卡，输入非法金额 → 提示在操作卡上方立即可见，无需滚动；
+  b) 借款被拒（他人 REFUSE）→ 顶部事件条出现，往下滚到操作卡时仍可见，可关闭；
+  c) 事件条 + header 高度不超过屏幕 45%，操作卡按钮仍露在首屏内。
+- git status 只含 apps/web 与 handoff/单元05E-*；不 commit。
+
+============================================================
+八、给实现的提示
+============================================================
+- 先写/改测试再改组件，跑 pnpm test --filter web 相关用例；
+- 样式改动集中在 styles.css 的 .game-top/.banner 区块与新增 .game-sticky/.notice-shelf/.stage；
+- 完成后在 handoff/单元05E-成果报告.txt 写：改了哪些文件、根因、每个新测试名、实际命令输出（测试条数/typecheck/build）；
+- 若发现“事件提示被结果横幅覆盖”等与 F1 冲突的情况，优先保证整页同一失败只出现一次。
+
+============================================================
+九、实现期修订（Lead 验收时改定）
+============================================================
+- 原 R1 要求结果/error/本地 notice 放在 .stage（操作卡上方）。实测 360×640 把卡片滚进视口后，
+  .stage 横幅会被高 288px 的 .game-sticky 吸顶区遮住下半截，问题等价于没修。
+- 因此改为：结果/error/本地 notice 也放入 .game-sticky（header 之后、.notice-shelf 之前），
+  .stage 只保留步骤卡。R2/R3/R4 不变；新增断言“header→横幅→通知架”的 DOM 顺序。
+- 若后续要恢复 .stage 方案，必须同时保证吸顶区不遮挡它（例如把提示也吸顶），否则会重犯 05B。

@@ -1,0 +1,30 @@
+单元 05E 运行与验收说明
+
+一、环境与命令
+corepack pnpm test        # 27 文件 / 404 条全绿（399 基线 + 5 新增）
+corepack pnpm typecheck   # 0
+corepack pnpm build       # 0
+
+二、提示可见性的验证方式（自动化 + Edge headless 截图）
+自动化（已执行、可复跑）：
+  corepack pnpm vitest run apps/web/tests/gameview.test.ts
+  1) 选择器断言：非法金额提交后，失败回执存在于 .game-sticky .banner，且 .game-sticky 在 .game 直接
+     子节点中排在 .panel self-panel 之前；.stage 内不再有任何 banner（仅步骤卡）。
+     对应用例：“R1 借款失败结果横幅在 .game-sticky 吸顶区内…”“R1 本地校验失败 notice…”。
+  2) 结构断言：.game-sticky 同时包含 .game-top、结果横幅与 .notice-shelf，直接子节点顺序为
+     header → banner → notice-shelf（对应用例“R2 header、结果横幅与通知架同处 .game-sticky…”）。
+  3) jsdom 不做布局计算，因此“是否在视口内”用 Edge headless + CDP 截图验收（见下）。
+
+已执行（2026-11-05，Edge headless + CDP 9333，临时 fixture 注入一条失败回执 + 一条被拒事件）：
+  1) 360×640：吸顶区 288px（45vh 上限，内部可滚），失败横幅 136–202、事件条 214–274 均完整显示；
+     操作卡 318–624px 完整可见；scrollWidth-clientWidth=0。截图 D:\Lianjunjie\shot-manual-360.png。
+  2) 390×844：吸顶区 294px（约 35vh），header→横幅→事件条完整；操作卡 522–828px 完整可见；无横向滚动。
+     截图 D:\Lianjunjie\shot-manual-390.png。
+  3) 结论：滚到操作卡后提示仍在视口内，05B 的“提示看不见”问题已修复。
+  4) 注意：用 scrollIntoView({block:'center'}) 把卡片硬居中时，卡片顶部会钻进吸顶区下方，这是脚本
+     居中造成的，不是真实滚动位置；判定时要用“手动滚到卡片底部”的坐标。
+
+三、已确认
+- 无通知时 .notice-shelf 不渲染，不占高度。
+- 关闭按钮 44×44；长文案 overflow-wrap:anywhere。
+- 未使用 scrollTo/scrollIntoView，无 fixed 浮层覆盖操作卡。

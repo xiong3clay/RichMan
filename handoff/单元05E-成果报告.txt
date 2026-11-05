@@ -1,0 +1,70 @@
+单元 05E 成果报告（手机端提示可见性修复）
+日期：2026-11-05
+基线：HEAD 19c5fbb（399 测试全绿，工作区干净）
+状态：代码、自动化验证与 360×640 / 390×844 截图验收均完成；未提交
+修订：Lead 验收时发现“结果横幅仍在 .stage、滚动到卡片会被吸顶区遮住”，已把结果横幅移入 .game-sticky，并同步更新测试与本文档
+
+一、根因
+GameView 页面顺序为 header → phaseToast → 结果 banner → error banner → 本地 notice → eventNotices
+→ .self-panel → 操作卡。提示全部在页面顶部，而只有 .game-top 是 sticky，body 整体滚动；
+用户滑到下方操作卡后提示已滚出视口。
+
+二、改动文件
+1. apps/web/src/GameView.tsx
+   - 结果 banner / error banner / 本地 notice 收进 feedback 片段，放入 .game-sticky 内、header 之后、
+     .notice-shelf 之前：提示永远处于吸顶区，滚到操作卡后仍然可见（这是验收时改定的位置，
+     原先放在 .stage 会被吸顶区遮住下半截）。
+   - <section className="stage"> 只保留当前步骤卡（renderStep / 确认卡 / 连接未就绪 / 放弃下注中）。
+   - eventNotices 移入 .game-sticky（与 header 同一 sticky 容器），用 .notice-shelf 包裹，
+     渲染时再 slice(0, 4) 兜底；无通知不渲染 shelf。
+   - rematch overlay 的内联 error/notice 保持原样。
+   - 未改 game/steps.ts、命令提交流程、通知去重/TTL/关闭语义。
+2. apps/web/src/styles.css
+   - 新增 .game-sticky（position:sticky; top:0; z-index:6; background:#0f1720; padding:8px 0 4px;
+     max-height:45vh; gap:6px; flex column; overflow-y:auto; overscroll-behavior:contain；
+     border-bottom:1px solid #1e2b3a + box-shadow 划出与滚动内容的边界）。
+   - .game-top 去掉 position/top/z-index，仅保留 flex:none + align-items + backdrop-filter。
+   - 新增 .notice-shelf（flex column; gap:6px; margin:6px 0 10px; max-height:32vh;
+     overflow-y:auto; overscroll-behavior:contain）。
+   - 新增 .stage { min-width:0; }。
+   - .banner 改 align-items:flex-start；文本 span flex:1 1 auto; min-width:0;
+     overflow-wrap:anywhere; line-height:1.5；.banner .link 44×44 + grid 居中。
+3. apps/web/tests/gameview.test.ts
+   - 全局 .banner 选择器改为 .stage .banner / .notice-shelf .banner，断言强度未降低。
+   - F3 改为分别断言操作区结果横幅与顶部通知架事件条。
+   - 新增 5 条 05E 移动端提示可见性用例（见下）。
+
+三、新增测试
+1. R1 借款失败结果横幅在 .game-sticky 吸顶区内，滚动到操作卡后仍可见
+2. R1 本地校验失败 notice 同样进入吸顶区可见
+3. R2 事件提示在 .notice-shelf 常驻，跨阶段保留，关闭后消失
+4. R2 无事件提示时不渲染 .notice-shelf 占位
+5. R2 header、结果横幅与通知架同处 .game-sticky，顺序为 header→横幅→通知架
+另：原 F1 去重用例（ACCEPT FAILED / BANK_DUE / REFUSED / CANCELLED / 晚到 commandId）
+与 F2 生命周期 10 条全部保留通过。
+
+四、真实命令输出
+$ corepack pnpm test
+ Test Files  27 passed (27)
+      Tests  404 passed (404)     # 原 399 + 新增 5
+   Duration  6.17s
+
+$ corepack pnpm typecheck
+tsc --noEmit -p tsconfig.json，退出码 0
+
+$ corepack pnpm build
+✓ 129 modules transformed.
+apps/web/dist/assets/index-Z0VPCPB8.css    9.32 kB
+apps/web/dist/assets/index-BWNTgKj-.js   383.73 kB
+✓ built in 260ms
+
+日志：artifacts/test-logs/unit05E-{test,typecheck,build}.log
+
+五、视觉验收（Edge headless + CDP，apps/web/tests/ui-preview.tsx 临时 fixture：一条 INVALID_AMOUNT 失败回执 + 一条“借款请求被拒绝”事件）
+- 390×844：吸顶区 294px（约 35vh），header→失败横幅→事件条自上而下完整显示；操作卡 522–828px 完整可见；
+  documentElement.scrollWidth-clientWidth=0（无横向滚动）。
+- 360×640：吸顶区 288px（=45vh 上限，内部可滚），header→失败横幅→事件条完整显示；操作卡 318–624px 完整可见；
+  无横向滚动。
+- 结论：用户下滑到操作卡后，失败回执与事件提示都在视口内，05B 反馈的问题已修复。
+- 未做：实体手机上的第二次试玩（随 05B 继续）。
+- git status 仅 apps/web/src、apps/web/tests、handoff/单元05E-*；未 commit。
