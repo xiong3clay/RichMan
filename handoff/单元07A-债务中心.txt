@@ -1,0 +1,71 @@
+RichMan 单元 07A：债务中心与借贷明细（界面补全）
+版本：1（2026-11-05，Lead 写；施工方 Trae CN）
+依据：方案 V1.3.3 单元 07（07A 借贷与债务中心）；05C 引导框架；05F 额度提示；06 已落盘恢复
+
+【一句话目标】
+把现在 GameView 底部两块简陋表格（我的私人合同 / 我的银行贷款）升级成一个“债务中心”抽屉：
+逐条合同明细、状态分组、请求与风险摘要、他人公开信息；不新增经济命令、不改引导顺序。
+
+【允许改动的范围】
+- 只改 apps/web/**：
+  - 新增 apps/web/src/game/DebtCenter.tsx（纯展示组件）
+  - 新增 apps/web/tests/debt-center.test.ts（或用现有 dom-harness 扩展）
+  - 小改 apps/web/src/GameView.tsx（只挂入口按钮与抽屉状态，删除原来两块简陋表格交给 DebtCenter）
+  - 小改 apps/web/src/styles.css 与对应 CSS 契约测试
+- 不改 packages/**、apps/server/**、协议、shared、docs/plans、依赖，不 commit。
+- 旧 535 条测试必须继续全绿（其中 web 183 条）。不得删除/跳过/放宽旧断言；
+  若确有旧断言与新结构冲突，先停下报告冲突，不要自行改断言。
+- steps.ts 的 deriveStep 顺序与语义一行不改；不得把“同意/拒绝/还款/催收”做成债务中心里的第二套提交入口。
+
+【数据来源（只读，不在前端重算）】
+props：{ view: RichPlayerView; onClose: () => void }
+- 一切金额/额度/状态都用 view.finance.*、view.publicPlayers、view.serverNow、view.round。
+- 金额一律 formatCents（apps/web/src/net/wire.ts:273），不要自造“元/金币”换算。
+- 不得出现“前端算 totalDebt/可借额度”的新公式；摘要只展示 finance 里已有字段。
+- 组件不调用协议、不发命令、不改 steps。
+
+【界面内容】
+D1 摘要区：金币、总负债（银行 / 私人，沿用现有两数）、失信银行欠款、应收、冻结、坏账、可借额度。
+D2 银行贷款逐条（finance.bankLoans）：
+  来源（origin=OVERDRAFT 显示“透支贷款”，否则“普通贷款”）、本金 principalCents、剩余 remainingCents、
+  利率 rateBps、发放轮 issuedRound、到期轮 dueRound、计息到第 lastInterestRound 轮、状态。
+  若 status 为进行中且 view.round > dueRound → 就地红字“已逾期，将在到期阶段处理”（不自行改状态）。
+D3 私人合同逐条（finance.privateLoans，双角色）：
+  方向（borrowerId===me 显示“我欠 X”，否则“X 欠我”）、本金、剩余、利率、发起轮 issuedRound、
+  计息到第 lastInterestRound 轮、状态（ACTIVE/REPAID/FROZEN/BAD_DEBT 用现有 label 函数）。
+  分组：进行中 / 已结清 / 冻结或坏账；组内按 issuedRound 升序；某组为空显示“无”，不渲染空表头。
+D4 请求区：
+  - finance.pendingRequest（我发起、等待答复）：显示对手昵称、金额、利率、等待剩余秒数（用 view.serverNow 与 deadlineMs，≤0 显示“已超时，等待服务端关闭”），并提示“同一借款人同时只能有一个等待中的请求”。
+  - finance.incomingRequests（别人向我借）：显示借款人昵称、金额、利率、创建时信用、创建时失信欠款；
+    borrowerDefaultedBankDebtCents>0 或 borrowerCredit!=="GOOD" 时显示风险行“对方创建请求时已失信，出借有风险”。
+    这里只展示，不放“同意/拒绝”按钮（操作仍走当前引导步骤，避免双入口）。
+D5 他人公开信息：保留现有 drawer 的 player-table 语义（座位/昵称/状态/信用/公开失信欠款）。
+  债务中心不得出现他人金币、他人私人合同、他人下注；也不得显示“对方可借给我多少”以外的推断金额。
+D6 空态与可读性：
+  - 无银行贷款、无私人合同时显示“当前无银行贷款 / 当前无私人合同”，不渲染 .loan-row。
+  - 360px：抽屉内不横向滚动；长昵称/大金额 overflow-wrap:anywhere；关闭按钮 ≥44×44。
+  - 打开/关闭：入口按钮放在 self-panel（文案“债务中心（不消耗行动）”），overlay 抽屉；Esc、点遮罩、关闭按钮都能关；
+    GAME_OVER 时也可只读查看；打开状态不得影响当前步骤卡与倒计时。
+
+【必测（新增 ≥8 条；旧断言不动）】
+1) 两条银行贷款（ACTIVE + REPAID）分别渲染本金/剩余/利率/发放轮/到期轮/计息轮/状态。
+2) ACTIVE 且 round>dueRound 显示逾期红字；REPAID 不显示。
+3) 私人双角色：一条“我欠 X”、一条“Y 欠我”，均显示本金/剩余/利率/发起轮。
+4) 三组分类正确：ACTIVE→进行中、REPAID→已结清、FROZEN 与 BAD_DEBT→冻结或坏账。
+5) pendingRequest 显示对手与等待秒数；无 pending 时显示“没有等待答复的请求”。
+6) incomingRequests：失信借款人出现风险行并含失信欠款数字；正常借款人不出现风险行。
+7) 他人表不含对方金币/私人金额：断言渲染文本中没有对方金币数字与“下注”。
+8) 空态：无合同只显示“无”，没有 .loan-row。
+9) 打开债务中心后，当前步骤卡标题与 deriveStep 结果不变（回归断言）。
+10) CSS 契约：360px 下 .debt-drawer 不设固定 min-width/表格宽、含 overflow-wrap 与 44×44 关闭按钮。
+
+【验收命令（必须真实执行并贴输出）】
+- pnpm test（期望 535 + 新增，全绿）
+- pnpm typecheck（TSC=0）
+- pnpm build（BUILD=0，记录 index-*.js 体积变化）
+- 报告里列出：新增文件、修改文件、每个必测对应的测试名、以及没有做的事（例如“未新增他人历史，因为需要新协议/隐私决策”）。
+
+【明确不做】
+- 不做赌博/到期/自救/结算界面（07B）。
+- 不做他人合同历史、不做公开战绩查询（需要新协议，留 09 讨论）。
+- 不改利率、税额、胜负判定；不借“优化体验”暗改规则。

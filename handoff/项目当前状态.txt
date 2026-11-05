@@ -11,7 +11,7 @@ RichMan 项目当前状态
 【进度与范围】
 已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06。
 当前子任务：05B 真人/真机试玩（第一轮提示看不见→05E，第二轮额度看不到→05F，均待真机复测）。
-下一入口：07A 债务中心（交 Trae）；07B 赌博/到期/自救/结算界面；08 教程/手机/音频；09 加固/跨网/发布包。
+下一入口：07A 债务中心（规格 handoff/单元07A-债务中心.txt，交 Trae）；07B 赌博/到期/自救/结算界面；08 教程/手机/音频；09 加固/跨网/发布包。
 05D：BETTING 猜点步可直接“放弃本轮下注”（SUBMIT_BET 0 注）+ GAME_OVER 后房主再来一局（rematch）。
 05E：顶部 .game-sticky = header + 单条反馈横幅 + 事件通知架，.stage 只放当前步骤卡；
      反馈优先级 本地提示 > 服务端 error > 命令回执；失败横幅 role=alert、通知架 role=log。
@@ -82,5 +82,7 @@ https://alt-gravity-cloudy-directors.trycloudflare.com（2026-11-05 22:51 重启
    Lead 另用线上端口实测：POST /api/rooms 建房 → 终止/重启计划任务 → GET /api/rooms 显示 paused:true → 清理测试房间。
    遗留 nit：大厅事件不写 events.ndjson（S7）、web 旧"重启丢房"提示（N2）、客户端拒收低 version 快照（N3，
    07 处理）、无待办中间态多等窗口（N4）、corrupt 目录移动失败阻断启动（N5）、copyFile 备份不承诺物理断电（N6）。
-4) 07A 债务中心、07B 赌博/到期/自救/结算界面（交 Trae）；08 教程/手机适配/音频；09 加固/跨网/验证一键发布包。
+4) 07A 债务中心：规格已写（handoff/单元07A-债务中心.txt），只改 apps/web/**，新增 DebtCenter.tsx + ≥8 条测试，
+   不改 steps.ts/协议/core，旧 535 条不得削弱。之后 07B 赌博/到期/自救/结算界面（交 Trae）；
+   08 教程/手机适配/音频；09 加固/跨网/验证一键发布包。
 并行约束：同一仓库同时只让一个 AI 改代码；Qoder 只读复核可与之并行，但复核对象要写清 commit。
