@@ -1221,45 +1221,65 @@ function GameSessionView({ roomCode, hostId = null, view, client, status, status
     </section>;
   }
 
-  /** 命令结果/服务端 error/本地校验提示放在顶部吸顶区，滚动到操作卡后仍然可见。 */
-  const feedback = (
-    <>
-      {resultVisible && result !== null ? (
-        <div className={"banner " + (result.outcome.ok ? (resultKind === "accept" || resultKind === "bankDue" || resultKind === "giveUp" ? "info" : "ok") : "fail")}>
-          <span>
-            {result.outcome.ok
-              ? commandSuccessText(resultKind, view, { ...resultCommand, events: [...(resultCommand?.events ?? []), ...events] })
-              : result.outcome.code + "：" + result.outcome.message}
-          </span>
-          <button type="button" className="link" onClick={() => setDismissedResult(result.commandId)}>
+  /**
+   * 命令结果/服务端 error/本地校验提示放在顶部吸顶区，滚动到操作卡后仍然可见。
+   * 同一时刻只渲染一条（优先级：本地校验 > 服务端错误 > 命令结果）：多条横幅会占掉
+   * 45vh 吸顶预算，把事件通知架挤到接近 0 高（复核 05E should-fix 1）。
+   */
+  const feedbackBanner = (() => {
+    if (notice !== null && step.kind !== "gameOver") {
+      return (
+        <div className="banner fail" role="alert">
+          <span>{notice}</span>
+          <button type="button" className="link" aria-label="关闭校验提示" onClick={() => setNotice(null)}>
             关闭
           </button>
         </div>
-      ) : null}
-      {errorVisible && error !== null && step.kind !== "gameOver" ? (
-        <div className="banner fail">
+      );
+    }
+    if (errorVisible && error !== null && step.kind !== "gameOver") {
+      return (
+        <div className="banner fail" role="alert">
           <span>
             {error.code}：{error.message}
           </span>
           <button
             type="button"
             className="link"
+            aria-label="关闭错误提示"
             onClick={() => setDismissedError(error.code + "|" + error.message)}
           >
             关闭
           </button>
         </div>
-      ) : null}
-      {notice !== null && step.kind !== "gameOver" ? (
-        <div className="banner fail">
-          <span>{notice}</span>
-          <button type="button" className="link" onClick={() => setNotice(null)}>
+      );
+    }
+    if (resultVisible && result !== null) {
+      const tone = result.outcome.ok
+        ? resultKind === "accept" || resultKind === "bankDue" || resultKind === "giveUp"
+          ? "info"
+          : "ok"
+        : "fail";
+      return (
+        <div className={"banner " + tone} role={tone === "fail" ? "alert" : "status"}>
+          <span>
+            {result.outcome.ok
+              ? commandSuccessText(resultKind, view, { ...resultCommand, events: [...(resultCommand?.events ?? []), ...events] })
+              : result.outcome.code + "：" + result.outcome.message}
+          </span>
+          <button
+            type="button"
+            className="link"
+            aria-label="关闭结果提示"
+            onClick={() => setDismissedResult(result.commandId)}
+          >
             关闭
           </button>
         </div>
-      ) : null}
-    </>
-  );
+      );
+    }
+    return null;
+  })();
 
   return (
     <div className="game">
@@ -1278,15 +1298,16 @@ function GameSessionView({ roomCode, hostId = null, view, client, status, status
             {CONN_LABELS[status]}
           </div>
         </header>
-        {feedback}
+        {feedbackBanner}
         {eventNotices.length > 0 ? (
-          <div className="notice-shelf" role="status">
+          <div className="notice-shelf" role="log" aria-label="事件通知">
             {eventNotices.slice(0, 4).map((item) => (
               <div className={"banner " + item.tone} key={item.id}>
                 <span>{item.text}</span>
                 <button
                   type="button"
                   className="link"
+                  aria-label={"关闭通知：" + item.text.slice(0, 16)}
                   onClick={() => {
                     dismissEventNotice(noticeHistoryRef.current, item.id);
                     refreshNotices(tick => tick + 1);

@@ -179,11 +179,16 @@ it("05D App新started同批收到snapshot后重建向导与抽屉，并清旧通
     ] });
     socket.receive({ type: "command_result", gameId: "old-game", gameVersion: 100,
       commandId: "old-command", outcome: { ok: false, code: "INVALID_STATE", message: "旧回执原因" } });
-    socket.receive({ type: "error", code: "INVALID_STATE", message: "旧服务端原因" });
   });
   expect(mounted.text()).toContain("永久失信");
   expect(mounted.text()).toContain("旧回执原因");
+  // 05E 复核修复后反馈区只显示一条（优先级 本地提示 > 服务端 error > 命令回执），
+  // 因此旧回执在旧 error 到达后被替换；两者仍需在各自出现时可见、并在新局开始时清空。
+  await act(async () => {
+    socket.receive({ type: "error", code: "INVALID_STATE", message: "旧服务端原因" });
+  });
   expect(mounted.text()).toContain("INVALID_STATE：旧服务端原因");
+  expect(mounted.text()).not.toContain("旧回执原因");
   await act(async () => { started(socket, "new-game"); receiveSnapshot(socket, "new-game", 1); });
   expect(mounted.text()).toContain("是否向其他玩家借款");
   expect(mounted.text()).not.toContain("永久失信");

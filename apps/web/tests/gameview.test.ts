@@ -292,7 +292,7 @@ async function goToBankAmount(dom: Awaited<ReturnType<typeof mountDom>>): Promis
 }
 
 describe("05E 移动端提示可见性", () => {
-  it("R1 借款失败结果横幅在 .game-sticky 吸顶区内，滚动到操作卡后仍可见", async () => {
+  it("R1 借款失败结果横幅在 .game-sticky 吸顶区内（DOM 契约；真机滚动位置另由截图验收）", async () => {
     const props = gameProps();
     props.client = { ...props.client, borrowBank: () => "command-1" } as unknown as RichmanClient;
     mounted = await mountDom(createElement(GameView, props));
@@ -371,3 +371,60 @@ describe("05E 移动端提示可见性", () => {
     expect(mounted.container.querySelector(".stage .banner")).toBeNull();
   });
 });
+
+/** 只取 .game-sticky 的直接子横幅（排除 .notice-shelf 内的事件条）；dom-harness 不支持 ">" 组合选择器。 */
+function stickyBanners(dom: Awaited<ReturnType<typeof mountDom>>) {
+  return dom.container.querySelectorAll(".game-sticky .banner")
+    .filter(node => (node.parentNode as { className?: string } | null)?.className === "game-sticky");
+}
+
+describe("05E 复核修复：单条反馈 + 无障碍语义", () => {
+  it("本地校验提示优先于旧结果，反馈区同时只有一条横幅，关闭后旧结果回来", async () => {
+    const props = gameProps();
+    props.client = { ...props.client, borrowBank: () => "command-1" } as unknown as RichmanClient;
+    props.result = failResult;
+    mounted = await mountDom(createElement(GameView, props));
+    expect(stickyBanners(mounted)).toHaveLength(1);
+    expect(stickyBanners(mounted)[0]?.textContent).toContain("INVALID_AMOUNT");
+
+    await goToBankAmount(mounted);
+    await mounted.input("借款金额（分）", "0");
+    await mounted.click("确认借款");
+    const banners = stickyBanners(mounted);
+    expect(banners).toHaveLength(1);
+    expect(banners[0]?.textContent).toContain("借款金额必须是大于 0");
+    expect(banners[0]?.textContent).not.toContain("INVALID_AMOUNT");
+
+    await mounted.click("关闭");
+    expect(stickyBanners(mounted)).toHaveLength(1);
+    expect(stickyBanners(mounted)[0]?.textContent).toContain("INVALID_AMOUNT");
+  });
+
+  it("失败横幅带 role=alert，结果与通知的关闭按钮有区分性可访问名", async () => {
+    const props = gameProps();
+    props.view.eventSeq = 4;
+    props.events = [
+      gameEvent(5, "LOAN_REQUESTED", { requestId: "req-1", borrowerId: "p1", lenderId: "p2" }),
+      gameEvent(6, "LOAN_REQUEST_CLOSED", { requestId: "req-1", status: "REFUSED" }),
+    ];
+    props.result = failResult;
+    mounted = await mountDom(createElement(GameView, props));
+    const feedback = stickyBanners(mounted)[0];
+    expect(feedback?.getAttribute("role")).toBe("alert");
+    expect(feedback?.querySelector("button")?.getAttribute("aria-label")).toBe("关闭结果提示");
+    const shelf = mounted.container.querySelector(".notice-shelf");
+    expect(shelf?.getAttribute("role")).toBe("log");
+    expect(shelf?.querySelector("button")?.getAttribute("aria-label")).toContain("关闭通知：");
+  });
+
+  it("服务端错误横幅同样带 role=alert 与可访问名", async () => {
+    const props = gameProps();
+    props.error = { code: "ROOM_NOT_FOUND", message: "房间不存在" };
+    mounted = await mountDom(createElement(GameView, props));
+    const banner = stickyBanners(mounted)[0];
+    expect(banner?.textContent).toContain("ROOM_NOT_FOUND");
+    expect(banner?.getAttribute("role")).toBe("alert");
+    expect(banner?.querySelector("button")?.getAttribute("aria-label")).toBe("关闭错误提示");
+  });
+});
+
