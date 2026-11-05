@@ -1,0 +1,74 @@
+单元 07B 成果报告（赌博/到期/自救/结算界面）
+日期：2026-11-05
+基线：548 条测试（07A 已提交）
+状态：代码与自动化验证完成；360×640 真机截图未采集（未验证项）
+
+一、改动文件
+A apps/web/src/game/bet-outcome.ts（新建）
+  L11-38   BetRisk/输入类型（state/lines/overdraftCents/leverageLockedToOne）
+  L42-129  deriveBetRisk：赢/输/输后余额/透支/0 注/非法/过大/失信 1 倍
+  L134-148 deadlineSeconds / remainingAfterRepay
+M apps/web/src/game/settlement.ts
+  L18-19   RoundSettlement 新增 drawResult（0|1|null）
+  L120-176 读取本轮 BET_SETTLED 的 drawResult；负 delta 展示绝对值；
+           本人条目 overdraftCents>0 追加“透支贷款”行；只取本人条目
+  L184-206 deriveDangerReason：只按本轮本人 BET_SETTLED 亏损/TAX_CHARGED 归因
+M apps/web/src/game/steps.ts
+  L51      仅把既有 CANONICAL_CENTS 改为 export（正则与 withinLimit 语义未变）
+M apps/web/src/GameView.tsx
+  L88-98   BetRiskBlock 展示组件（role=group aria-label=本轮下注风险）
+  L372-380 betRisk / 可借款人 / danger 截止推导
+  L584-609 终局：最终信用、存活轮次、本人破产说明、终局名单（无金额/债务/下注）
+  L650-673 bankDue：欠款=remaining、发放/到期/当前轮、还清后余额、倒计时、永久失信固定文案
+  L833-899 下注金额/杠杆/确认三步共用风险块；金额输入不再 trim 以识别 " 5001 "
+  L924-940 betLocked：我的押注/猜点/杠杆/模式/人数/全员提交提示/剩余时间；删除他人提交名单
+  L952-979 danger：负余额原样、原因、应收/可借银行/可借人数、三条后果、剩余时间
+  L1612-1625 结算卡在 GAME_OVER 仍显示，按钮文案“关闭”
+  L1658-1665 SettlementBody 渲染“开奖：0/1”
+M apps/web/src/styles.css
+  L345-410 .bet-risk/.bet-risk-line/.bet-locked/.final-roster/.final-row（min-width:0、overflow-wrap:anywhere）
+A apps/web/tests/bet-outcome.test.ts（13）
+A apps/web/tests/settlement-07b.test.ts（8）
+A apps/web/tests/gameview-07b.test.ts（12，含 1 条 CSS 契约）
+
+二、测试映射（规格第七节）
+1  赢+2,000/输-2,000/输后余额8,000 → bet-outcome “赢 +B×L…” + DOM “金额与杠杆变化…”
+2  押6000×2 透支2,000与计息/失信 → bet-outcome “输后不足…” + DOM “输后不足显示透支…”
+3  押0放弃无透支 → bet-outcome “押 0…” + DOM “押 0 显示放弃…”
+4  "1e4"/"0x10"/" 5001 " 非法 → bet-outcome it.each（6 组）+ DOM “非法输入…”
+5  失信只能1倍、2倍禁用 → bet-outcome “失信玩家固定 1 倍…” + DOM “失信玩家只能 1 倍…”
+6  等待卡押注/猜点/杠杆/人数/提示 → DOM “显示我的押注/猜点/杠杆/人数与开奖提示”
+7  开奖1、赢、负 delta 文案 → settlement “drawResult=1…” “delta 为负…”
+8  overdraft>0 透支行 → settlement “本人条目 overdraftCents>0…”
+9  无本人条目“本轮未押注”+开奖 → settlement “本人无条目仍显示开奖点…”
+10 GAME_OVER 结算卡不吞、按钮关闭 → DOM “GAME_OVER 仍显示最后一轮结算卡…”
+11 bankDue 欠款/到期轮/永久失信 → DOM “bankDue 显示欠款=remaining…”
+12 danger 负余额/破产/冻结/剩余时间 → DOM “danger 负余额原样显示…”
+13 终局胜者/本人金币/信用/无他人金币 → DOM “终局卡显示胜者、本人金币/信用/破产说明…”
+14 他人 betCents 777777 不入 DOM → DOM “结算卡只渲染本人下注…”
+15 360px CSS 契约 → DOM 文件内 “07B 360px CSS 契约”
+
+三、真实命令输出
+$ corepack pnpm test
+ Test Files  42 passed (42)
+      Tests  581 passed (581)      # 旧 548 + 新增 33
+   Duration  6.19s
+
+$ corepack pnpm typecheck
+tsc --noEmit -p tsconfig.json，退出码 0
+
+$ corepack pnpm build
+✓ 131 modules transformed.
+apps/web/dist/assets/index-CJQO5UpQ.css   11.94 kB │ gzip:   3.02 kB
+apps/web/dist/assets/index-BGqRGoDT.js   398.96 kB │ gzip: 117.69 kB
+✓ built in 256ms
+
+日志：artifacts/test-logs/unit07B-{test,typecheck,build}.log
+
+四、未验证 / 遗留
+- 未做 360×640 / 390×844 真机截图；只有 CSS 契约与 DOM 断言。
+- 规格 G5 提到的“2 秒请求间隔提示”在当前 web UI 中不存在（该限制只在服务端错误消息里），
+  因此没有可删除项，也没有新增前端提示。
+- 金额展示统一 formatCents（千分位+“分”），所以实际文案是“赢 +2,000 分”，
+  规格示例中的“赢 +2000”按金额展示规范补齐；测试按真实文案断言。
+- 未 commit；git status 仅 apps/web/**。

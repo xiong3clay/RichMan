@@ -1,0 +1,29 @@
+单元 07B 运行与验收说明
+
+一、环境与命令
+corepack pnpm test        # 42 文件 / 581 条全绿（548 基线 + 33 新增）
+corepack pnpm typecheck   # TSC_EXIT=0
+corepack pnpm build       # BUILD_EXIT=0；JS 398.96 kB / CSS 11.94 kB
+
+二、建议人工验收步骤
+1) 下注风险块：BETTING 未锁定时，猜点 → 金额输入 1000，看“赢 +1,000 分 / 输 -1,000 分 /
+   输后余额 9,000 分”；下一步选 2 倍，数字翻倍。
+2) 透支：金额 6000 + 2 倍 → “差额 2,000 分转为赌博透支贷款”与“计息/逾期失信”。
+3) 等待卡：提交后确认只显示本人押注/猜点/杠杆/已提交 x/y 与“全员提交立即开奖”，
+   不再显示任何人的金额或“还差谁”。
+4) 结算卡：跨轮后出现“开奖：0/1”、本人下注明细、透支行；GAME_OVER 最后一轮仍出现，
+   按钮为“关闭”。
+5) bankDue：欠款=remaining、发放/到期/当前轮、还清后余额、倒计时、永久失信固定文案。
+6) danger：负余额原样、原因（仅事件可推断时）、应收/可借银行/可借人数、三条后果。
+7) GAME_OVER：胜者、本人金币/信用/存活轮次、本人破产说明、只读名单（无金币/债务/下注）。
+
+三、360×640 自查方式
+- 自动化：apps/web/tests/gameview-07b.test.ts 内 CSS 契约断言 .bet-risk/.bet-risk-line/
+  .final-row 均 min-width:0、overflow-wrap:anywhere，且 .bet-risk 无固定 width。
+- 人工（未执行，待真机）：DevTools 360×640 依次检查下注风险块、等待卡、结算卡、
+  bankDue、danger、GAME_OVER 是否横向滚动；截图建议存 apps/web/tests/visual/07B-*.png。
+
+四、已验证
+- 旧 548 条全部保留通过；没有删除/跳过/放宽断言。
+- BET_SETTLED 只取本人条目；他人 betCents（777777）不出现在 DOM。
+- 结算卡“开奖”在整页只出现一次（BET_SETTLED 不进通知架）。

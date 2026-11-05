@@ -1,0 +1,29 @@
+单元 07B 下一阶段交接
+
+一、新增纯函数入口
+- apps/web/src/game/bet-outcome.ts
+  deriveBetRisk({cents, betInput, leverage, credit}) → {state, lines, overdraftCents, leverageLockedToOne}
+  规则：空=idle；非规范串/超过当前金币=invalid；预估>MAX_MONEY_CENTS=tooLarge；
+        bet=0=zero；其余 normal（赢/输/输后余额/透支）。
+  deadlineSeconds(deadlineAt, serverNow)；remainingAfterRepay(cents, remaining)。
+- apps/web/src/game/settlement.ts
+  RoundSettlement.drawResult: 0|1|null（事件缺 drawResult 时为 null）
+  deriveDangerReason(events, round, viewerId)：本人本轮下注亏损 > 本人税单 > 通用文案。
+  本人 BET_SETTLED 的 overdraftCents>0 生成“透支贷款”行。
+
+二、页面结构
+- 下注风险块在金额/杠杆/确认三步共用 <BetRiskBlock>，位于金额输入或选项下方。
+- betLocked 只展示本人下注与 x/y 人数，已删除他人“已提交/未提交”名单（隐私要求）。
+- bankDue / danger / gameOver 只加信息块，不改按钮与提交路径。
+- 结算 overlay 条件改为“settlement 存在即显示”；GAME_OVER 时按钮文案“关闭”。
+
+三、不可破坏
+- 不改 steps.ts 的 deriveStep；仅把既有 CANONICAL_CENTS 改为 export 供复用。
+- 不改 packages/**、apps/server/**、net/**、协议、依赖。
+- 金额一律 formatCents；不新增利息/税额/他人余额计算。
+- 05E .game-sticky 结构、05F 额度口径、07A 只读债务中心均未改动。
+- BET_SETTLED.payload.players 只允许按 playerId===me 取本人条目。
+
+四、下一步
+07C/后续若要做“他人历史/战绩”，需要新协议与隐私决策；不要从前端 bet payload 推导。
+真机 360×640 视觉验收可在 05B/08 阶段统一截图。

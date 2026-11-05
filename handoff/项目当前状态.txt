@@ -1,6 +1,6 @@
 RichMan 项目当前状态
 更新日期：2026-11-05
-更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复）
+更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复；07A/07B 由 Trae 实现，Lead 验收）
 
 【版本】
 方案版本：V1.3.3（V1.3.2 + 引导式界面 + 连接实测）
@@ -9,9 +9,9 @@ RichMan 项目当前状态
 游戏版本：未发布，目标 V1.0
 
 【进度与范围】
-已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A。
+已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B。
 当前子任务：05B 真人/真机试玩（第一轮提示看不见→05E，第二轮额度看不到→05F，均待真机复测）。
-下一入口：07B 赌博/到期/自救/结算界面——唯一规格 handoff/单元07B-赌博到期自救结算界面.txt（交 Trae）；08 教程/手机/音频；09 加固/跨网/发布包。
+下一入口：08 教程/手机适配/音频（规格待写）；09 加固/跨网/验证/一键发布包。05B 建议在 08 前用真机玩一局（下注风险、开奖、到期、自救现在都有解释）。
 05D：BETTING 猜点步可直接“放弃本轮下注”（SUBMIT_BET 0 注）+ GAME_OVER 后房主再来一局（rematch）。
 05E：顶部 .game-sticky = header + 单条反馈横幅 + 事件通知架，.stage 只放当前步骤卡；
      反馈优先级 本地提示 > 服务端 error > 命令回执；失败横幅 role=alert、通知架 role=log。
@@ -19,12 +19,15 @@ RichMan 项目当前状态
      Q1/Q2/自身面板显示具体数字；额度 0 的入口一律禁用并给原因；非规范金额串不判超限。
 07A：债务中心只读抽屉（DebtCenter.tsx），银行贷款/私人合同逐条明细与三组分类、请求与失信风险、
      他人公开信息；入口在 self-panel 与 GAME_OVER 卡，Esc 可关；不改 steps.ts/协议/core。
+07B：下注风险块（赢/输/输后余额/透支转贷款/失信 1 倍）、等待卡只显示本人下注与 x/y 人数、
+     结算卡补开奖点与透支行且 GAME_OVER 不再吞卡、bankDue 后果与倒计时、danger 原因与三路后果、
+     终局名单与本人破产说明；只改 apps/web，BET_SETTLED 只取本人条目。
 06 起会话与命令去重已落盘（apps/server/data，RICHMAN_DATA_DIR 可覆盖），服务重启后房间恢复为暂停态，房主 resume_game 继续。
 
-【测试与构建（2026-11-05 单元07A 后实测）】
-pnpm test      39 文件 / 548 条（06 复核修复后 535 + 07A 新增 13：debt-center 9、styles-07a 4），TEST_EXIT=0
+【测试与构建（2026-11-05 单元07B 后实测）】
+pnpm test      42 文件 / 581 条（548 + 07B 新增 33：bet-outcome 13、settlement-07b 8、gameview-07b 12），TEST_EXIT=0
 pnpm typecheck TSC_EXIT=0
-pnpm build     BUILD_EXIT=0（index-Ca0dxNVV.css 11.14kB、index-BlLj75gb.js 393.00kB；07A 后体积）
+pnpm build     BUILD_EXIT=0（index-CJQO5UpQ.css 11.94kB、index-BGqRGoDT.js 398.96kB；07B 后体积）
 pnpm smoke:lan PASS（05D 验收时）
 旧 481 条中只有两条断言按 Lead 明确授权改正（都在 persistence.test.ts）：
   after_rename_identity_write：旧 token 连接必须 NOT_JOINED，只有恢复码换的新 token 能继续；
@@ -86,6 +89,8 @@ https://alt-gravity-cloudy-directors.trycloudflare.com（2026-11-05 22:51 重启
    07 处理）、无待办中间态多等窗口（N4）、corrupt 目录移动失败阻断启动（N5）、copyFile 备份不承诺物理断电（N6）。
 4) 07A 债务中心已完成并验收（4 份 handoff 已写）：只读抽屉、三组分类、请求与失信风险、他人公开信息；
    旧 535 条未削弱。遗留：360px 只有 CSS 契约无真机截图；incoming 为空无独立空态；他人历史留 09。
-   下一步 07B：规格已写（handoff/单元07B-赌博到期自救结算界面.txt），只改 apps/web/**，补下注风险/开奖点/透支/到期后果/自救后果/终局，
-   旧 548 条不得削弱；完成后 08 教程/手机适配/音频；09 加固/跨网/发布包。
+4b) 07B 赌博/到期/自救/结算界面已完成并验收（real 42 文件/581 条）：下注风险块、等待卡隐私、结算卡开奖点与透支、
+   bankDue/danger 后果、终局名单；只改 apps/web，旧 548 条未削弱。遗留：360×640 仍只有 CSS 契约无真机截图；
+   金额输入不再 trim（为识别 " 5001 "，提交仍校验）；BET_SETTLED 事件本身仍向全员广播他人下注金额，前端已只取本人条目，服务端拆分留 09。
+   下一步 08 教程/手机适配/音频；09 加固/跨网/一键发布包。
 并行约束：同一仓库同时只让一个 AI 改代码；Qoder 只读复核可与之并行，但复核对象要写清 commit。
