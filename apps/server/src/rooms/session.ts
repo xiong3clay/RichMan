@@ -87,6 +87,16 @@ export interface ResumeCredentials {
   recoveryCode?: string;
 }
 
+/** 身份摘要与房间事务共用同一快照；WS必须await manager.transact后才应答。 */
+export class SnapshotSessionStore implements SessionStore {
+  constructor(private readonly manager: RoomManager) {}
+  getByTokenDigest(value: string) { return this.manager.sessionRecords().find(r => r.tokenDigest === value); }
+  getByRecoveryDigest(value: string) { return this.manager.sessionRecords().find(r => r.recoveryDigest === value); }
+  getByIdentity(code: string, id: string) { return this.manager.sessionRecords().find(r => r.roomCode === code && r.playerId === id); }
+  save(record: SessionRecord): void { this.manager.saveSession(record); }
+  delete(code: string, id: string): void { this.manager.deleteSession(code, id); }
+}
+
 export class SessionRegistry {
   private readonly store: SessionStore;
 

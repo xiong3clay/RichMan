@@ -210,6 +210,41 @@ export function advanceSystem(state: GameState, ctx: CommandContext): Transition
   return { state: s, events, outcome, nextDeadlineAt: s.deadlineAt };
 }
 
+/**
+ * 进程重启后的继续：只重建当前等待窗口，不执行计息、开奖、税收或阶段推进。
+ * 返回值预留一个事件序号；调用方须将同序号的公开 GAME_RESUMED 事件与状态一起提交。
+ */
+export function resumeFromPause(state: EngineState, ctx: { nowMs: number }): EngineState {
+  if (state.phase === "GAME_OVER") return state;
+
+  const s = structuredClone(state);
+  const timers = TIMERS[s.config.timerMode];
+  let deadlineMs: number | null = null;
+  if (s.phase === "ACTION") deadlineMs = ctx.nowMs + timers.actionSec * 1000;
+  if (s.phase === "BANK_DUE") deadlineMs = ctx.nowMs + timers.bankDueSec * 1000;
+  if (s.phase === "BETTING") deadlineMs = ctx.nowMs + timers.bettingSec * 1000;
+  if (s.phase === "TAX" && s.dangerDeadlineMs !== null) {
+    s.dangerDeadlineMs = ctx.nowMs + timers.rescueSec * 1000;
+    deadlineMs = s.dangerDeadlineMs;
+  }
+
+  // 请求等待窗口比行动/自救总窗口短，必须同步更新请求本身，避免旧 deadline 使其立即过期。
+  if (s.pendingRequestId !== null && deadlineMs !== null) {
+    const request = s.requests.find(
+      (item) => item.requestId === s.pendingRequestId && item.status === "PENDING",
+    );
+    if (request) {
+      deadlineMs = Math.min(deadlineMs, ctx.nowMs + timers.requestSec * 1000);
+      replaceRequest(s, request.requestId, { ...request, deadlineMs });
+    }
+  }
+
+  setPhase(s, s.phase, deadlineMs);
+  s.version += 1;
+  s.eventSeq += 1;
+  return s;
+}
+
 /* ------------------------------------------------------------------ */
 /* 状态归一化、事件、截止时间                                          */
 /* ------------------------------------------------------------------ */

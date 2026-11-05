@@ -166,6 +166,10 @@ export class RichmanClient {
     if (!this.joined || this.disposed || this.replaced) return false;
     return this.rawSend({ type: "rematch" });
   }
+  resumeGame(): boolean {
+    if (!this.joined || this.disposed || this.replaced) return false;
+    return this.rawSend({ type: 'resume_game' });
+  }
 
   /** 组命令信封；version/roundId/phaseInstanceId 全部来自服务端 snapshot。 */
   sendCommand(type: string, payload: Record<string, unknown>, options: CommandOptions = {}): string | null {

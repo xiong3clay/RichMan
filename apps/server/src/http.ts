@@ -6,6 +6,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { SERVER_DEFAULTS, PROTOCOL_VERSION, NicknameSchema } from "@richman/shared";
 import { RoomManager } from "./rooms/manager.js";
 import { attachLobbyWebSocket } from "./ws.js";
+import type { LobbyWsOptions } from './ws.js';
+import { FileRoomStore } from './storage/file-store.js';
+import { loadAllRooms } from './rooms/recovery.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_STATIC_DIR = path.resolve(HERE, "../../../apps/web/dist");
@@ -23,6 +26,10 @@ const MIME: Record<string, string> = {
 };
 
 export interface ServerOptions {
+  /** 嵌入API缺省内存；CLI显式传默认目录，测试传临时目录。 */
+  dataDir?: string;
+  store?: FileRoomStore;
+  wsOptions?: LobbyWsOptions;
   host?: string;
   port?: number;
   staticDir?: string;
@@ -93,9 +100,10 @@ async function handleCreateRoom(
       sendJson(res, 400, { ok: false, error: "INVALID_NICKNAME" });
       return;
     }
-    sendJson(res, 201, { ok: true, roomCode: manager.createRoom() });
+    sendJson(res, 201, { ok: true, roomCode: await manager.createRoomPersisted() });
   } catch (error) {
     const message = (error as Error).message;
+    if ((error as {code?: string}).code === 'ERROR_PAUSED') { sendJson(res, 503, { ok: false, error: 'ERROR_PAUSED' }); return; }
     if (message === "PAYLOAD_TOO_LARGE") {
       sendJson(res, 413, { ok: false, error: "PAYLOAD_TOO_LARGE" });
       return;
@@ -173,6 +181,12 @@ export function createRequestHandler(opts: ServerOptions = {}): http.RequestList
       void handleCreateRoom(req, res, manager);
       return;
     }
+    if (req.method === 'GET' && url.pathname === '/api/rooms') {
+      sendJson(res, 200, { rooms: manager.roomCodes().map(roomCode => {
+        const room = manager.getRoom(roomCode)!;
+        return { roomCode, state: room.state, paused: room.paused, playerCount: room.players.length };
+      }) }); return;
+    }
     if (req.method !== "GET" && req.method !== "HEAD") {
       sendJson(res, 405, { ok: false, error: "METHOD_NOT_ALLOWED" });
       return;
@@ -185,6 +199,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<StartedServ
   const host = opts.host ?? SERVER_DEFAULTS.host;
   const port = opts.port ?? Number(process.env["PORT"] ?? SERVER_DEFAULTS.port);
   const manager = opts.manager ?? new RoomManager();
+  const store = opts.store ?? (opts.dataDir ? new FileRoomStore(opts.dataDir) : null);
+  if (store) await loadAllRooms(store, manager);
   let runtime: ReturnType<typeof attachLobbyWebSocket> | null = null;
   const stats =
     opts.stats ??
@@ -197,7 +213,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<StartedServ
     server.once("error", reject);
     server.listen(port, host, () => resolve());
   });
-  runtime = attachLobbyWebSocket(server, manager);
+  runtime = attachLobbyWebSocket(server, manager, opts.wsOptions);
   const address = server.address();
   const actualPort = typeof address === "object" && address !== null ? address.port : port;
   const wsRuntime = runtime;
@@ -228,7 +244,7 @@ function lanAddresses(): string[] {
 
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 if (isMain) {
-  startServer()
+  startServer({ dataDir: process.env['RICHMAN_DATA_DIR'] ?? path.resolve(HERE, '../data') })
     .then((started) => {
       console.log("[richman] 服务已启动，监听 " + started.host + ":" + started.port);
       console.log("[richman] 本机： http://localhost:" + started.port + "/");

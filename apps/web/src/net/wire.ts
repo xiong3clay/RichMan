@@ -12,6 +12,7 @@ export interface WireLobbyPlayer {
 }
 
 export interface WireRoom {
+  paused?: boolean;
   type: "room";
   players: WireLobbyPlayer[];
   hostId: string | null;
@@ -117,6 +118,7 @@ export interface WireGameEvent {
 export type GamePhase = "INTEREST" | "BANK_DUE" | "ACTION" | "BETTING" | "TAX" | "GAME_OVER";
 
 export interface WireSnapshotView {
+  paused?: boolean;
   schemaVersion: number;
   gameId: string;
   version: number;

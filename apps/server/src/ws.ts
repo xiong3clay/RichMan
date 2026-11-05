@@ -9,10 +9,10 @@ import { SNAPSHOT_SCHEMA_VERSION, eventsForPlayer, getPlayerView } from "@richma
 import type { EngineState } from "@richman/game-core";
 import { LobbyError } from "./rooms/manager.js";
 import type { RoomManager, RoomManagerEvent } from "./rooms/manager.js";
-import { SessionRegistry } from "./rooms/session.js";
+import { SessionRegistry, SnapshotSessionStore } from "./rooms/session.js";
 import type { SessionIdentity, SessionStore } from "./rooms/session.js";
 import { GameCommandProcessor, RoomCommandQueue } from "./rooms/command-queue.js";
-import type { CommandResultStore } from "./rooms/command-queue.js";
+import type { CommandResultStore, CommandResultRecord } from "./rooms/command-queue.js";
 import { RoomScheduler } from "./rooms/scheduler.js";
 
 interface Connection {
@@ -94,13 +94,24 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
   const connections = new Map<WebSocket, Connection>();
   const owners = new Map<string, Connection>();
   const queue = new RoomCommandQueue();
-  const sessions = new SessionRegistry(manager, options.sessionStore ? { store: options.sessionStore } : {});
+  const sessions = new SessionRegistry(manager, { store: options.sessionStore ?? new SnapshotSessionStore(manager) });
   const now = options.now ?? (() => Date.now());
   let nextId = 1;
   let closing = false;
   const ownerKey = (identity: SessionIdentity): string => JSON.stringify([identity.roomCode, identity.playerId]);
   const current = (conn: Connection): boolean => !conn.closed && !conn.replaced && conn.identity !== null
     && sessions.isCurrent(conn.identity, conn.epoch) && owners.get(ownerKey(conn.identity)) === conn;
+  const reconcileOwners = (code: string): void => {
+    const previous = [...owners.values()].filter(owner => owner.identity?.roomCode === code)
+      .map(owner => ({ owner, authenticated: current(owner) }));
+    if (!manager.reconcileDurable(code)) return;
+    // 仅延续提交前仍有效的owner；离开/复用座位后，即使新旧epoch碰巧相同也不能复活旧身份。
+    for (const { owner, authenticated } of previous) {
+      const record = manager.sessionRecords().find(r => r.roomCode === code && r.playerId === owner.identity!.playerId);
+      if (!authenticated || !record || record.seatId !== owner.identity!.seatId) detach(owner);
+      else owner.epoch = record.connectionEpoch;
+    }
+  };
 
   const snapshot = (conn: Connection): void => {
     if (!current(conn)) return;
@@ -109,16 +120,17 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
     const pendingDueLoan = state.bankLoans.find(loan => loan.loanId === state.pendingDueLoanId);
     send(conn, { type: "snapshot", view: wireCopy({
       schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+      paused: manager.isPaused(identity.roomCode),
       ...getPlayerView(state, identity.playerId, new Date(now())),
       phaseInstanceId: state.phaseInstanceId, eventSeq: state.eventSeq,
       currentSeatId: state.currentSeatId, actedSeats: [...state.actedSeats],
       pendingDueLoanId: pendingDueLoan?.borrowerId === identity.playerId ? pendingDueLoan.loanId : null,
     }) });
   };
-  const commit = (roomCode: string, result: TransitionResult): void => {
+  const commit = async (roomCode: string, result: TransitionResult, command?: {key: string; record: CommandResultRecord}): Promise<void> => {
     const state = manager.getGame(roomCode);
     if (state === null || state.gameId !== result.state.gameId) throw new Error("游戏状态不存在");
-    Object.assign(state, result.state);
+    await manager.commitTransition(roomCode, result, command);
     for (const conn of connections.values()) {
       if (!current(conn) || conn.identity!.roomCode !== roomCode) continue;
       snapshot(conn);
@@ -127,13 +139,17 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
     }
     scheduler.schedule(roomCode);
   };
-  const scheduler = new RoomScheduler({ queue, getState: code => manager.getGame(code), commit, now });
+  const scheduler = new RoomScheduler({ queue, getState: code => manager.isPaused(code) ? null : manager.getGame(code), commit, now,
+    onError: (_error,code) => manager.pauseRoom(code,'系统推进失败，本局已暂停，请联系管理员') });
+  const commandStore: CommandResultStore = options.commandStore ?? { get: key => manager.getCommand(key), set: (key, value) => manager.setCommand(key, value) };
   const processor = new GameCommandProcessor({ queue, getState: code => manager.getGame(code), commit,
-    advance: code => scheduler.advanceDue(code), now, ...(options.commandStore ? { store: options.commandStore } : {}) });
+    advance: code => scheduler.advanceDue(code), now, store: commandStore, atomicCommit: true, isPaused: code => manager.isPaused(code),
+    onInvariant: code => manager.pauseRoom(code,'规则不变量失败，本局已暂停，请联系管理员') });
   const broadcast = (event: RoomManagerEvent): void => {
     for (const conn of connections.values()) {
       if (!current(conn) || conn.identity!.roomCode !== event.roomCode) continue;
-      if (event.type === "room") send(conn, { type: "room", players: event.room.players, hostId: event.room.hostId, state: event.room.state });
+      if (event.type === 'storage_error') { sendError(conn, 'ERROR_PAUSED', event.message ?? '存档写入失败，本局已暂停，请房主重试或联系管理员'); continue; }
+      if (event.type === "room") send(conn, { type: "room", players: event.room.players, hostId: event.room.hostId, state: event.room.state, paused: event.room.paused });
       else if (event.type === "started") send(conn, { type: "started", roomCode: event.roomCode, gameId: event.gameId });
       else send(conn, { type: "peer_left", playerId: event.playerId });
     }
@@ -145,9 +161,9 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
     conn.identity = null;
     return identity;
   };
-  const bind = (conn: Connection, identity: SessionIdentity): void => {
+  const bind = (conn: Connection, identity: SessionIdentity, epoch: number): void => {
     const key = ownerKey(identity), previous = owners.get(key);
-    conn.epoch = sessions.claim(identity);
+    conn.epoch = epoch;
     conn.identity = { roomCode: identity.roomCode, playerId: identity.playerId, seatId: identity.seatId };
     owners.set(key, conn);
     if (previous && previous !== conn) {
@@ -167,26 +183,49 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
       if (conn.identity !== null) { sendError(conn, "INVALID_MESSAGE", "当前连接已有身份，请重新建立连接恢复"); return; }
       const roomCode = message.type === "resume" ? message.roomCode : conn.roomCodeQuery;
       if (roomCode === null) { sendError(conn, "ROOM_NOT_FOUND", "连接缺少房间码"); return; }
+      reconcileOwners(roomCode);
+      const { joined, epoch } = await manager.transact(roomCode, () => {
       const joined = message.type === "resume" ? sessions.resume(roomCode, message)
         : message.sessionToken !== undefined ? sessions.resume(roomCode, { sessionToken: message.sessionToken })
           : sessions.join(roomCode, message.nickname);
-      bind(conn, joined);
+      return { joined, epoch: sessions.claim(joined) };
+      });
+      if (conn.closed || conn.replaced) {
+        const previous = owners.get(ownerKey(joined));
+        if (previous && !previous.closed && !previous.replaced) {
+          const keptEpoch = await manager.transact(roomCode, () => sessions.claim(joined));
+          previous.epoch = keptEpoch;
+        } else await manager.transact(roomCode, () => sessions.disconnect(joined));
+        return;
+      }
+      bind(conn, joined, epoch);
       send(conn, { type: "joined", roomCode, playerId: joined.playerId, seatId: joined.seatId,
         sessionToken: joined.sessionToken, connectionEpoch: conn.epoch,
         ...("recoveryCode" in joined ? { recoveryCode: joined.recoveryCode as string } : {}) });
       const room = manager.getRoom(roomCode);
-      if (room) send(conn, { type: "room", players: room.players, hostId: room.hostId, state: room.state });
+      if (room) send(conn, { type: "room", players: room.players, hostId: room.hostId, state: room.state, paused: room.paused });
       snapshot(conn);
       return;
     }
+    if (conn.identity) reconcileOwners(conn.identity.roomCode);
     if (!current(conn)) { sendError(conn, "NOT_JOINED", "请先加入房间"); return; }
     const identity = conn.identity!;
-    if (message.type === "ready") sessions.setReady(identity, message.ready);
-    else if (message.type === "leave") { detach(conn); sessions.leave(identity); }
+    if (message.type === "ready") await manager.transact(identity.roomCode, () => sessions.setReady(identity, message.ready));
+    else if (message.type === "leave") { await manager.transact(identity.roomCode, () => sessions.leave(identity), () => { detach(conn); }); }
     else if (message.type === "start" || message.type === "rematch") {
-      if (message.type === "start") sessions.start(identity);
-      else sessions.rematch(identity);
+      await manager.transact(identity.roomCode, () => {
+        if (message.type === "start") sessions.start(identity); else sessions.rematch(identity);
+      });
       await scheduler.advanceDue(identity.roomCode);
+      scheduler.schedule(identity.roomCode);
+    } else if (message.type === 'resume_game') {
+      const events = await manager.resumeGame(identity.roomCode, identity.playerId, now());
+      for (const peer of connections.values()) {
+        if (!current(peer) || peer.identity!.roomCode !== identity.roomCode) continue;
+        snapshot(peer);
+        if (events.length) send(peer, { type: 'events', gameId: manager.getGame(identity.roomCode)!.gameId,
+          gameVersion: manager.getGame(identity.roomCode)!.version, events });
+      }
       scheduler.schedule(identity.roomCode);
     }
   };
@@ -197,11 +236,18 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
     catch { sendError(conn, "INVALID_MESSAGE", "消息不是合法JSON"); return; }
     const command = ClientGameCommandSchema.safeParse(json);
     if (command.success) {
+      if (conn.identity) reconcileOwners(conn.identity.roomCode);
       if (!current(conn)) { sendError(conn, "NOT_JOINED", "请先加入房间"); return; }
       const identity = conn.identity!, epoch = conn.epoch;
       const versionBefore = manager.getGame(identity.roomCode)?.version;
-      const reply = await processor.execute(identity.roomCode, identity.playerId, command.data,
-        () => current(conn) && conn.epoch === epoch);
+      let reply;
+      try { reply = await processor.execute(identity.roomCode, identity.playerId, command.data,
+        () => current(conn) && conn.epoch === epoch); }
+      catch (error) {
+        if (error instanceof LobbyError) throw error;
+        manager.pauseRoom(identity.roomCode,'系统推进失败，本局已暂停，请联系管理员');
+        throw new LobbyError('ERROR_PAUSED','系统推进失败，本局已暂停，请联系管理员');
+      }
       if (!current(conn)) return;
       send(conn, wireCopy(reply));
       // commit 已向房间内所有连接推送快照；version 没变说明命令被拒/冲突且没有广播，
@@ -222,8 +268,8 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
     connections.delete(conn.ws);
     if (!wasCurrent || identity === null || closing) return;
     detach(conn);
-    void queue.run(identity.roomCode, () => {
-      if (sessions.isCurrent(identity, epoch) && !owners.has(ownerKey(identity))) sessions.disconnect(identity);
+    void queue.run(identity.roomCode, async () => {
+      if (sessions.isCurrent(identity, epoch) && !owners.has(ownerKey(identity))) await manager.transact(identity.roomCode, () => sessions.disconnect(identity));
     }).catch(() => undefined);
   };
   const init = (ws: WebSocket, roomCodeQuery: string | null): void => {
@@ -237,7 +283,7 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
       if (++conn.rateCount > 60) { sendError(conn, "RATE_LIMITED", "操作过于频繁，请稍后重试"); return; }
       const raw = rawToString(data);
       conn.serial = conn.serial.then(() => handle(conn, raw)).catch(error => {
-        if (error instanceof LobbyError) sendError(conn, error.code, error.message);
+        if (error instanceof LobbyError) { if (error.code !== 'ERROR_PAUSED' || !current(conn)) sendError(conn, error.code, error.message); }
         else sendError(conn, "INVALID_MESSAGE", "请求无法处理");
       });
     });
@@ -268,12 +314,13 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
     wss.handleUpgrade(req, socket, head, ws => init(ws, url.searchParams.get("room")));
   };
   server.on("upgrade", onUpgrade);
-  return { connections: () => wss.clients.size, close: () => new Promise<void>(resolve => {
+  return { connections: () => wss.clients.size, close: async () => {
     closing = true;
     server.off("upgrade", onUpgrade);
     heartbeatClock.clearInterval(heartbeat);
     scheduler.close(); unsubscribe();
     for (const client of wss.clients) client.terminate();
-    wss.close(() => resolve());
-  }) };
+    await new Promise<void>(resolve => wss.close(() => resolve()));
+    await queue.drain();
+  } };
 }

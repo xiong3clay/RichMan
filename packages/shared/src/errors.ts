@@ -1,4 +1,5 @@
 export const ERROR_CODES = [
+  "ERROR_PAUSED",
   "UNAUTHORIZED",
   "REPLACED",
   "NOT_YOUR_TURN",
@@ -18,6 +19,7 @@ export const ERROR_CODES = [
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
 export const ERROR_MESSAGES: Record<ErrorCode, string> = {
+  ERROR_PAUSED: '存档写入失败，本局已暂停，请房主重试或联系管理员',
   UNAUTHORIZED: "你没有权限执行这个操作",
   REPLACED: "这个座位已在另一个页面恢复",
   NOT_YOUR_TURN: "还没轮到你",

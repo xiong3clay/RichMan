@@ -19,12 +19,17 @@ export interface CommandResultRecord {
 export interface CommandResultStore {
   get(key: string): CommandResultRecord | undefined;
   set(key: string, record: CommandResultRecord): void;
+  delete?(key: string): void;
 }
 
 interface ProcessorOptions {
+  /** WS持久化提交接收第三参数，结果与状态同rename。缺省保留旧内存适配器的预暂存契约。 */
+  atomicCommit?: boolean;
   queue: RoomCommandQueue;
   getState: (roomCode: string) => EngineState | null;
-  commit: (roomCode: string, result: TransitionResult) => void | Promise<void>;
+  commit: (roomCode: string, result: TransitionResult, command?: {key: string; record: CommandResultRecord}) => void | Promise<void>;
+  isPaused?: (roomCode: string) => boolean;
+  onInvariant?: (roomCode: string) => void;
   advance: (roomCode: string) => void | Promise<void>;
   now?: () => number;
   draw?: () => 0 | 1;
@@ -33,6 +38,7 @@ interface ProcessorOptions {
 
 export class RoomCommandQueue {
   private readonly tails = new Map<string, Promise<void>>();
+  async drain(): Promise<void> { await Promise.all([...this.tails.values()]); }
 
   run<T>(roomCode: string, task: () => T | Promise<T>): Promise<T> {
     const result = (this.tails.get(roomCode) ?? Promise.resolve()).then(task);
@@ -82,6 +88,8 @@ export class GameCommandProcessor {
           : replyFor(original, state.version, failure("COMMAND_ID_REUSED"));
       }
 
+      if (this.options.isPaused?.(roomCode)) return replyFor(original, state.version, failure('ERROR_PAUSED'));
+
       await this.options.advance(roomCode);
       state = this.options.getState(roomCode);
       // Resume can replace a connection while asynchronous advancement yields.
@@ -100,10 +108,14 @@ export class GameCommandProcessor {
           drawResult: state.phase === "BETTING" ? this.draw() : 0 })
         : { state, events: [], outcome: validation, nextDeadlineAt: state.deadlineAt };
       const reply = replyFor(original, result.state.version, result.outcome);
+      if (!result.outcome.ok && result.outcome.code === 'RULE_INVARIANT') this.options.onInvariant?.(roomCode);
 
-      // Unit 06 must persist this record and the transition as one snapshot commit.
-      this.store.set(key, { payloadHash, reply: structuredClone(reply) });
-      if (result.state.version !== state.version) await this.options.commit(roomCode, result);
+      const record = { payloadHash, reply: structuredClone(reply) };
+      if (!this.options.atomicCommit) this.store.set(key, record);
+      try {
+        if (result.state.version !== state.version) await this.options.commit(roomCode, result, { key, record });
+      } catch (error) { if (!this.options.atomicCommit) this.store.delete?.(key); throw error; }
+      this.store.set(key, record);
       return reply;
     });
   }

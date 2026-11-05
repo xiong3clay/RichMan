@@ -242,6 +242,7 @@ export default function App() {
           key={snapshot.gameId}
           roomCode={roomCode}
           hostId={room?.hostId ?? null}
+          paused={room?.paused ?? snapshot.paused ?? false}
           view={snapshot}
           client={clientRef.current!}
           status={status}

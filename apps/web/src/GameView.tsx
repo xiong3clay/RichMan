@@ -41,6 +41,7 @@ import { confirmationIsCurrent } from "./game/confirmations";
 import type { ConfirmAction } from "./game/confirmations";
 
 export interface GameViewProps {
+  paused?: boolean;
   roomCode: string;
   hostId?: string | null;
   view: WireSnapshotView;
@@ -122,7 +123,7 @@ export function GameView(props: GameViewProps) {
   return <GameSessionView key={props.view.gameId} {...props} />;
 }
 
-function GameSessionView({ roomCode, hostId = null, view, client, status, statusDetail, result, error, events }: GameViewProps) {
+function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, client, status, statusDetail, result, error, events }: GameViewProps) {
   const [ui, setUi] = useState<UiState>(INITIAL_UI_STATE);
   const [amount, setAmount] = useState("");
   const [rateText, setRateText] = useState("1000");
@@ -141,6 +142,8 @@ function GameSessionView({ roomCode, hostId = null, view, client, status, status
   const abandonCommandRef = useRef<{ commandId: string; phaseInstanceId: string } | null>(null);
   const [rematchPending, setRematchPending] = useState(false);
   const rematchPendingRef = useRef(false);
+  const [resumePending, setResumePending] = useState(false);
+  const resumePendingRef = useRef(false);
   const [, refreshNotices] = useState(0);
 
   const prevRoundRef = useRef(view.round);
@@ -160,7 +163,12 @@ function GameSessionView({ roomCode, hostId = null, view, client, status, status
   const countdownProps = { serverNow: view.serverNow, receivedAtMs: snapshotClockRef.current.receivedAtMs };
 
   const finance = view.finance;
-  const canSubmit = status === "open" && client.hasJoined;
+  const paused = roomPaused ?? view.paused ?? false;
+  const connected = status === 'open' && client.hasJoined;
+  const canSubmit = connected && !paused;
+  useEffect(() => {
+    if (!paused || !connected || error !== null) { resumePendingRef.current = false; setResumePending(false); }
+  }, [paused,connected,error]);
   const step = deriveStep(view, ui);
   const currentConfirmation = confirmAction !== null && confirmationIsCurrent(confirmAction, view) ? confirmAction : null;
   const blockedBank = bankBlockedReason(view);
@@ -1328,7 +1336,7 @@ function GameSessionView({ roomCode, hostId = null, view, client, status, status
             <p className="top-line">
               第 {view.round} 轮 · {stageHeadline(view)}
               <span className="top-sep">·</span>
-              剩余 <Countdown deadlineAt={view.deadlineAt} {...countdownProps} />
+              剩余 <Countdown deadlineAt={paused ? null : view.deadlineAt} {...countdownProps} />
             </p>
           </div>
           <div className={"conn " + status} title={statusDetail ?? undefined}>
@@ -1336,6 +1344,15 @@ function GameSessionView({ roomCode, hostId = null, view, client, status, status
             {CONN_LABELS[status]}
           </div>
         </header>
+        {paused ? <div className="banner warn" role="status">
+          <span>对局已暂停（服务重启）</span>
+          {hostId === view.me.playerId ? <button type="button" className="link" disabled={!connected || resumePending}
+            onClick={() => {
+              if (resumePendingRef.current) return;
+              resumePendingRef.current = true; setResumePending(true);
+              if (!client.resumeGame()) { resumePendingRef.current = false; setResumePending(false); }
+            }}>{resumePending ? '正在继续…' : '继续对局'}</button> : <span>等待房主继续</span>}
+        </div> : null}
         {feedbackBanner}
         {eventNotices.length > 0 ? (
           <div className="notice-shelf" role="log" aria-label="事件通知">
@@ -1414,7 +1431,8 @@ function GameSessionView({ roomCode, hostId = null, view, client, status, status
       </section>
 
       <section className="stage">
-        {step.kind === "gameOver" ? renderStep(step) : !canSubmit ? <section className="panel wizard">
+        {paused ? <section className="panel wizard"><p className="eyebrow">已暂停</p><h2 className="question">等待继续对局</h2>
+          <p className="step-hint">账本与已提交操作已保留，请房主继续。</p></section> : step.kind === "gameOver" ? renderStep(step) : !canSubmit ? <section className="panel wizard">
           <p className="eyebrow">连接未就绪</p><h2 className="question">连接恢复后才能继续操作</h2>
           <p className="step-hint">当前仅显示最后一次快照；重连后以服务端最新状态重新确认。</p>
         </section> : currentConfirmation !== null ? renderConfirm(currentConfirmation) : abandonPending && step.kind === "betting" ?
