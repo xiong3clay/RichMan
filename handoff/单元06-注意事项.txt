@@ -1,0 +1,52 @@
+RichMan 单元06 注意事项
+日期：2026-11-05；对应未提交工作区；唯一规格为单元06-存档落盘与重启恢复.txt。
+
+一、存档格式与权威
+schemaVersion=1；snapshot.json是唯一提交点，snapshot.bak.json是上一提交备份。
+保存rulesVersion/protocolVersion用于兼容检查；金额沿用引擎整数分，禁止浮点转换。
+房间完整保存hostId、座位、usedGameIds、paused、EngineState、session摘要、当前局去重记录。
+sessions目前额外保存roomCode；导出/校验/恢复都使用同一格式。
+commands键仍是JSON.stringify([gameId,playerId,commandId])；hash为SHA256；reply为原命令回执。
+按本轮唯一工单，仅最近一局、最多5000条、最旧淘汰，rematch清旧局；不得误恢复旧的无限保留要求。
+版本未变化的拒绝结果仍不立即写盘/广播；后续整房快照可能带入内存里该类去重记录。
+lastEvents是最近提交的原始事件批次，保留BET_SETTLED.drawResult；不是事件重放入口或客户端视图。
+events.ndjson用于审计，未来seq/其他gameId忽略，坏行/缺行/断号告警，绝不靠日志重放账本。
+快照/备份/审计不得包含sessionToken、token或recoveryCode原文，只允许tokenDigest/recoveryDigest。
+磁盘文件有完整私有账务，只能留服务端数据目录，不能静态公开或下发整个snapshot。
+
+二、迁移与损坏处理
+本轮首次引入schema1，没有把先前仅RAM对局迁移到磁盘的工具；升级前需完成/停止旧对局。
+schema/rules/protocol不兼容则拒载，不得自动创建空房覆盖；没有自动迁移到未来schema的逻辑。
+主快照损坏尝试bak；先保留坏current为invalid-current-UUID.json，再修复current，防止坏文件覆盖唯一好bak。
+无可用快照时将整个房间移至rooms/corrupt-时间-房间-UUID同级目录并告警；不移入自身子目录。
+.tmp孤儿文件不是提交点，启动扫描不会将它们恢复成房间；删除房间先rename到.tmp墓碑后回收。
+恢复前应保留原始目录供人工检查；不要通过删除corrupt目录“修复”账本。
+回退到不支持磁盘的旧程序不会载入schema1，不能把此回退称为可保持进行中对局的降级。
+
+三、磁盘失败处置
+rename前失败：保留旧账，paused=true，房内ERROR_PAUSED，没有成功回执或新账snapshot/events。
+rename后或append失败：磁盘可能已提交，仍先回旧内存并暂停/报错；durablePending保留该权威快照。
+后续身份、在线标记、继续对局等写入前必须先对齐durablePending，不能用旧账覆盖已提交快照/原reply。
+同ID同载荷命中已提交原reply可以返回，表示以前确已提交，不表示在暂停中执行新交易。
+磁盘恢复后由房主继续；若仍失败保持暂停；不要手工清command记录后重发转账。
+旧socket只可延续对齐前仍有效的身份；权威已删除的身份必须detach，不能因seat/epoch重用复活。
+特别回归：stale_owner_not_revived覆盖连续两次after_rename故障后大厅复用同p1/seat，旧连接必须NOT_JOINED。
+
+四、不得回退
+1. 落盘完成才发布内存/广播/成功回执；state与当次command结果必须同一次rename。
+2. WS处理器必须atomicCommit:true；独立内存适配器的预暂存兼容契约不能套到持久化生产路径。
+3. 大厅/身份变更同样用房间串行队列与manager.transact；await期间不能提前暴露候选epoch/token/座位。
+4. 恢复一律paused、online=false，scheduler不arm；房主resume_game才换实例并重算当前窗口。
+5. 不追赶旧deadline，不丢已锁赌注/已行动，不额外计息、扣税或开奖。
+6. engine.ts只新增resumeFromPause，已有利息/借款/赌博/税收/破产语义不变。
+7. 保留05E吸顶单反馈结构、05F额度展示；不把私有快照或审计记录传到前端。
+8. 身份只存摘要，连接替换/半开旧回调/恢复码轮换的原有约束继续有效。
+
+五、兼容与验证范围
+正式pnpm start/dev默认磁盘；嵌入startServer()无dataDir/store时保留原内存行为，调用者须明确选择持久化。
+未新增依赖、未改协议版本号、README/docs/原有测试期望、steps.ts/styles.css或当前状态文件；未commit。
+真实验证33文件481条、typecheck/build退出0，两次fork强杀同目录重启；完整证据在artifacts/test-logs/06-*。
+未做人手机、弱网、硬件断电或多server进程并发写同一目录的验证；当前设计为单进程、每房串行写。
+物理断电持久性还受文件系统/设备保障影响，本轮不作超出文件fsync与进程崩溃测试的承诺。
+
+【Lead 交付注记 2026-11-05】Codex 工作区已由 Lead 独立验收并提交 feat(unit06) 40f8a6e；全量 481 测试 / typecheck 0 / build 0 复跑通过，另做真实 CLI taskkill 重启恢复（/api/rooms 恢复为 paused:true）与快照凭证抽查。自本条起以该提交状态为准，前文“未commit”为写作时历史。

@@ -1,0 +1,56 @@
+RichMan 单元06 下一阶段交接（给07）
+日期：2026-11-05；06A/06B自动化完成；未commit，Lead验收后统一提交。
+基线HEAD：91cc8683c82fce2506796c02f4e71bf57daac438；该提交本身不含本轮工作区改动。
+最新：33测试文件481条全绿（原443+新增38），pnpm typecheck/build退出0。
+handoff/项目当前状态.txt不在本轮写作用域，故保留原文；单元06状态以本文件与成果报告为准。
+
+一、入口与数据流
+http.ts CLI → FileRoomStore(dataDir) → rooms/recovery.ts loadAllRooms → RoomManager.restoreRoom → HTTP listen/WS。
+生产CLI数据默认apps/server/data，RICHMAN_DATA_DIR覆盖；嵌入startServer需显式传dataDir或store。
+HTTP POST建房await createRoomPersisted；GET /api/rooms公开最少房间元数据；health计数含恢复房间。
+join/resume/ready/start/rematch/leave → 原房间队列 → manager.transact → 候选完整快照 → commit → 发布事件/绑定。
+游戏命令 → GameCommandProcessor → applyCommand → commitTransition(state+hash+reply+events) →
+writeSnapshotAtomic → audit append/fsync → 内存/缓存 → player view + 过滤事件 → scheduler。
+旧规则引擎仍只处理纯状态；没有加入socket、时钟读取或磁盘访问。
+失败路径：旧内存+paused+ERROR_PAUSED；rename后已提交内容用durablePending对齐后才能有下一次写入。
+关闭服务先停止scheduler/心跳/接入，终止WS，再queue.drain，保证测试/嵌入关闭不遗留磁盘任务。
+
+二、接口
+shared协议新消息：{type:"resume_game"}；错误码ERROR_PAUSED；房间与snapshot view包含paused。
+resume_game要求当前已认证房主、PLAYING、paused；否则NOT_HOST/INVALID_STATE。
+成功先保存paused=false与续时后的state和GAME_RESUMED事件，再广播room/snapshot/events并schedule。
+resumeFromPause(state,{nowMs})：GAME_OVER同引用；其余同phase重建时限/实例，version/eventSeq+1。
+ACTION/TAX有PENDING私人请求时同时续request与窗口；TAX自救dangerDeadline续时；不动账本/赌注/行动记录。
+GAME_RESUMED是公开事件type，payload:{code:"GAME_RESUMED"}；EngineState无events数组，服务端构造并保存事件。
+RoomStore：commitRoom(code,snapshot,events)、deleteRoom(code)；FileRoomStore还提供loadAll与测试故障选项。
+AtomicOptions.failAt为before_rename/after_rename；checkpoint只供受控测试精确等待kill屏障，正常不配置。
+SnapshotSessionStore同步读写manager候选态，必须由外层await manager.transact才算身份提交。
+CommandProcessor生产WS固定atomicCommit:true；当次record作为commit第三参数，与state同rename，不预缓存成功。
+manager.reconcileDurable返回是否应用了pending；WS对齐前捕获有效owner，对齐后撤销已失效身份，避免座位复用越权。
+
+三、前端接入与不可破坏项
+App把room.paused优先于snapshot.paused传GameView，避免错误后旧快照仍可提交。
+常驻横幅在原game-sticky内部；房主继续按钮有本地pending防连点，非房主等待。
+paused时经济提交只读、倒计时隐藏；暂停GAME_OVER先让继续入口可达，恢复后再显示结束框。
+恢复新快照后原steps推导继续工作；没有修改steps.ts、styles.css、05E反馈架或05F额度计算。
+后续07不能绕过paused门禁，不能把全房私有磁盘快照/审计当WireSnapshotView直接下发。
+
+四、测试与证据
+pnpm test --reporter=verbose → 33 files /481 tests passed，退出0；pnpm typecheck/build均退出0。
+新增38：core resume15、server persistence18、crash2、server resume3。
+九故障+两补充完整名称及断言：单元06-成果报告.txt第二节。
+两次真实fork强杀→同目录重启的health与快照差异：artifacts/test-logs/06-restart-demo-final.txt。
+最后全量/类型/构建：artifacts/test-logs/06-{test,typecheck,build}-final.txt。
+独立实现复核最终结论：artifacts/test-logs/06-review-implementation.txt末节；全部已发现阻塞已解决。
+独立测试复核：06-review-tests-final.txt（复核当时37新增，之后又加stale_owner_not_revived，最终38）。
+原有测试文件完全未改；唯一core/src diff是新增resumeFromPause函数，未改既有规则语义。
+
+五、给07的限制/下一入口
+代码验证可供Lead复核后进入07；没有替用户提交，也没有升级在用计划任务/服务。
+真人手机/弱网验收与真实物理断电未验证；人工步骤见运行与验收说明。
+schema1无自动升级迁移；备份/隔离/日志处理与磁盘失败应对见注意事项。
+当前单server进程写同一data目录；不包含跨进程文件锁、云备份或多实例协调，07不得假定已有这些能力。
+进行中RAM对局没有在线迁移，正式切换需安排旧局结束；不要因看见磁盘文件就声称旧局已落盘。
+恢复默认暂停是产品行为，继续按钮必须保留；不能改成启动即追赶过期deadline。
+
+【Lead 交付注记 2026-11-05】Codex 工作区已由 Lead 独立验收并提交 feat(unit06) 40f8a6e；全量 481 测试 / typecheck 0 / build 0 复跑通过，另做真实 CLI taskkill 重启恢复（/api/rooms 恢复为 paused:true）与快照凭证抽查。自本条起以该提交状态为准，前文“未commit”为写作时历史。

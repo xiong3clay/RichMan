@@ -1,0 +1,66 @@
+RichMan 单元06 运行与验收说明
+日期：2026-11-05；自动化验证完成，真人手机验收未做；未commit。
+仓库：D:\Lianjunjie\biancheng\RichMan
+环境实测：Node v24.18.0，pnpm 11.7.0，Windows PowerShell。
+
+一、启动与数据目录
+在仓库根目录运行：
+  pnpm build
+  pnpm start
+正式CLI监听0.0.0.0:8000，沿用实际端口/LAN地址输出；默认数据目录apps/server/data。
+自定义持久目录（PowerShell，使用同一目录才能恢复）：
+  $env:RICHMAN_DATA_DIR = 'D:\Lianjunjie\biancheng\RichMan\data\unit06-demo'
+  pnpm start
+数据不在静态目录；只公开Web构建产物，不公开快照/事件/配置。
+访问http://localhost:8000/；同LAN手机使用启动输出中的IPv4地址。
+/health检查rooms、connections；GET /api/rooms只返回房间码/状态/paused/人数元数据。
+嵌入式startServer()保留原内存模式；需要持久化时显式传dataDir或FileRoomStore。
+正式CLI已显式传RICHMAN_DATA_DIR或默认目录，没有依赖调用方自行启用。
+
+二、完整自动化验收（在仓库根目录）
+  pnpm test --reporter=verbose
+  pnpm typecheck
+  pnpm build
+本次实际：33文件、481条全通过（443原有+38新增）；typecheck退出0；build退出0。
+完整日志：artifacts/test-logs/06-{test,typecheck,build}-final.txt。
+以上操作没有改既有测试，也没有通过改预期让测试通过。
+本机沙箱曾拦截临时目录rename与本地socket（EPERM/EACCES）；真实验收在获准环境重跑，
+最终日志是实际执行结果；不能把早期环境失败日志或按名称跳过用例当作全量通过。
+
+三、可复跑的两次真实强杀演示（无需手工抢时序）
+  pnpm exec vitest run apps/server/tests/crash-recovery.test.ts --reporter=verbose
+该命令实际fork recovery-worker.ts子进程、真实HTTP建房、两条WS连接、两人准备开局，
+发REQUEST_PRIVATE_LOAN(500分)与ACCEPT_PRIVATE_LOAN两条命令。
+每条测试在指定原子写屏障收到IPC后，父进程SIGKILL子进程并等待exit，再载入同一临时目录：
+1. crash_before_rename：旧账v2/seq3、两人10000/10000；无成功回执、无accept记录。
+2. crash_after_rename_before_ack：已提交v3/seq4、两人10500/9500；accept的hash与原reply同快照存在。
+两次恢复都保留gameId/座位，paused=true，/health仍rooms=1；旧token可恢复。
+房主resume_game后续时、同一accept原包重放两遍，只有一笔借条/一次转账；另一玩家END_ACTION成功。
+控制台[06 restart demo]两条JSON包含完整healthBefore/healthLive/healthAfter与snapshotDiff；
+最终全量中对应原始输出已提取到artifacts/test-logs/06-restart-demo-final.txt并附成果报告。
+测试只用os.tmpdir()随机目录/本机随机端口；结束清理其子进程与目录，不操作默认data或在用服务。
+
+四、人工界面恢复验收步骤（本轮未执行，供Lead验收）
+1. 用独立演示目录启动；两浏览器建房/加入、准备、房主开局，记录房间码、阶段和各自金币。
+2. 正常做两条命令，确认响应后，在本机只终止自己刚启动的演示server进程；保留数据目录。
+3. 同样RICHMAN_DATA_DIR重启；刷新/重连。预期仍是原房间、原座位、原gameId与原账本，
+   顶部常驻“对局已暂停（服务重启）”，停止倒计时与经济提交。非房主显示“等待房主继续”。
+4. 房主点“继续对局”。预期仍在原阶段，赌注已锁仍锁，已行动仍已行动；新deadline从继续时重算。
+   不应在点继续前追赶旧deadline，也不应瞬间补利息/税或连续跳轮。
+5. 结束阶段暂停时同样能点继续，之后显示原结束框；继续按钮连点只发送一次请求。
+6. 恢复码换token后旧token立即失效；不要把恢复码、token或joined消息打印/复制到日志。
+磁盘故障屏障复现用自动化命令，不建议靠手工断电抢rename时刻。
+
+五、九故障与补充的定位
+persistence.test.ts：timeout_and_result_once（三阶段）、credentials_restored、write_failure、orphan_events、
+stale_payload、schema_guard、cold_start_and_rematch、empty_lobby_deleted，另含原子性/容量/身份撤权加固。
+crash-recovery.test.ts：crash_before_rename、crash_after_rename_before_ack。
+server resume.test.ts：restart_paused、paused_banner、paused_game_over_ui。
+core resume.test.ts：15条阶段续时/请求截止/保留账务/旧实例拒绝/GAME_OVER同引用测试。
+完整测试名、断言摘要、文件行数见单元06-成果报告.txt。
+
+六、未验证项
+没有真人手机/弱网验收记录，没有真实物理断电试验；不把真实进程强杀等同于硬件电源故障。
+未改系统计划任务/在用服务，未对既有RAM对局做在线迁移；本轮没有提交。
+
+【Lead 交付注记 2026-11-05】Codex 工作区已由 Lead 独立验收并提交 feat(unit06) 40f8a6e；全量 481 测试 / typecheck 0 / build 0 复跑通过，另做真实 CLI taskkill 重启恢复（/api/rooms 恢复为 paused:true）与快照凭证抽查。自本条起以该提交状态为准，前文“未commit”为写作时历史。

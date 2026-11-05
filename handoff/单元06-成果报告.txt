@@ -1,0 +1,141 @@
+RichMan 单元06 成果报告
+日期：2026-11-05
+状态：06A实现、06B故障注入与两次真实子进程重启演示已完成自动化验收；真人/手机未验证；未commit。
+唯一工单：handoff/单元06-存档落盘与重启恢复.txt。
+实施基线：91cc8683c82fce2506796c02f4e71bf57daac438；原443条测试未修改、未删除、未改期望。
+本报告验证的是该HEAD上的未提交工作区，不能将HEAD当成包含本轮实现的提交。
+
+一、关键实现与取舍
+1. FileRoomStore：临时文件write→fsync→close→备份上一快照→同盘rename，rename是权威提交点。
+   snapshot.json包含完整房间、原始EngineState、身份摘要、当次command payloadHash+原reply。
+   rename后才发布内存与WS snapshot/events；失败回滚旧内存、paused=true、全房ERROR_PAUSED，不回成功。
+2. manager.transact：房间身份/epoch/ready/start/rematch/leave也使用候选快照。await磁盘前撤回候选共享态，
+   提交成功后才发布，成功前不替换旧socket、不泄漏新token、不广播大厅成功。
+   连接在await期间已断开时不会错误接管座位；旧连接可继续保持所有权或将无人连接的席位标离线。
+3. after_rename失败/审计append失败：内存先保持旧账并暂停，但记住已经成功提交的权威快照。
+   任何后续写入（包括恢复码轮换、epoch/在线标记）先对齐该快照，不能用旧内存覆盖已提交账和去重。
+   首次失败仍只回ERROR_PAUSED；以后同ID命中已提交结果属于真实原结果，不是重新执行。
+4. 去重：生产WS固定atomicCommit:true，把record作为commit第三参数与state同rename；提交成功才发布缓存。
+   原独立内存Processor适配器保留预暂存契约，以满足未改的既有异步commit测试；失败可delete回滚。
+   按本轮唯一规格：当前一局最多5000条，最旧淘汰；rematch清旧局；版本不变拒绝不立即写盘或广播。
+   旧内存适配器与正式WS持久化路径有明确区分，后续接新持久化调用者必须启用atomicCommit。
+5. 重启：主快照解析失败用bak，恢复备份前先保留坏current并修复权威文件，避免下一次失败覆盖唯一好bak。
+   schema/rules/protocol/结构/身份/金额校验失败拒载；无法恢复则目录移动到rooms/corrupt-时间-房间-uuid。
+   corrupt采用同级目录，因为“把整个目录移进自身子目录”无法执行；原文件均保留，不静默新建空局。
+   恢复房间一律paused，online=false，scheduler不arm；审计只检查、不重放；未来seq忽略，断号/坏行/缺行告警。
+6. resumeFromPause是engine.ts唯一新增函数，原有规则计算未改。GAME_OVER同引用返回；其余同阶段换实例、
+   version/eventSeq各+1，仅重建当前窗口；ACTION/TAX私人请求同时续request/danger截止，保留账本/已行动/已锁注。
+   EngineState不保存事件数组，函数预留eventSeq，由服务端构造同seq的公开GAME_RESUMED事件并同提交。
+   原引擎drawResult只在BET_SETTLED事件，故房间快照附lastEvents原始审计批次，与账同rename，避免依赖日志重放找开奖结果。
+7. 正式CLI默认apps/server/data，RICHMAN_DATA_DIR可覆盖。嵌入startServer保持原内存API，显式dataDir/store才启用磁盘，
+   兼容原测试的内存重启语义，且所有新增存储测试都用随机临时目录。没有触碰在用服务的默认data或计划任务。
+8. 前端只加paused字段、吸顶常驻暂停横幅、房主继续按钮/client.resumeGame与暂停只读门禁。
+   保留05E单条反馈/通知架与05F额度逻辑，未动steps.ts或styles.css。暂停GAME_OVER时先给继续入口，避免被结束框挡住。
+
+二、06B九场景（测试名是原始Vitest输出的前缀）
+1. crash_before_rename（crash-recovery.test.ts）
+   真fork子进程，ACCEPT命令在rename前屏障阻塞后SIGKILL并等待exit；旧version/余额/eventSeq、无command记录；
+   actor无成功ACK、双方无新snapshot/events；同目录重启后续时再发原包，只转账一次。
+2. crash_after_rename_before_ack（crash-recovery.test.ts）
+   rename后屏障强杀，提交账与payloadHash/reply均存在；恢复paused后原包重发返回完全相同reply，只有一笔借条/一次转账。
+3. timeout_and_result_once INTEREST / TAX / BETTING（persistence.test.ts，3条）
+   捕获同deadline回调执行两次，重启后再执行旧回调；银行1000→1100仅一次、两位玩家仅各扣2000税、开奖仅draw一次。
+   BET_SETTLED.drawResult=1随快照lastEvents保留，重启后原账/原事件不变，不重抽。
+4. restart_paused（resume.test.ts）
+   过期锁注快照重启不追赶；非房主NOT_HOST；房主继续后仍BETTING、赌注仍锁、账不变，新deadline=now+45000且实例更新。
+5. credentials_restored（persistence.test.ts）
+   原token仍可恢复、恢复码轮换token立即撤旧、epoch递增；999999999999分精确往返。
+   检查snapshot/bak/audit文本无原token/恢复码，字段仅摘要。
+6. write_failure（persistence.test.ts）
+   before_rename磁盘失败，双方ERROR_PAUSED；不发成功ACK/snapshot/events，账保持旧值、未缓存失败命令的成功结果。
+   磁盘恢复→房主继续→同commandId可正常提交，金币只增加一次。
+7. orphan_events（persistence.test.ts）
+   审计多3行不重放/eventSeq不前进；坏行、断号、缺行均告警并保留快照，不抛未捕获异常。
+8. stale_payload（persistence.test.ts）
+   重启后原信封返回原reply，换载荷COMMAND_ID_REUSED且账不动；快照实际包含SHA256摘要和原reply。
+9. schema_guard（persistence.test.ts）
+   schema99不能回退成空局，目录确实移入corrupt-*，/health.rooms=0与GET /api/rooms空列表。
+
+两条补充：
+10. cold_start_and_rematch：空目录冷启动正常，三局同commandId独立记账，每局快照只含当前局commands。
+11. empty_lobby_deleted：大厅逐个leave、最后一个删除目录，重启不复活空房间。
+
+额外加固（persistence.test.ts）：
+atomic_snapshot_backup_and_before_rename；candidate_identity_isolation；snapshot_shape_guard；backup_survives_failed_commit；
+after_rename_identity_write；stale_owner_not_revived；command_capacity；automatic_invariant_pauses。
+UI（resume.test.ts）：paused_banner、paused_game_over_ui。
+core新resume.test.ts：15条，标准/快速ACTION/BANK_DUE/BETTING/TAX、请求/自救续时、旧实例拒绝、自动阶段不先结息、GAME_OVER同引用。
+共新增38条：core15、persistence18、crash2、resume3；无既有测试改动。
+
+三、真实命令输出
+pnpm test --reporter=verbose：退出0
+  Test Files 33 passed (33)
+  Tests 481 passed (481)
+  Duration 6.79s
+pnpm typecheck：tsc --noEmit -p tsconfig.json，退出0。
+pnpm build：vite8.3.5，129 modules transformed，built in203ms，退出0。
+  CSS index-Z0VPCPB8.css 9.32kB；JS index-Dljk9omM.js 386.47kB。
+原443条全部继续通过。未改README测试数字、依赖、锁文件或docs；未commit。
+
+四、真实强杀重启演示（完整原始行在本报告末尾）
+两次均为真实Node子进程/真实HTTP+两WS/同一临时data；不是throw替代kill。
+先建房开局，发送REQUEST_PRIVATE_LOAN与ACCEPT_PRIVATE_LOAN两条命令，然后在精确屏障强杀。
+before_rename：/health rooms 1→1、connections 2→0；v2/seq3/余额10000、10000恢复不变，paused=true；
+              房主继续v3并重发原同意包后只转500分一次，随后END_ACTION成功。
+after_rename：/health rooms 1→1、connections 2→0；v3/seq4/余额10500、9500恢复不变，paused=true；
+             房主继续v4，原同意包返回原reply，只有一次转账，随后END_ACTION成功。
+两次ackBeforeKill=false、transfers=1、continuedCommand=ok；恢复仍使用原gameId/座位/token。
+
+五、复核/限制
+独立实现审阅：06-review-implementation.txt；独立测试审阅：06-review-tests-final.txt。
+审阅发现的身份提前可见、坏bak覆盖、坏贷款金额、自动错误假暂停均先红后绿。末轮还修复连续after_rename失败后座位复用会复活旧owner的问题：先记录仍有效身份，权威无记录/先前失效者detach；新回归和独立真实WS原探针均确认旧连接NOT_JOINED，最终无阻塞。
+日志扫描未发现凭证原文；未把受限沙箱内EPERM/EACCES、早期未完成回归或按名称skip当作通过。
+未做真人/手机/弱网或真实物理断电；本轮验证是进程强杀与文件故障注入，不声称覆盖硬件电源故障。
+没有改任何既有测试期望。旧commands预暂存测试通过兼容适配器保留契约，正式WS仍走原子提交。
+本轮作用域不包含handoff/项目当前状态.txt，不修改；最新06状态在本报告及下一阶段交接。
+
+六、证据路径
+artifacts/test-logs/06-test-final.txt
+artifacts/test-logs/06-typecheck-final.txt
+artifacts/test-logs/06-build-final.txt
+artifacts/test-logs/06-restart-demo-final.txt（本次最终全量中的两条真实演示原始JSON）
+artifacts/test-logs/06-restart-demo.txt（单独复跑命令的完整输出）
+artifacts/test-logs/06B-persistence.txt、06A-green.txt、06-review-green.txt、06-queue-compat-green.txt
+红灯另含06-owner-red.txt（旧连接未被拒），修后06-owner-green.txt为18/18。
+红灯：06-core-red.txt、06-atomic-red.txt、06-review-red.txt、06-backup-red.txt、06-invariant-red.txt、06-ui-red.txt、06-pause-ui-red.txt。
+
+七、变更文件（后附当前文件总行数，不是测试条数）
+apps/server/src/http.ts | 258 行
+apps/server/src/rooms/command-queue.ts | 212 行
+apps/server/src/rooms/manager.ts | 516 行
+apps/server/src/rooms/session.ts | 200 行
+apps/server/src/ws.ts | 326 行
+apps/web/src/App.tsx | 317 行
+apps/web/src/GameView.tsx | 1574 行
+apps/web/src/net/client.ts | 431 行
+apps/web/src/net/wire.ts | 278 行
+packages/game-core/src/engine.ts | 1566 行
+packages/shared/src/errors.ts | 41 行
+packages/shared/src/protocol.ts | 221 行
+apps/server/src/rooms/recovery.ts | 7 行
+apps/server/src/storage/atomic.ts | 30 行
+apps/server/src/storage/file-store.ts | 139 行
+apps/server/src/storage/types.ts | 29 行
+apps/server/tests/crash-recovery.test.ts | 87 行
+apps/server/tests/persistence-harness.ts | 65 行
+apps/server/tests/persistence.test.ts | 263 行
+apps/server/tests/recovery-worker.ts | 13 行
+apps/server/tests/resume.test.ts | 52 行
+packages/game-core/tests/resume.test.ts | 196 行
+
+handoff/单元06-实施记录.txt | 16 行
+handoff/单元06-成果报告.txt | 140 行
+handoff/单元06-运行与验收说明.txt | 64 行
+handoff/单元06-注意事项.txt | 50 行
+handoff/单元06-下一阶段交接.txt | 54 行
+
+八、真实演示原始输出
+[06 restart demo] before_rename {"healthBefore":{"ok":true,"service":"richman","version":"0.0.0","protocolVersion":1,"uptimeSec":0,"connections":0,"rooms":0,"serverNow":"2026-11-05T08:09:30.503Z"},"healthLive":{"ok":true,"service":"richman","version":"0.0.0","protocolVersion":1,"uptimeSec":0,"connections":2,"rooms":1,"serverNow":"2026-11-05T08:09:30.736Z"},"healthAfter":{"ok":true,"service":"richman","version":"0.0.0","protocolVersion":1,"uptimeSec":0,"connections":0,"rooms":1,"serverNow":"2026-11-05T08:09:31.402Z"},"snapshotDiff":{"before":{"gameId":"03661ad6-ae84-46bf-abca-514580661d16","version":2,"eventSeq":3,"balances":[10000,10000]},"restored":{"gameId":"03661ad6-ae84-46bf-abca-514580661d16","version":2,"eventSeq":3,"paused":true,"cents":"10000"},"continued":{"phase":"ACTION","version":3,"deadlineAt":"2026-11-05T08:10:16.431Z"}},"ackBeforeKill":false,"transfers":1,"continuedCommand":"ok"}
+[06 restart demo] after_rename {"healthBefore":{"ok":true,"service":"richman","version":"0.0.0","protocolVersion":1,"uptimeSec":0,"connections":0,"rooms":0,"serverNow":"2026-11-05T08:09:32.026Z"},"healthLive":{"ok":true,"service":"richman","version":"0.0.0","protocolVersion":1,"uptimeSec":0,"connections":2,"rooms":1,"serverNow":"2026-11-05T08:09:32.121Z"},"healthAfter":{"ok":true,"service":"richman","version":"0.0.0","protocolVersion":1,"uptimeSec":0,"connections":0,"rooms":1,"serverNow":"2026-11-05T08:09:32.681Z"},"snapshotDiff":{"before":{"gameId":"cb491195-4074-4a1a-8836-66fc76a33861","version":3,"eventSeq":4,"balances":[10500,9500]},"restored":{"gameId":"cb491195-4074-4a1a-8836-66fc76a33861","version":3,"eventSeq":4,"paused":true,"cents":"10500"},"continued":{"phase":"ACTION","version":4,"deadlineAt":"2026-11-05T08:10:32.709Z"}},"ackBeforeKill":false,"transfers":1,"continuedCommand":"ok"}
+
+【Lead 交付注记 2026-11-05】Codex 工作区已由 Lead 独立验收并提交 feat(unit06) 40f8a6e；全量 481 测试 / typecheck 0 / build 0 复跑通过，另做真实 CLI taskkill 重启恢复（/api/rooms 恢复为 paused:true）与快照凭证抽查。自本条起以该提交状态为准，前文“未commit”为写作时历史。

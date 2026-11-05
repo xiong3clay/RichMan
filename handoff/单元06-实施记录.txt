@@ -1,0 +1,18 @@
+单元06实施记录（2026-11-05）
+唯一规格：单元06-存档落盘与重启恢复.txt；基线443条，HEAD91cc868。
+源码串行写入：core agent先仅新增resume函数/测试，完成后root接管所有其他源码；两名agent只读复核。
+改动：server/storage/{atomic,file-store,types}.ts、rooms/{manager,session,command-queue,recovery,scheduler}.ts、ws/http；shared协议/errors；web仅暂停横幅/继续按钮/client；新core与server测试；四类06交接。
+06A先TDD覆盖原子快照、提交原子性、续时；06B再9故障+2补充及两次真实kill/restart。
+验收pnpm test/typecheck/build；日志artifacts/test-logs/06-*；不得改README/deps/旧测试，不commit。
+取舍：按本轮唯一规格保留最近一局最多5000条commands；拒绝/版本不变不落盘。
+生产CLI默认apps/server/data或RICHMAN_DATA_DIR；嵌入startServer缺省内存兼容原测试，新落盘测试一律显式临时dataDir。
+rename后失败：旧内存保持、房间暂停，记录已提交权威快照；任何后续写入先对齐该快照，避免身份保存把已提交账覆盖。
+EngineState无历史events；resumeFromPause增加eventSeq，server构造GAME_RESUMED事件；快照保留lastEvents作为审计批次/开奖权威副本，不重放。
+
+最终落地未修改scheduler.ts，沿用原有队列/定时器，WS通过paused屏蔽取state；其余改动以成果报告为准。
+独立复核补修：身份候选提交前不可见、坏备份保护、金额结构检查、自动失败真正暂停、暂停GAME_OVER入口、
+after_rename身份轮换继续、连续两次故障后座位复用不能复活旧owner；新增测试先红后绿。
+最终pnpm test --reporter=verbose：33文件481条（443+38）通过；typecheck与build退出0，证据06-*-final.txt。
+两次真实fork/SIGKILL同目录重启，完整health和快照diff附成果报告。真人手机/物理断电未验证；未commit。
+
+【Lead 交付注记 2026-11-05】Codex 工作区已由 Lead 独立验收并提交 feat(unit06) 40f8a6e；全量 481 测试 / typecheck 0 / build 0 复跑通过，另做真实 CLI taskkill 重启恢复（/api/rooms 恢复为 paused:true）与快照凭证抽查。自本条起以该提交状态为准，前文“未commit”为写作时历史。
