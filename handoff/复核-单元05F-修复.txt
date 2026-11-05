@@ -1,0 +1,394 @@
+============================================================
+RichMan 单元 05F 复核修复 独立复核报告
+============================================================
+复核员：Qoder（独立复核，只读；仅按要求临时改过一次类名并已还原）
+复核时间：2026-11-05
+工作区：D:\Lianjunjie\biancheng\RichMan
+复核对象：commit 3e61c35（feat(unit05F): 借款额度提示——服务端下发可借上限，Qoder 复核修复 M1/S1-S4）
+当前 HEAD：bcbfd4d（docs(unit05F): 成果报告/运行验收/交接/注意事项与复核处理结论）
+上一轮结论：handoff/复核-单元05F.txt（第八节 Lead 处理结论）
+本轮修复规格：handoff/单元05F-借款额度提示.txt 第七节
+
+本轮结论：无 must-fix。M1、S1、S2、S3、S4 均已按规格修复并通过实际验证；
+发现 3 项 should-fix（近 MAX 额度文案失真、不可借原因重复且自身面板 0 额度无原因、
+测试与交接文档缺口），不阻塞资金正确性，但建议在宣布 05F 完成前处理。
+
+
+============================================================
+一、must-fix
+============================================================
+无。
+
+M1 的数值语义已修好：views.ts 的 min(50%, MAX-金币) 与 engine 入账上限一致，
+实测额度 500 可借、501 被拒、MAX 时额度 0（见三、A 与五、4）。
+本轮未发现新的 must-fix。
+
+
+============================================================
+二、should-fix
+============================================================
+
+SF1. M1 修好后，额度文案在“接近 MAX / 恰好 MAX”时失真：数字正确，解释错误。
+
+位置：apps/web/src/game/steps.ts:39-40
+代码原文：
+  if (limit === "0") return "可借 0 分（当前金币不足以产生贷款额度）";
+  return "最多可借 " + formatCents(limit) + "（当前金币的 50%，向下取整）";
+
+而服务端额度已改为取两者较小值：
+  packages/game-core/src/views.ts:110-114
+  const bankHeadroom = Math.max(0, MAX_MONEY_CENTS - me.cents);
+  const bankBorrowLimitCents =
+    me.credit === "GOOD" && me.cents > 0 && !myBankLoans.some((loan) => loan.status !== "REPAID")
+      ? Math.min(ordinaryLoanCap(me.cents), bankHeadroom)
+      : 0;
+
+失真示例（代码路径可直接推出）：
+- me.cents = MAX_MONEY_CENTS - 500 时，bankBorrowLimitCents = 500；
+  Q2 askBank/ bankAmount 显示
+  “最多可借 500 分（当前金币的 50%，向下取整）”，
+  但 500 是剩余空间，不是当前金币的 50%（50% 约为 499,999,999,750）。
+  该文案由 GameView.tsx:1120（askBank）和 :1145（bankAmount）使用。
+- me.cents = MAX_MONEY_CENTS 时，额度为 0；askBank 显示
+  “可借 0 分（当前金币不足以产生贷款额度）”（steps.ts:39），
+  同屏还有 GameView.tsx:1125 的
+  “当前金币不足以产生可借额度，暂不能向银行借款”。
+  玩家已是全服最高金币，文案却说“金币不足”，事实错误。
+
+建议：
+- 正常额度文案改为不绑定 50% 的通用说法，例如
+  “最多可借 X 分（受当前金币与余额上限限制，向下取整）”；
+  若必须保留“50%”，则只在未触发 headroom 时使用，并由服务端下发原因字段，
+  不要让前端自己算。
+- 额度 0 文案改为中性说法（例如“当前无可借额度”），或按
+  bankBlockedReason / headroom 区分“金币不足”和“余额接近上限”。
+- 同步修改 steps.test.ts:688-692 等精确文案断言，并补一条近 MAX 的
+  GameView/ steps 用例（fixture 可用 cents = "999999999500"、
+  bankBorrowLimitCents = "500"，断言不出现“当前金币的 50%”作为 500 的解释）。
+本条只影响文案，不影响可借数字与按钮状态。
+
+SF2. 不可借原因在同一屏重复；自身面板在 0 额度时没有原因，和“bankLimitText 是唯一入口”的交接说明不一致。
+
+位置 1：apps/web/src/game/steps.ts:34-36
+代码原文：
+  export function bankLimitText(view: WireSnapshotView): string {
+    const blocked = bankBlockedReason(view);
+    if (blocked !== null) return blocked + "（可借 0 分）";
+
+位置 2：apps/web/src/GameView.tsx:1119-1126
+代码原文：
+  <p className="step-hint">
+    当前金币 {formatCents(finance.cents)}；{bankLimitText(view)}。
+  </p>
+  {blockedBank !== null ? (
+    <p className="step-hint danger-text">{blockedBank}</p>
+  ) : bankLimit === "0" ? (
+    <p className="step-hint danger-text">当前金币不足以产生可借额度，暂不能向银行借款</p>
+  ) : null}
+
+当 blockedBank 非空（失信、未结清贷款、金币为 0 等）时：
+- 第 1120 行的 bankLimitText 已经包含“原因（可借 0 分）”；
+- 第 1123 行又单独渲染同一原因；
+- 实际文字会出现两遍，例如：
+  “你有一笔未结清的银行贷款，不能再次借款（可借 0 分）。”
+  “你有一笔未结清的银行贷款，不能再次借款”
+这与 05E 的“单条反馈”原则相悖，也和新交接
+handoff/单元05F-注意事项.txt:16-17“bankLimitText 是唯一额度文案入口，不要在 GameView
+里再写一套‘可借 0 分’分支”的约定不一致。
+新测试 apps/web/tests/gameview.test.ts:482-497 只做 toContain，不检查出现次数，
+因此重复原因不会被发现。
+
+位置 3：apps/web/src/GameView.tsx:1397-1404
+代码原文：
+  <span className="stat-label">可借额度</span>
+  <span className="stat-value small">
+    {blockedBank !== null
+      ? blockedBank + "（可借 0 分）"
+      : bankLimit === null
+        ? BANK_LOAN_LIMIT_HINT
+        : formatCents(bankLimit)}
+  </span>
+
+这里仍是一套独立的额度文案分支：当 bankLimit 为 “0” 且 bankBlockedReason 为 null
+（金币只有 1 分，或金币已到 MAX、headroom=0）时，自身面板只显示“0 分”，没有原因。
+原 05F 规格要求“不可借时显示原因 + 0 分”，交接注意事项也要求“任何额度为 0 的入口
+必须 disabled，并在同屏给出原因”。自身面板不是入口，不会造成死路，但缺少原因与
+“bankLimitText 唯一入口”的约定冲突。
+
+建议：
+- 要么去掉 GameView.tsx:1122-1126 的独立 block，让 bankLimitText 的文本成为唯一结论；
+  要么把 hint 恢复为“可借 0 分”，只让 danger 段落显示原因，二者只保留一处。
+- 自身面板对 0 额度使用 bankLimitText(view)（或至少给出中性的“无可借额度”原因），
+  不要在组件里继续维护第三套文案。
+- 补测试：
+  - blocked 时 askBank 中原因只出现一次（统计出现次数）；
+  - 自身面板在 cents=1 / limit=0 且无 blocked 时显示“0 分 + 原因”；
+  - 若保留独立 danger，断言 hint 不含原因。
+注：本条是文案/一致性回归，不影响按钮禁用与资金。
+
+SF3. 测试与交接文档没有覆盖 M1 修复后新增的“第 4 种 0 额度来源”和近 MAX 文案。
+
+相关位置：
+- handoff/单元05F-注意事项.txt:12-13
+  原文：
+    4) 额度为 0 的三种来源要区分文案：失信/有未结清贷款（bankBlockedReason 原因）、金币为 0（原因）、
+       金币 1 分导致 floor(1/2)=0（“可借 0 分（当前金币不足以产生贷款额度）”）。
+  M1 修复后多出第 4 种：金币到达 MAX_MONEY_CENTS、headroom=0；另外“接近 MAX 但
+  headroom>0”时额度小于 50%，文案却仍写 50%。文档需要补这两类，否则下一单元会按
+  “三种来源”维护而漏掉边界。
+- apps/web/tests/gameview.test.ts:468-480 的额度 0 用例只设置了 cents="1"：
+    472 行：
+      view: { ...base, finance: { ...base.finance, cents: "1", bankBorrowLimitCents: "0" } },
+  没有覆盖 cents=MAX（额度 0）和 cents=MAX-500（额度 500）的文案。
+- apps/web/tests/steps.test.ts:712-716 的 bankLimitText 额度 0 用例只测了
+    713 行：
+      expect(bankLimitText(makeView({ finance: { bankBorrowLimitCents: "0" } }))).toBe(
+        "可借 0 分（当前金币不足以产生贷款额度）",
+  没有测近 MAX 的 50% 文案。
+- packages/game-core/tests/views.test.ts:64-71 已验证 MAX-500/MAX-1000 的数字：
+    66 行：near.players[0]!.cents = MAX_MONEY_CENTS - 500;
+    67 行：expect(viewOf(near).finance.bankBorrowLimitCents).toBe(500);
+  但没有 MAX → 0 的断言；数字虽然由数学推导正确，仍建议补一行固定边界。
+- apps/web/tests/gameview.test.ts:482-497 对 blocked 原因只做：
+    493 行：expect(mounted.text()).toContain("你有一笔未结清的银行贷款，不能再次借款（可借 0 分）");
+  不能发现 SF2 的重复原因。
+这些是测试/文档缺口，不是当前代码错误；修复 SF1/SF2 时一并补上即可。
+
+另外，handoff/单元05F-成果报告.txt:64-67 与 handoff/单元05F-注意事项.txt:38
+已如实记录 360px 真机与“借款后额度=0”的手工复现未做；本轮仍未执行，
+仍应按 AGENTS.md 第 10 节保留“代码验证通过，人工验收待完成”的状态。
+
+
+============================================================
+三、通过项
+============================================================
+
+A. M1 已真修好：视图额度与引擎入账上限一致
+- 视图：
+  packages/game-core/src/views.ts:110-114
+    const bankHeadroom = Math.max(0, MAX_MONEY_CENTS - me.cents);
+    const bankBorrowLimitCents =
+      me.credit === "GOOD" && me.cents > 0 && !myBankLoans.some((loan) => loan.status !== "REPAID")
+        ? Math.min(ordinaryLoanCap(me.cents), bankHeadroom)
+        : 0;
+- 引擎入账上限未被放宽，仍是：
+  packages/game-core/src/engine.ts:794
+    const nextCents = creditCents(player.cents, amountCents, "借款入账");
+  packages/game-core/src/engine.ts:1340-1345
+    const nextCents = currentCents + amountCents;
+    try { assertCentsRange(nextCents, label); }
+    catch (error) { if (error instanceof MoneyFormatError) { throw new CommandFailure("INVALID_AMOUNT", `${label}后余额超出上限`); } throw error; }
+- 新测试覆盖：
+  packages/game-core/tests/views.test.ts:64-71（MAX-500→500、MAX-1000→1000）；
+  packages/game-core/tests/engine-round.test.ts:297-315
+  （MAX-500 时借 500 成功、借 501 返回 INVALID_AMOUNT，余额和贷款不变）。
+- 只读复现（实际命令输出，见第五节 4）：
+    near 500 501 {"ok":false,"code":"INVALID_AMOUNT","message":"借款入账后余额超出上限"} 500 {"ok":true} maxLimit 0
+  即：额度 500 恰好可借，501 被拒；金币到 MAX 时额度为 0，最终入口由 SF2/SF3
+  所述文案处理，不再出现“快照显示可借但服务端必拒”。
+- 其余前置条件仍与 bank.ts:119-134 一致（GOOD、cents>0、无 status !== "REPAID"），
+  handleBorrowBank 的 amount<=player.cents 在 cap<=cents 时自动满足；未发现
+  “服务端可借但快照显示 0”的情形。SF1 只影响文案，不影响该数值结论。
+
+B. S1 已从空心断言变为真实断言（临时移除红字验证成功）
+- 新断言：
+  apps/web/tests/gameview.test.ts:444-453
+    expect(mounted.container.querySelector(".stage .danger-text")).toBeNull();
+    await mounted.input("借款金额（分）", "5001");
+    expect(mounted.container.querySelector(".stage .danger-text")?.textContent).toBe("最多可借 5,000 分");
+  apps/web/tests/gameview.test.ts:455-466（Q1 同样的 null + 精确文本断言）。
+- 对应红字：
+  apps/web/src/GameView.tsx:1092-1094（Q1）
+    {privateOverLimit ? (
+      <p className="step-hint danger-text">最多可借 {formatCents(chosenLenderLimit!)}</p>
+    ) : null}
+  apps/web/src/GameView.tsx:1154-1156（Q2）
+    {bankOverLimit ? (
+      <p className="step-hint danger-text">最多可借 {formatCents(bankLimit!)}</p>
+    ) : null}
+- 临时验证：把上述两处 className 中的 danger-text 去掉后，定向测试
+  `pnpm -s test apps/web/tests/gameview.test.ts` 结果：
+    FAIL ... Q2 金额超过可借上限时行内提示并禁用确认借款
+    AssertionError: expected undefined to be '最多可借 5,000 分'
+    FAIL ... Q1 选中出借人后显示该人上限，超限禁用提交
+    AssertionError: expected undefined to be '最多可借 10,000 分'
+    Test Files  1 failed (1)
+    Tests  2 failed | 45 passed (47)
+  已立即还原两处类名，`git status --short` 与 `git diff --stat` 均为空；
+  还原后全量 443 条通过（见第五节 1）。S1 修复有效。
+
+C. S3 额度 0 的入口已全部禁用，未发现新的死路
+- 银行入口：
+  apps/web/src/GameView.tsx:332-333
+    /** 额度为 0 时“是，输入金额”是死路：进去后任何金额都会被禁用，故直接禁用并给出原因。 */
+    const bankUnavailable = blockedBank !== null || bankLimit === "0";
+  apps/web/src/GameView.tsx:1128-1131
+    <Choice label="是，输入金额" disabled={bankUnavailable} ... />
+  apps/web/src/GameView.tsx:1158-1160
+    <Choice label="确认借款" disabled={bankUnavailable || bankOverLimit} ... />
+- Q1 候选：
+  apps/web/src/GameView.tsx:1044-1064
+    const limit = lenderLimitOf(view, player.playerId);
+    ...
+    disabled={limit === "0"}
+    hint 中 limit === "0" 时显示“ · 暂无可借额度”
+- Q1 金额页：
+  apps/web/src/GameView.tsx:1102-1107
+    <Choice label="提交借款请求" disabled={privateOverLimit || chosenLender === null} ... />
+  出借人中途消失时（chosenLender === null）提交也被禁用，修复 N6。
+- 新测试：
+  apps/web/tests/gameview.test.ts:468-480（额度 0 时“是，输入金额”disabled）；
+  :482-497（未结清贷款时同样 disabled 且有原因）；
+  :499-511（出借人上限 0 时候选 disabled 并显示“暂无可借额度”）。
+- 其他路径核查：
+  * askBank 仍保留“不需要”去 Q3；Q1 仍保留“取消（跳过 Q1）”；额度 0 时不会
+    把玩家困在某一页。
+  * bankAmount 若因快照更新变成额度 0，确认按钮 disabled，仍有“返回”；
+  * privateAmount 若额度变 0，正数金额被 privateOverLimit 禁用，仍有“返回”；
+  * 空输入/0 在提交时由原表单校验给出 notice，这是正常校验，不是额度死路；
+  * 旧快照缺字段时 bankLimit 为 null，入口保持可点（兼容旧服务端），属于既定回退，
+    不是本次“额度 0”死路。
+- 自身面板不是入口，不会产生死路；但它 0 额度时缺原因，见 SF2。
+
+D. S4 非规范金额串不再被判超限
+- 实现：
+  apps/web/src/game/steps.ts:50-62
+    /** 只接受规范十进制整数分（无符号、无小数点、无指数、无前导零）；其他写法交给原有表单校验。 */
+    const CANONICAL_CENTS = /^(0|[1-9]\d*)$/;
+    export function withinLimit(value: string, limit: string | null): boolean {
+      if (limit === null) return true;
+      const text = value.trim();
+      if (!CANONICAL_CENTS.test(text)) return true;
+      const parsed = Number(text);
+      const max = Number(limit);
+      if (!Number.isSafeInteger(parsed) || !Number.isSafeInteger(max)) return true;
+      return parsed <= max;
+    }
+- 测试：
+  apps/web/tests/steps.test.ts:732-743
+    expect(withinLimit("1e4", "5000")).toBe(true);
+    expect(withinLimit("0x1389", "5000")).toBe(true);
+    expect(withinLimit("+5001", "5000")).toBe(true);
+    expect(withinLimit("5001.0", "5000")).toBe(true);
+  同时保留空串、规范 0、恰好等于上限、规范超 1、超大规范数、limit=null 的断言。
+- 结论：非规范写法返回 true（不判超限），点击提交后由 isPositiveCents/原表单校验
+  给出“必须是整数分”的提示；合法的 5001/5000 仍判超限，不会误放行。
+
+E. 无协议/引擎规则/05E 语义夹带；443 条全绿
+- commit 3e61c35 的 --stat 只涉及：
+  apps/server/tests/session.test.ts、apps/web/src/GameView.tsx、apps/web/src/game/steps.ts、
+  apps/web/src/net/wire.ts、apps/web/tests/{gameview,notices,steps,view-fixtures}、
+  packages/game-core/src/views.ts、packages/game-core/tests/{engine-round,views}。
+  未改 apps/server/src、packages/shared、协议版本、SNAPSHOT_SCHEMA_VERSION、依赖、
+  package.json 或 engine.ts 的规则实现；engine-round.test.ts 只新增测试。
+- 05E：GameView.tsx 的 diff 中没有 game-sticky / notice-shelf / role / aria 变化；
+  styles-05e.test.ts 未被修改；旧 05E 的吸顶、单条反馈、CSS 契约测试仍在。
+- 全量测试：29 文件 / 443 条通过（核心 148、服务端 112、Web 183，Lead 报告与本地
+  全量结果一致）；typecheck、build 退出码均为 0（见第五节）。
+- 当前工作区干净：`git status --short` 为空；HEAD 是文档提交 bcbfd4d，
+  文档提交只改 README/handoff，不改代码。
+- 需要区分：E 的“无夹带”通过，但 SF1/SF2 是本次修复引入的前端文案回归，
+  不是协议/引擎/05E 结构回归。
+
+
+============================================================
+四、小问题（nit，不阻塞）
+============================================================
+N1. packages/game-core/src/views.ts:49 注释写“金币<=0 ……时为 0”，
+    但当前实现在“金币接近上限、headroom 为 0”时也为 0；且接近但未到 MAX 时
+    额度是剩余空间（如 500），不是 0。建议改成“金币不足、已到余额上限、
+    失信或有未结清贷款时；接近上限时取剩余空间”。
+N2. apps/web/src/GameView.tsx:1125 的额度 0 文案是硬编码的第三套说法，
+    与 steps.ts:39 的“可借 0 分（当前金币不足以产生贷款额度）”并存；建议统一。
+N3. apps/web/src/GameView.tsx:1397-1404 自身面板仍维护独立分支；
+    建议对 0 额度调用 bankLimitText 或给出中性原因，减少“三处文案各不相同”。
+N4. apps/web/tests/gameview.test.ts:493 的 blocked 断言只用 toContain；
+    建议同时统计原因出现次数，防止 SF2 的重复原因回归。
+N5. packages/game-core/tests/views.test.ts 没有“cents = MAX_MONEY_CENTS → 0”的
+    精确边界；建议补一行。
+N6. handoff/单元05F-注意事项.txt:12-13 的“三种来源”需要补第 4 种
+    （MAX headroom=0）以及“接近 MAX 时额度小于 50%”的文案说明。
+
+
+============================================================
+五、实际执行的命令与真实输出
+============================================================
+1) 全量测试（临时改类名还原后）
+$ cd D:/Lianjunjie/biancheng/RichMan && pnpm -s test
+ Test Files  29 passed (29)
+      Tests  443 passed (443)
+   Start at  13:35:58
+   Duration  6.81s (transform 40%, import 32%, tests 27%, worker 1%)
+test exit=0
+
+2) 类型检查
+$ pnpm -s typecheck
+typecheck exit=0
+（无错误输出）
+
+3) 构建
+$ pnpm -s build
+✓ 129 modules transformed.
+apps/web/dist/index.html                   0.41 kB │ gzip:   0.28 kB
+apps/web/dist/assets/index-Z0VPCPB8.css    9.32 kB │ gzip:   2.65 kB
+apps/web/dist/assets/index-BOe5QERH.js   385.34 kB │ gzip: 114.24 kB
+✓ built in 216ms
+build exit=0
+
+4) M1 复现（只读脚本，未改文件）
+$ cd packages/game-core && pnpm exec tsx -e '...'
+near 500 501 {"ok":false,"code":"INVALID_AMOUNT","message":"借款入账后余额超出上限"} 500 {"ok":true} maxLimit 0
+
+5) S1 临时验证（仅临时去掉两处 danger-text，随后已还原）
+$ pnpm -s test apps/web/tests/gameview.test.ts
+ FAIL ... Q2 金额超过可借上限时行内提示并禁用确认借款
+ AssertionError: expected undefined to be '最多可借 5,000 分'
+ FAIL ... Q1 选中出借人后显示该人上限，超限禁用提交
+ AssertionError: expected undefined to be '最多可借 10,000 分'
+ Test Files  1 failed (1)
+      Tests  2 failed | 45 passed (47)
+temp-test exit=1
+
+6) 还原检查
+$ git status --short
+（空）
+$ git diff --stat
+（空）
+$ git log -2 --oneline
+bcbfd4d docs(unit05F): 成果报告/运行验收/交接/注意事项与复核处理结论（443 测试）
+3e61c35 feat(unit05F): 借款额度提示——服务端下发可借上限，Qoder 复核修复 M1/S1-S4（443 测试）
+
+本次复核未保留任何源码改动、未创建 commit；只新增本报告
+handoff/复核-单元05F-修复.txt。
+
+
+============================================================
+六、仍需人工/真机验证（未验证）
+============================================================
+1. 360px 真机：Q1 候选 hint、Q1 金额页、Q2 两页在手机宽度下是否换行/溢出、
+   是否横向滚动。交接文档已写明未重拍，本轮无法用 jsdom 证明。
+2. “借到银行贷款后自身面板额度=0 并显示原因”的真机手动复现；
+   自动化已覆盖 ACTIVE 贷款 → 0 + 原因，但未做真人房间。
+3. 近 MAX 场景的真人复现（生产不允许改余额）：本次只用只读脚本和单元测试
+   验证了数值；SF1 所述文案失真需要修复后重新看实际界面。
+4. 3 人以上、含破产者/0 金币出借人的 ws 快照与前端候选列表；核心测试覆盖了
+   lenderLimits，服务端 wire 测试仍是 2 人场景。
+5. 05F 的“360px + 借款后额度 0”仍按成果报告/注意事项记录为未验证；
+   本轮没有改变这一状态。
+
+
+============================================================
+七、复核结论摘要
+============================================================
+- must-fix：无。M1 数值已修好，S1 断言已验证为真实，S3 入口全部禁用，
+  S4 非规范串不再误判。
+- should-fix 3 项：
+  SF1 近 MAX / MAX 的额度文案失真（“50%”与“金币不足”在边界不成立）；
+  SF2 askBank 不可借原因重复、自身面板 0 额度无原因，和“bankLimitText 唯一入口”
+      的交接约定不一致；
+  SF3 测试/交接文档未覆盖 M1 新增的第 4 种 0 额度来源和近 MAX 文案。
+- 通过：M1 与引擎上限一致（500 可借/501 拒/MAX 0）；S1 删红字会失败；S3 无死路；
+  S4 非规范串交回表单；443 测试全绿；typecheck/build 退出 0；无协议/引擎规则/
+  05E 结构夹带。仅新增 SF1/SF2 两类前端文案回归。
+- 未验证：360px、借款后额度 0 的真机、近 MAX 真机、3 人以上 ws 快照。
+- 复核过程只读；临时改类名验证后已还原，工作区干净，未 commit。

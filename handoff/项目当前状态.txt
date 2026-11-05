@@ -56,6 +56,8 @@ https://authorities-wife-owners-tropical.trycloudflare.com
 1) 05B 真机复测：按 handoff/单元05B-试玩清单.txt 记录等待/卡点，重点看 05E 提示可见性与 05F 额度数字/禁用态。
 2) 05F 复核已处理（handoff/复核-单元05F.txt）：1 must-fix + 4 should-fix 已修复并全量验证；
    未重拍 360px 截图、“借到贷款后额度 0”只做了单测，并入 05B。
-3) 单元 06 可靠存档与重启恢复（交 Codex）：房间/对局快照落盘、重启恢复、冷启动一致性；
-   存档只存 GameState，额度由 getPlayerView 重算，不要缓存派生视图。
+3) 单元 06 可靠存档与重启恢复：规格已出（handoff/单元06-存档落盘与重启恢复.txt，拆 06A 实现 / 06B 故障注入），
+   交 Codex；存档只存 GameState 与身份摘要，额度由 getPlayerView 重算，不要缓存派生视图。
+   分配：06A/06B → Codex（崩溃一致性，Trae 做不动）；07A/07B/08 界面 → Trae；05B 修复一律 → Trae。
+   并行约束：同一仓库同时只让一个 AI 改代码，避免互相把半成品当回归去“修”。
 4) 07 完整借贷/赌博交互与债务中心；08 教程/手机适配/音频；09 加固/跨网验证/一键发布包。

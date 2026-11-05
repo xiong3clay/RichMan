@@ -1,0 +1,203 @@
+单元 06：可靠存档与重启恢复（规格）
+版本：1.0（2026-11-05，Lead 编写）
+状态：待实现；拆成 06A（存档落盘 + 恢复）与 06B（故障注入验证）
+承担：06A/06B 交 Codex（GPT-6.1 Sol Ultra）。理由：崩溃一致性属于跨进程/跨时序推理，Trae 在本项目已多次在
+      这类任务上停在“思考中”或只改表面；Trae 保留给 07A/07B/08 的界面任务。
+
+============================================================
+一、目标（一句话）
+服务进程被强杀或重启后，已开的房间、进行中的对局、身份（token/恢复码）、命令去重记录都还在，
+并且不会重复转账、不会重复开奖、不会凭空补利息；重启后对局先暂停，由房主点“继续对局”再走。
+
+============================================================
+二、现状（2026-11-05 HEAD bcbfd4d 实测，供定位用）
+- apps/server/src/rooms/manager.ts:102-104
+  private readonly rooms = new Map<string, RoomRecord>();
+  private readonly sessions = new Map<string, string>(); // token 摘要 -> roomCode
+  房间、座位、GameState 全在内存，进程退出即丢。
+- apps/server/src/rooms/command-queue.ts:104-105
+  // Unit 06 must persist this record and the transition as one snapshot commit.
+  this.store.set(key, { payloadHash, reply: structuredClone(reply) });
+  去重记录只进内存 Map，重启后同一 commandId 会重新执行。
+- apps/server/src/rooms/session.ts:40 MemorySessionStore 只在内存；恢复码/connectionEpoch 同样不落盘。
+- apps/server/src/ws.ts:118-129 commit 的顺序是：先 Object.assign 内存 state，再逐连接广播，最后 scheduler.schedule。
+  06 必须改成“落盘成功才广播”，失败则回滚内存态并明确报错。
+- apps/server/src/rooms/scheduler.ts:81-100 advanceDue 以 deadlineMs 作为 nowMs 追赶；
+  若恢复后直接用过期 deadline 追赶，会把 ACTION/BETTING 连续跳过好几轮，所以恢复必须“暂停 + 重算时限”。
+- 现有测试 443 条（core 148 / server 112 / web 183）必须保持全绿。
+
+============================================================
+三、写作用域
+允许改：
+- apps/server/src/**（新增 storage/**、rooms/recovery.ts，改 manager.ts、session.ts、command-queue.ts、ws.ts、http.ts）
+- apps/server/tests/**（新增 persistence.test.ts、crash-recovery.test.ts、resume.test.ts）
+- packages/game-core/src/engine.ts（只加 resumeFromPause 一个导出函数 + 对应事件）
+- packages/game-core/tests/**（resume 相关用例）
+- packages/shared/src/**（RoomView.paused、ERROR_PAUSED、GAME_RESUMED 事件、resume_game 消息）
+- apps/web/src/**（仅：暂停横幅 + 房主“继续对局”按钮 + client 发送 resume_game；不要动引导流 steps.ts）
+- handoff/单元06-*
+禁止：
+- 不改任何既有规则的语义（利息、税收、赌博、借贷、破产）；
+- 不削弱/删除既有测试，不改测试期望来迁就实现；
+- 不新增 npm 依赖（node:fs/promises 足够）；
+- 不 commit（Lead 验收后统一提交）。
+
+============================================================
+四、数据目录与文件布局
+默认目录：apps/server/data（可用环境变量 RICHMAN_DATA_DIR 覆盖，测试必须用临时目录）。
+
+data/
+  rooms/
+    <roomCode>/
+      snapshot.json        当前提交点（唯一权威）
+      snapshot.bak.json    上一次成功提交点（备份）
+      events.ndjson        事件流水，每行一条 JSON
+      corrupt-<时间戳>/    载入失败时整目录移到这里，不允许静默清空
+  .tmp/                    原子写的临时文件目录（同盘，保证 rename 原子）
+  server.log               可选，不强制
+
+快照 JSON（schemaVersion=1，金额一律沿用引擎里的整数分与 string 金额，不做浮点换算）：
+
+{
+  "schemaVersion": 1,
+  "savedAt": 1762300000000,
+  "roomCode": "0042",
+  "hostId": "p1",
+  "roomState": "PLAYING",
+  "paused": false,
+  "gameId": "uuid-or-null",
+  "usedGameIds": ["uuid"],
+  "players": [
+    { "playerId": "p1", "seatId": 1, "nickname": "熊三", "ready": true, "online": false, "tokenDigest": "sha256hex" }
+  ],
+  "sessions": [
+    { "playerId": "p1", "seatId": 1, "tokenDigest": "sha256hex", "recoveryDigest": "sha256hex", "connectionEpoch": 3 }
+  ],
+  "game": { EngineState 原样 },
+  "commands": [
+    { "key": "<gameId>|<playerId>|<commandId>", "payloadHash": "sha256hex", "reply": CommandReply }
+  ]
+}
+
+约束：
+- 只存 tokenDigest / recoveryDigest（sha256 十六进制），**任何情况下不得写入 token 或恢复码原文**；
+- 不存派生数据（可借额度、视图、UI 状态）；恢复后用 getPlayerView 重算；
+- commands 只保留最近一局（gameId 变化即清空旧局），单局上限 5000 条，超出按最旧淘汰；
+- online 字段允许恢复为 false（重启后本来就没有连接）。
+
+events.ndjson 每行：
+{ "seq": 42, "gameId": "uuid", "at": 1762300000000, "events": [ ... ] }
+
+============================================================
+五、06A 实现要求
+
+A1. 原子写（apps/server/src/storage/atomic.ts）
+- writeSnapshotAtomic(filePath, value)：
+  1) 序列化 JSON（2 空格缩进，末尾换行）；
+  2) 写 data/.tmp/<随机>.json，await handle.sync() 后 close；
+  3) 现有 snapshot.json 先 copyFile 到 snapshot.bak.json（保留上一提交点）；
+  4) rename(tmp, snapshot.json)（同盘覆盖是原子的）；
+  5) 返回后才允许广播。
+- 任一步抛错必须抛给调用方，不允许吞掉；临时文件失败要清理。
+
+A2. 提交点（ws.ts commit 改写）
+顺序必须是：
+  1) 计算 result（已有）；
+  2) manager.applyCommitted(roomCode, result.state) 之外，先构造完整快照（含本次命令结果、session、paused 状态）；
+  3) await store.commitRoom(roomCode, snapshot, result.events)；// 内部：写快照 + append events.ndjson
+  4) 落盘成功后，才 Object.assign 内存 state、才广播 snapshot/events、才 scheduler.schedule；
+  5) 落盘失败：内存 state 保持提交前内容（不得部分应用），room.paused = true，向该房间所有连接发
+     { type: "error", code: "ERROR_PAUSED", message: "存档写入失败，本局已暂停，请房主重试或联系管理员" }，
+     不发送任何“成功”回执；命令执行方收到 ERROR_PAUSED 而不是假成功。
+- 保留既有语义：version 未变化的命令（被拒/冲突）不写盘、不广播，仍按 ws.ts:207-209 补发本人快照。
+
+A3. 命令结果持久化
+- 存储键与现有内存键一致：JSON.stringify([gameId, playerId, commandId]) 的字符串形式；
+- 必须与状态同一次 rename 写入（这是 crash_after_rename_before_ack 的核心）；
+- 恢复后 execute() 命中旧记录：payloadHash 相同→返回原 reply；不同→COMMAND_ID_REUSED（沿用现有逻辑）。
+
+A4. 身份持久化
+- SessionStore 换实现：SnapshotSessionStore（apps/server/src/rooms/session.ts 或 storage/），
+  所有读写走 manager 的房间快照，save/delete 后标记房间 dirty 并触发一次 commit（可异步但必须 await 后再应答）；
+- 验收：进程重启后，用恢复码能换新 token 并恢复原座位；旧 token（重启前）仍然有效；connectionEpoch 继续递增。
+
+A5. 启动恢复（apps/server/src/rooms/recovery.ts）
+- loadAllRooms(store)：扫描 data/rooms/*/snapshot.json；
+  - JSON 解析失败 → 尝试 snapshot.bak.json；两者都失败 → 整个目录 rename 到 corrupt-<ts>/，日志告警，不加载；
+  - schemaVersion !== 1 → 拒绝载入、移动到 corrupt 目录并给出明确日志（不得新建空局覆盖）；
+  - 恢复出的房间一律 paused=true，scheduler 不 arm 任何计时器；
+  - events.ndjson 中 seq > snapshot.eventSeq 的行忽略（不重放）；出现 seq 断号或某行解析失败 → 告警保留快照。
+- 恢复后房间码与座位、hostId、usedGameIds 完全一致；房间列表接口与 /health 的 rooms 计数正确。
+
+A6. 暂停与继续（关键语义）
+- GameState 不变；服务端 RoomRecord 增加 paused: boolean，RoomView 增加 paused: boolean（shared 类型）。
+- 新协议消息（shared）：客户端 { type: "resume_game" }；仅当 identity 是房主、房间状态 PLAYING、paused===true 时接受，
+  否则 NOT_HOST / INVALID_STATE。成功后 manager 清 paused、广播 room 与 snapshot，scheduler.schedule 重新 arm。
+- 引擎新增导出：
+    export function resumeFromPause(state: EngineState, ctx: { nowMs: number }): EngineState
+  行为：phase === "GAME_OVER" 直接返回原 state（version 不变）；
+        否则返回新 state：version + 1、phaseInstanceId 换新、deadlineAt = nowMs + 当前阶段配置时限、
+        windowDeadlineMs 若非 null 同样重算为 nowMs + 对应窗口时限；其余账务字段一律不动；
+        追加事件 { code: "GAME_RESUMED" }（audience 全员），不触发计息/税收/开奖。
+- 禁止用“过期 deadline 直接追赶”的方式恢复：必须先 paused，等房主 resume_game 后才重算时限，
+  保证“已锁赌注不解锁、已提交的行动不丢”。
+
+A7. 最小前端（只做这一件事）
+- 快照/房间消息里 paused===true 时，顶部常驻一条横幅：“对局已暂停（服务重启）”，
+  房主看到按钮「继续对局」→ 发送 resume_game；其他人看到“等待房主继续”。
+- 不改 steps.ts 的引导流，不改 05E/05F 的提示层级与吸顶结构。
+
+============================================================
+六、06B 必测（九个场景，全部要有可复跑证据）
+测试文件：apps/server/tests/persistence.test.ts、apps/server/tests/crash-recovery.test.ts、resume.test.ts
+崩溃模拟优先用注入式故障点（FileStore 选项 failAt: "before_rename" | "after_rename"），
+另需至少 2 次真实子进程重启（fork 一个跑 server 的脚本，杀进程后重新载入同一 data 目录），不能全靠 mock。
+
+1. crash_before_rename
+   - rename 前注入失败 → 重启后恢复原账（旧 version、旧余额、旧 eventSeq）；命令结果不存在；
+   - 客户端没收到任何“成功”回执；重放同一命令只执行一次。
+2. crash_after_rename_before_ack
+   - rename 成功后、广播/应答前“崩溃” → 重启后状态已含本次转账；同 commandId 同载荷重发返回原 reply，
+     余额只变一次（不得重复转账）。
+3. timeout_and_result_once
+   - 同一 deadline 触发两次、重启后再触发一次 → 计息/税收/开奖各只发生一次；
+   - 赌博开奖结果重启后不变（drawResult 已写入状态）。
+4. restart_paused
+   - 写入 deadline 已过去的快照后重启 → 房间 paused=true，不自动推进；
+   - 房主 resume_game 后：stage 不变、已锁赌注仍锁、新 deadline = now + 配置时限；非房主 resume_game 返回 NOT_HOST。
+5. credentials_restored
+   - 重启后：旧 token 仍能 resume；恢复码能换新 token（旧 token 随即失效）；connectionEpoch 继续递增；
+   - 快照文本包含大额金额的精确十进制（例如 MAX 附近），读回后 === 原值。
+6. write_failure
+   - 注入磁盘写入失败 → 不广播成功、共享账不变、房间 paused、命令方收到 ERROR_PAUSED；
+   - 故障消除后再提交可恢复正常（不需要重启）。
+7. orphan_events
+   - events.ndjson 比 snapshot.eventSeq 多 3 行 → 忽略多出的行，eventSeq 不前进；
+   - 少行或断号 → 警告日志 + 保留快照，不抛未捕获异常。
+8. stale_payload
+   - 重启后同 commandId 换载荷 → COMMAND_ID_REUSED；同载荷 → 返回原 reply（证明 payloadHash 真落盘）。
+9. schema_guard
+   - schemaVersion=99 的快照 → 拒绝载入、目录移到 corrupt-*、不创建空房间；
+   - /health 与房间列表不出现该房间。
+
+补充：
+10. 空 data 目录冷启动正常；同一房间反复 rematch 后旧局 command 不串；
+11. 大厅离开 / 房间空 → 对应目录删除；重启不复活空房间。
+
+============================================================
+七、验收（缺一不可，把真实输出贴进报告）
+1) pnpm test → 既有 443 条全绿 + 新增用例全绿（总数会上升，不得下降）；
+2) pnpm typecheck → 0；
+3) pnpm build → 0；
+4) 真实重启演示：起服务 → 建房两人开局 → 打 2 条命令 → 杀进程 → 重启 → 房间仍在、paused、
+   房主 resume_game 后继续出牌；把两次 /health 与房间快照前后 diff 贴出来；
+5) 故障注入 9 场景全部有测试名与断言摘要；
+6) 若临时改过测试，说明改的是哪条、为什么不是削弱。
+
+============================================================
+八、交付物（Codex 完成后写）
+- handoff/单元06-成果报告.txt：改了哪些文件（路径+行数）、关键设计取舍、新增测试清单与真实输出；
+- handoff/单元06-运行与验收说明.txt：如何设置 RICHMAN_DATA_DIR、如何手工做一次崩溃恢复演示；
+- handoff/单元06-注意事项.txt：存档格式、迁移策略、磁盘失败处置、不得回退的点；
+- handoff/单元06-下一阶段交接.txt：给 07 的接口与已知限制。
+不 commit；不改 README 的测试数字（Lead 验收后统一改）。
