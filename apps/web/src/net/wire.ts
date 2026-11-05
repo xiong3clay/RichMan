@@ -80,8 +80,17 @@ export interface WireLoanRequest {
   borrowerDefaultedBankDebtCents: string;
 }
 
+export interface WireLenderLimit {
+  playerId: string;
+  maxCents: string;
+}
+
 export interface WireFinance {
   cents: string;
+  /** 服务端计算的可借银行额度；旧快照可能缺字段，调用方需按通用文案兜底。 */
+  bankBorrowLimitCents: string;
+  /** 每个存活他人的可出借上限；只含上限，不含对方余额。 */
+  lenderLimits: WireLenderLimit[];
   bankLoans: WireBankLoan[];
   bankDebtCents: string;
   bankDefaultedDebtCents: string;

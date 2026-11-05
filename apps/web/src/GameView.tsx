@@ -22,7 +22,12 @@ import {
   playerName,
   privateLenderOptions,
   bankBlockedReason,
+  bankBorrowLimitOf,
+  bankLimitText,
+  lenderLimitOf,
+  privateLimitText,
   uiAfterOutcome,
+  withinLimit,
   BANK_LOAN_LIMIT_HINT,
 } from "./game/steps";
 import { deriveRoundSettlement, deriveSettlementBalance, hasInterestBearingDebt } from "./game/settlement";
@@ -319,6 +324,13 @@ function GameSessionView({ roomCode, hostId = null, view, client, status, status
 
   const rateValue = parseRateBps(rateText);
   const amountValid = isPositiveCents(amount);
+  const bankLimit = bankBorrowLimitOf(view);
+  const chosenLenderLimit =
+    chosenLender === null ? null : lenderLimitOf(view, chosenLender.playerId);
+  const bankOverLimit = bankLimit !== null && !withinLimit(amount, bankLimit);
+  const privateOverLimit = chosenLenderLimit !== null && !withinLimit(amount, chosenLenderLimit);
+  /** 额度为 0 时“是，输入金额”是死路：进去后任何金额都会被禁用，故直接禁用并给出原因。 */
+  const bankUnavailable = blockedBank !== null || bankLimit === "0";
 
   function submitPrivateRequest(): void {
     if (lenderId === null || chosenLender === null) {
@@ -1029,17 +1041,29 @@ function GameSessionView({ roomCode, hostId = null, view, client, status, status
             <p className="eyebrow">行动 · Q1 选择出借人</p>
             <h2 className="question">向谁借款？</h2>
             <div className="choice-grid">
-              {privateLenders.map((player) => (
-                <Choice
-                  key={player.playerId}
-                  label={player.nickname + "（座位 " + String(player.seatId) + "）"}
-                  hint={"信用 " + creditLabel(player.credit) + " · 失信欠款 " + formatCents(player.defaultedBankDebtCents)}
-                  onClick={() => {
-                    setLenderId(player.playerId);
-                    setActionStage("privateAmount");
-                  }}
-                />
-              ))}
+              {privateLenders.map((player) => {
+                const limit = lenderLimitOf(view, player.playerId);
+                const hint =
+                  "信用 " + creditLabel(player.credit) +
+                  " · 失信欠款 " + formatCents(player.defaultedBankDebtCents) +
+                  (limit === null
+                    ? ""
+                    : limit === "0"
+                      ? " · 暂无可借额度"
+                      : " · 最多可借 " + formatCents(limit));
+                return (
+                  <Choice
+                    key={player.playerId}
+                    label={player.nickname + "（座位 " + String(player.seatId) + "）"}
+                    hint={hint}
+                    disabled={limit === "0"}
+                    onClick={() => {
+                      setLenderId(player.playerId);
+                      setActionStage("privateAmount");
+                    }}
+                  />
+                );
+              })}
             </div>
             <div className="choice-grid">
               <Choice label="取消（跳过 Q1）" tone="ghost" onClick={() => setActionStage("askBank")} />
@@ -1056,7 +1080,7 @@ function GameSessionView({ roomCode, hostId = null, view, client, status, status
               向 {chosenLender === null ? "出借人" : chosenLender.nickname} 借多少？
             </h2>
             <p className="step-hint">
-              金额上限以服务端为准；利率 0～10000 基点，本局标准利率为 10%（1000 基点）。
+              {privateLimitText(view, chosenLender?.playerId ?? "")}；利率 0～10000 基点，本局标准利率为 10%（1000 基点）。
             </p>
             <input
               className="input amount-input"
@@ -1065,6 +1089,9 @@ function GameSessionView({ roomCode, hostId = null, view, client, status, status
               value={amount}
               onChange={(event) => setAmount(event.target.value.trim())}
             />
+            {privateOverLimit ? (
+              <p className="step-hint danger-text">最多可借 {formatCents(chosenLenderLimit!)}</p>
+            ) : null}
             <input
               className="input"
               inputMode="numeric"
@@ -1073,7 +1100,11 @@ function GameSessionView({ roomCode, hostId = null, view, client, status, status
               onChange={(event) => setRateText(event.target.value.trim())}
             />
             <div className="choice-grid">
-              <Choice label="提交借款请求" onClick={submitPrivateRequest} />
+              <Choice
+                label="提交借款请求"
+                disabled={privateOverLimit || chosenLender === null}
+                onClick={submitPrivateRequest}
+              />
               <Choice label="返回" tone="ghost" onClick={() => setActionStage("privateLender")} />
             </div>
           </section>
@@ -1086,13 +1117,17 @@ function GameSessionView({ roomCode, hostId = null, view, client, status, status
             <p className="eyebrow">行动 · 第 2 问</p>
             <h2 className="question">是否向银行借款？</h2>
             <p className="step-hint">
-              当前金币 {formatCents(finance.cents)}；{BANK_LOAN_LIMIT_HINT}。
+              当前金币 {formatCents(finance.cents)}；{bankLimitText(view)}。
             </p>
-            {blockedBank !== null ? <p className="step-hint danger-text">{blockedBank}</p> : null}
+            {blockedBank !== null ? (
+              <p className="step-hint danger-text">{blockedBank}</p>
+            ) : bankLimit === "0" ? (
+              <p className="step-hint danger-text">当前金币不足以产生可借额度，暂不能向银行借款</p>
+            ) : null}
             <div className="choice-grid">
               <Choice
                 label="是，输入金额"
-                disabled={blockedBank !== null}
+                disabled={bankUnavailable}
                 onClick={() => setActionStage("bankAmount")}
               />
               <Choice label="不需要" hint="进入 Q3" tone="ghost" onClick={() => setActionStage("askDebt")} />
@@ -1107,7 +1142,7 @@ function GameSessionView({ roomCode, hostId = null, view, client, status, status
             <p className="eyebrow">行动 · Q2 银行金额</p>
             <h2 className="question">向银行借多少？</h2>
             <p className="step-hint">
-              当前金币 {formatCents(finance.cents)}；{BANK_LOAN_LIMIT_HINT}。
+              当前金币 {formatCents(finance.cents)}；{bankLimitText(view)}。
             </p>
             <input
               className="input amount-input"
@@ -1116,10 +1151,13 @@ function GameSessionView({ roomCode, hostId = null, view, client, status, status
               value={amount}
               onChange={(event) => setAmount(event.target.value.trim())}
             />
+            {bankOverLimit ? (
+              <p className="step-hint danger-text">最多可借 {formatCents(bankLimit!)}</p>
+            ) : null}
             <div className="choice-grid">
               <Choice
                 label="确认借款"
-                disabled={blockedBank !== null}
+                disabled={bankUnavailable || bankOverLimit}
                 onClick={() => {
                   if (!amountValid) {
                     setNotice("借款金额必须是大于 0 且不超过 " + MONEY_LIMIT_TEXT + " 的整数");
@@ -1359,7 +1397,11 @@ function GameSessionView({ roomCode, hostId = null, view, client, status, status
           <div className="stat">
             <span className="stat-label">可借额度</span>
             <span className="stat-value small">
-              {blockedBank ?? BANK_LOAN_LIMIT_HINT}
+              {blockedBank !== null
+                ? blockedBank + "（可借 0 分）"
+                : bankLimit === null
+                  ? BANK_LOAN_LIMIT_HINT
+                  : formatCents(bankLimit)}
             </span>
           </div>
           <div className="stat">

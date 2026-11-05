@@ -8,10 +8,58 @@ import type {
   WirePublicPlayer,
   WireSnapshotView,
 } from "../net/wire";
-import { isPositiveCents } from "../net/wire";
+import { formatCents, isNonNegativeCents, isPositiveCents } from "../net/wire";
 
-/** 快照未提供可借额度；各个银行借款问题共用规则提示，不在客户端计算额度。 */
+/** 快照未提供可借额度时的兜底规则提示（旧服务器/旧快照兼容），不在客户端计算额度。 */
 export const BANK_LOAN_LIMIT_HINT = "普通贷款上限为当前金币的 50%，最终以服务端为准";
+
+/** 服务端下发的本人银行可借额度；字段缺失或非法时返回 null，由调用方回退通用文案。 */
+export function bankBorrowLimitOf(view: WireSnapshotView): string | null {
+  const value = view.finance.bankBorrowLimitCents as string | undefined;
+  return typeof value === "string" && isNonNegativeCents(value) ? value : null;
+}
+
+/** 服务端下发的某出借人可借上限；字段缺失时返回 null，由调用方回退通用文案。 */
+export function lenderLimitOf(view: WireSnapshotView, playerId: string): string | null {
+  const limits = view.finance.lenderLimits as
+    | readonly { playerId: string; maxCents: string }[]
+    | undefined;
+  if (!Array.isArray(limits)) return null;
+  const found = limits.find((entry) => entry.playerId === playerId);
+  if (found === undefined || typeof found.maxCents !== "string") return null;
+  return isNonNegativeCents(found.maxCents) ? found.maxCents : null;
+}
+
+/** 银行额度文案：可借给具体数字；不可借保留原因并显示 0 分；缺字段回退旧通用文案。 */
+export function bankLimitText(view: WireSnapshotView): string {
+  const blocked = bankBlockedReason(view);
+  if (blocked !== null) return blocked + "（可借 0 分）";
+  const limit = bankBorrowLimitOf(view);
+  if (limit === null) return BANK_LOAN_LIMIT_HINT;
+  if (limit === "0") return "可借 0 分（当前金币不足以产生贷款额度）";
+  return "最多可借 " + formatCents(limit) + "（当前金币的 50%，向下取整）";
+}
+
+/** 私人额度文案：只读服务端上限；缺字段回退旧通用文案。 */
+export function privateLimitText(view: WireSnapshotView, lenderId: string): string {
+  const limit = lenderLimitOf(view, lenderId);
+  if (limit === null) return "金额上限以服务端为准";
+  return "最多可借 " + formatCents(limit) + "（受对方可用资金与你余额上限限制）";
+}
+
+/** 只接受规范十进制整数分（无符号、无小数点、无指数、无前导零）；其他写法交给原有表单校验。 */
+const CANONICAL_CENTS = /^(0|[1-9]\d*)$/;
+
+/** 整数分字符串比较；空值或非法输入交给原有表单校验，不在这里判超限。 */
+export function withinLimit(value: string, limit: string | null): boolean {
+  if (limit === null) return true;
+  const text = value.trim();
+  if (!CANONICAL_CENTS.test(text)) return true;
+  const parsed = Number(text);
+  const max = Number(limit);
+  if (!Number.isSafeInteger(parsed) || !Number.isSafeInteger(max)) return true;
+  return parsed <= max;
+}
 
 export type ActionStage =
   | "askPrivate"
@@ -121,7 +169,7 @@ export function privateLenderOptions(view: WireSnapshotView): WirePublicPlayer[]
 /**
  * 银行普通贷款资格镜像 engine/bank.ts 的快照前置条件：
  * 信用 GOOD、金币 > 0、本人没有任何 status !== "REPAID" 的银行贷款。
- * 快照没有 borrowableCents，50% 上限只能提示，最终金额由服务端裁决。
+ * 快照的 bankBorrowLimitCents 已给出上限（近余额上限时可能小于 50%）；最终金额仍由服务端裁决。
  */
 export function bankBlockedReason(view: WireSnapshotView): string | null {
   if (view.me.credit !== "GOOD") {

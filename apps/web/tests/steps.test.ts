@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   BANK_LOAN_LIMIT_HINT,
   bankBlockedReason,
+  bankLimitText,
   deriveStep,
+  privateLimitText,
+  withinLimit,
   debtOptions,
   INITIAL_UI_STATE,
   privateLenderOptions,
@@ -33,6 +36,8 @@ const BASE_ME: WireMe = {
 
 const BASE_FINANCE: WireFinance = {
   cents: "10000",
+  bankBorrowLimitCents: "5000",
+  lenderLimits: [{ playerId: "p2", maxCents: "10000" }],
   bankLoans: [],
   bankDebtCents: "0",
   bankDefaultedDebtCents: "0",
@@ -676,5 +681,65 @@ describe("uiAfterOutcome：失败不消耗行动，停留原问题", () => {
     expect(uiAfterOutcome(ui({ actionStage: "endAction", dangerStage: "collect" }), true)).toEqual(
       INITIAL_UI_STATE,
     );
+  });
+});
+
+describe("05F 借款额度文案与比较", () => {
+  it("bankLimitText 可借时给具体数字", () => {
+    expect(bankLimitText(makeView())).toBe(
+      "最多可借 5,000 分（当前金币的 50%，向下取整）",
+    );
+  });
+
+  it("bankLimitText 不可借时保留原因并显示 0 分", () => {
+    expect(bankLimitText(makeView({ me: { credit: "DEFAULTED" } }))).toBe(
+      "你已失信，不能新增普通银行贷款（可借 0 分）",
+    );
+  });
+
+  it("bankLimitText 缺字段时回退旧通用文案", () => {
+    const legacy = makeView();
+    delete (legacy.finance as Partial<WireFinance>).bankBorrowLimitCents;
+    expect(bankLimitText(legacy)).toBe(BANK_LOAN_LIMIT_HINT);
+  });
+
+  it("bankLimitText 缺字段且不可借时同样给出原因与 0 分", () => {
+    const legacy = makeView({ me: { credit: "DEFAULTED" } });
+    delete (legacy.finance as Partial<WireFinance>).bankBorrowLimitCents;
+    expect(bankLimitText(legacy)).toBe("你已失信，不能新增普通银行贷款（可借 0 分）");
+  });
+
+  it("bankLimitText 额度为 0（金币只有 1 分）时说明原因", () => {
+    expect(bankLimitText(makeView({ finance: { bankBorrowLimitCents: "0" } }))).toBe(
+      "可借 0 分（当前金币不足以产生贷款额度）",
+    );
+  });
+
+  it("privateLimitText 读取服务端 lenderLimits 并展示数字", () => {
+    expect(privateLimitText(makeView(), "p2")).toBe(
+      "最多可借 10,000 分（受对方可用资金与你余额上限限制）",
+    );
+    const view = makeView({ finance: { lenderLimits: [{ playerId: "p2", maxCents: "1234" }] } });
+    expect(privateLimitText(view, "p2")).toContain("1,234 分");
+  });
+
+  it("privateLimitText 缺字段时回退旧通用文案", () => {
+    const legacy = makeView();
+    delete (legacy.finance as Partial<WireFinance>).lenderLimits;
+    expect(privateLimitText(legacy, "p2")).toBe("金额上限以服务端为准");
+  });
+
+  it("withinLimit 只在合法整数分超过上限时判否", () => {
+    expect(withinLimit("", "5000")).toBe(true);
+    expect(withinLimit("0", "0")).toBe(true);
+    expect(withinLimit("abc", "5000")).toBe(true);
+    expect(withinLimit("5000", "5000")).toBe(true);
+    expect(withinLimit("5001", "5000")).toBe(false);
+    expect(withinLimit("9999999999999", "5000")).toBe(false);
+    expect(withinLimit("1e4", "5000")).toBe(true);
+    expect(withinLimit("0x1389", "5000")).toBe(true);
+    expect(withinLimit("+5001", "5000")).toBe(true);
+    expect(withinLimit("5001.0", "5000")).toBe(true);
+    expect(withinLimit("5001", null)).toBe(true);
   });
 });

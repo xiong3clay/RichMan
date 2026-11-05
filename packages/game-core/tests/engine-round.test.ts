@@ -293,6 +293,26 @@ describe("credit_overflow_guard", () => {
     expect(result.state.bankLoans).toHaveLength(0);
     expect(result.state.version).toBe(state.version);
   });
+
+  it("额度恰好等于剩余空间时可借成功，多 1 分被拒", () => {
+    const state = newState(2);
+    state.phase = "ACTION";
+    state.currentSeatId = 1;
+    state.windowDeadlineMs = 60_000;
+    state.deadlineAt = new Date(60_000).toISOString();
+    state.players[0]!.cents = MAX_MONEY_CENTS - 500;
+
+    const tooMuch = run(state, "BORROW_BANK", { playerId: "p1", amountCents: 501 }, 0, "c1");
+    expect(tooMuch.outcome.ok).toBe(false);
+    expect(tooMuch.outcome.ok ? null : tooMuch.outcome.code).toBe("INVALID_AMOUNT");
+    expect(tooMuch.state.players[0]?.cents).toBe(MAX_MONEY_CENTS - 500);
+    expect(tooMuch.state.bankLoans).toHaveLength(0);
+
+    const exact = run(state, "BORROW_BANK", { playerId: "p1", amountCents: 500 }, 0, "c2");
+    expect(exact.outcome.ok).toBe(true);
+    expect(exact.state.players[0]?.cents).toBe(MAX_MONEY_CENTS);
+    expect(exact.state.bankLoans).toHaveLength(1);
+  });
 });
 
 describe("views_privacy", () => {

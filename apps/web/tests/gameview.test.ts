@@ -230,16 +230,22 @@ describe("F2 通知生命周期", () => {
   });
 });
 
-it("50%提示实际出现在本人面板、银行问题和银行金额页，禁借时本人面板显示原因", async () => {
+it("额度提示实际出现在本人面板、银行问题和银行金额页，禁借时本人面板显示原因", async () => {
   const props = gameProps(); mounted = await mountDom(createElement(GameView, props));
-  const hint = "普通贷款上限为当前金币的 50%，最终以服务端为准";
-  expect(mounted.text()).toContain(hint); await mounted.click("跳过");
-  expect(mounted.text().split(hint)).toHaveLength(3); await mounted.click("是，输入金额");
-  expect(mounted.text()).toContain("向银行借多少？"); expect(mounted.text().split(hint)).toHaveLength(3);
+  const dom = mounted;
+  const limit = "最多可借 5,000 分（当前金币的 50%，向下取整）";
+  const selfPanel = () => dom.container.querySelector(".self-panel")?.textContent ?? "";
+  expect(selfPanel()).toContain("可借额度");
+  expect(selfPanel()).toContain("5,000 分");
+  await mounted.click("跳过");
+  expect(mounted.text()).toContain(limit);
+  await mounted.click("是，输入金额");
+  expect(mounted.text()).toContain("向银行借多少？");
+  expect(mounted.text().split(limit)).toHaveLength(2);
   props.view = viewFixture(); props.view.me.credit = "DEFAULTED";
   await mounted.update(createElement(GameView, props));
-  expect(mounted.container.querySelector(".self-panel")?.textContent).toContain("你已失信，不能新增普通银行贷款");
-  expect(mounted.container.querySelector(".self-panel")?.textContent).not.toContain(hint);
+  expect(selfPanel()).toContain("你已失信，不能新增普通银行贷款");
+  expect(selfPanel()).not.toContain("最多可借");
 });
 
 it("F3 到期结果横幅与失信事件都在顶部吸顶区，兜底文案不指向上方", async () => {
@@ -425,6 +431,116 @@ describe("05E 复核修复：单条反馈 + 无障碍语义", () => {
     expect(banner?.textContent).toContain("ROOM_NOT_FOUND");
     expect(banner?.getAttribute("role")).toBe("alert");
     expect(banner?.querySelector("button")?.getAttribute("aria-label")).toBe("关闭错误提示");
+  });
+});
+
+describe("05F 借款额度提示", () => {
+  it("Q2 银行问题显示服务端可借额度数字", async () => {
+    mounted = await mountDom(createElement(GameView, gameProps()));
+    await mounted.click("跳过");
+    expect(mounted.text()).toContain("最多可借 5,000 分（当前金币的 50%，向下取整）");
+  });
+
+  it("Q2 金额超过可借上限时行内提示并禁用确认借款", async () => {
+    mounted = await mountDom(createElement(GameView, gameProps()));
+    await goToBankAmount(mounted);
+    expect(mounted.container.querySelector(".stage .danger-text")).toBeNull();
+    await mounted.input("借款金额（分）", "5001");
+    expect(mounted.container.querySelector(".stage .danger-text")?.textContent).toBe("最多可借 5,000 分");
+    const confirm = Array.from(mounted.container.querySelectorAll("button"))
+      .find(button => button.textContent.includes("确认借款"));
+    expect(confirm?.disabled).toBe(true);
+  });
+
+  it("Q1 选中出借人后显示该人上限，超限禁用提交", async () => {
+    mounted = await mountDom(createElement(GameView, gameProps()));
+    await mounted.click("是，查看可借玩家");
+    await mounted.click("乙（座位 2）");
+    expect(mounted.text()).toContain("最多可借 10,000 分（受对方可用资金与你余额上限限制）");
+    expect(mounted.container.querySelector(".stage .danger-text")).toBeNull();
+    await mounted.input("借款金额（分）", "10001");
+    expect(mounted.container.querySelector(".stage .danger-text")?.textContent).toBe("最多可借 10,000 分");
+    const submit = Array.from(mounted.container.querySelectorAll("button"))
+      .find(button => button.textContent.includes("提交借款请求"));
+    expect(submit?.disabled).toBe(true);
+  });
+
+  it("可借额度为 0 时禁用“是，输入金额”并说明原因，不再进入死路", async () => {
+    const base = viewFixture();
+    const props = {
+      ...gameProps(),
+      view: { ...base, finance: { ...base.finance, cents: "1", bankBorrowLimitCents: "0" } },
+    };
+    mounted = await mountDom(createElement(GameView, props));
+    await mounted.click("跳过");
+    expect(mounted.text()).toContain("可借 0 分（当前金币不足以产生贷款额度）");
+    const yes = Array.from(mounted.container.querySelectorAll("button"))
+      .find(button => button.textContent.includes("是，输入金额"));
+    expect(yes?.disabled).toBe(true);
+  });
+
+  it("已有未结清贷款时银行问题禁用“是，输入金额”并给出原因", async () => {
+    const base = viewFixture();
+    const props = {
+      ...gameProps(),
+      view: {
+        ...base,
+        finance: { ...base.finance, bankBorrowLimitCents: "0", bankLoans: [bankFixture()], bankDebtCents: "1000" },
+      },
+    };
+    mounted = await mountDom(createElement(GameView, props));
+    await mounted.click("跳过");
+    expect(mounted.text()).toContain("你有一笔未结清的银行贷款，不能再次借款（可借 0 分）");
+    const yes = Array.from(mounted.container.querySelectorAll("button"))
+      .find(button => button.textContent.includes("是，输入金额"));
+    expect(yes?.disabled).toBe(true);
+  });
+
+  it("出借人可借上限为 0 时该候选被禁用并标注暂无可借额度", async () => {
+    const base = viewFixture();
+    const props = {
+      ...gameProps(),
+      view: { ...base, finance: { ...base.finance, lenderLimits: [{ playerId: "p2", maxCents: "0" }] } },
+    };
+    mounted = await mountDom(createElement(GameView, props));
+    await mounted.click("是，查看可借玩家");
+    expect(mounted.text()).toContain("暂无可借额度");
+    const candidate = Array.from(mounted.container.querySelectorAll("button"))
+      .find(button => button.textContent.includes("乙（座位 2）"));
+    expect(candidate?.disabled).toBe(true);
+  });
+
+  it("自身面板“可借额度”显示具体数字，禁借时显示原因和 0 分", async () => {
+    const props = gameProps();
+    mounted = await mountDom(createElement(GameView, props));
+    expect(mounted.container.querySelector(".self-panel")?.textContent).toContain("5,000 分");
+    props.view = { ...viewFixture(), me: { ...viewFixture().me, credit: "DEFAULTED" } };
+    await mounted.update(createElement(GameView, props));
+    expect(mounted.container.querySelector(".self-panel")?.textContent)
+      .toContain("你已失信，不能新增普通银行贷款（可借 0 分）");
+  });
+
+  function legacyView() {
+    const legacy = viewFixture();
+    delete (legacy.finance as { bankBorrowLimitCents?: string }).bankBorrowLimitCents;
+    delete (legacy.finance as { lenderLimits?: Array<{ playerId: string; maxCents: string }> }).lenderLimits;
+    return legacy;
+  }
+
+  it("旧快照缺额度字段时自身面板与 Q1 回退通用文案", async () => {
+    const props = { ...gameProps(), view: legacyView() };
+    mounted = await mountDom(createElement(GameView, props));
+    expect(mounted.container.querySelector(".self-panel")?.textContent)
+      .toContain("普通贷款上限为当前金币的 50%，最终以服务端为准");
+    await mounted.click("是，查看可借玩家");
+    await mounted.click("乙（座位 2）");
+    expect(mounted.text()).toContain("金额上限以服务端为准");
+  });
+
+  it("旧快照缺额度字段时 Q2 回退通用文案", async () => {
+    mounted = await mountDom(createElement(GameView, { ...gameProps(), view: legacyView() }));
+    await mounted.click("跳过");
+    expect(mounted.text()).toContain("普通贷款上限为当前金币的 50%，最终以服务端为准");
   });
 });
 

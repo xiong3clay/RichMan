@@ -197,7 +197,7 @@ function viewWithLoan(status: "ACTIVE" | "REPAID" | "DEFAULTED" = "ACTIVE"): Wir
     publicPlayers: [], winnerId: null, phaseInstanceId: "round4-action1", eventSeq: 20,
     currentSeatId: 1, actedSeats: [], pendingDueLoanId: null,
     finance: {
-      cents: "3000", bankLoans: [{
+      cents: "3000", bankBorrowLimitCents: "0", lenderLimits: [], bankLoans: [{
         loanId: "bank-1", borrowerId: "p1", seatId: 1, principalCents: "5000", remainingCents: "6655",
         rateBps: 1000, issuedRound: 1, dueRound: 4, lastInterestRound: 4, status, origin: "NORMAL",
       }], bankDebtCents: "6655", bankDefaultedDebtCents: "0", privateLoans: [], privateDebtCents: "0",

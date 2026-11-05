@@ -1,6 +1,8 @@
 import type { Cents, GameState, PlayerId, PlayerView } from "@richman/shared";
+import { MAX_MONEY_CENTS } from "@richman/shared";
 import type { BankLoan } from "./bank.js";
 import { defaultedBankDebtCents } from "./bank.js";
+import { ordinaryLoanCap } from "./money.js";
 import type { LoanRequest, PrivateLoan } from "./private-loans.js";
 import {
   badDebtCents,
@@ -36,8 +38,21 @@ export interface PublicPlayerView {
   defaultedBankDebtCents: Cents;
 }
 
+/** 一名存活他人可出借给本人的上限；正常区间内 maxCents 等于对方金币（已接受披露）。 */
+export interface LenderLimitView {
+  playerId: PlayerId;
+  maxCents: Cents;
+}
+
 export interface PlayerFinanceView {
   cents: Cents;
+  /** 本人当前可向银行借到的普通贷款上限；失信、金币<=0、有未结清贷款或余额已近上限时为 0。 */
+  bankBorrowLimitCents: Cents;
+  /**
+   * 每个存活他人可借给本人的上限 = min(对方金币, MAX_MONEY_CENTS - 本人金币)，不小于 0。
+   * 只给上限，不出现对方的 cents 字段。
+   */
+  lenderLimits: LenderLimitView[];
   /** 本人银行贷款（含失信与已结清记录）。 */
   bankLoans: BankLoan[];
   bankDebtCents: Cents;
@@ -89,6 +104,21 @@ export function getPlayerView(
     (loan) => loan.borrowerId === viewerId || loan.lenderId === viewerId,
   );
 
+  // 镜像 bank.ts 的普通贷款前置条件：信用 GOOD、金币 > 0、无任何未还清贷款；
+  // 同时受引擎入账上限约束（借款后余额不得超过 MAX_MONEY_CENTS），故取两者较小值。
+  // 金币只有 1 分时 floor(金币/2)=0，额度同样为 0。
+  const bankHeadroom = Math.max(0, MAX_MONEY_CENTS - me.cents);
+  const bankBorrowLimitCents =
+    me.credit === "GOOD" && me.cents > 0 && !myBankLoans.some((loan) => loan.status !== "REPAID")
+      ? Math.min(ordinaryLoanCap(me.cents), bankHeadroom)
+      : 0;
+  const lenderLimits: LenderLimitView[] = state.players
+    .filter((player) => player.alive && player.playerId !== viewerId)
+    .map((player) => ({
+      playerId: player.playerId,
+      maxCents: Math.max(0, Math.min(player.cents, MAX_MONEY_CENTS - me.cents)),
+    }));
+
   const publicPlayers: PublicPlayerView[] = state.players.map((player) => ({
     playerId: player.playerId,
     seatId: player.seatId,
@@ -117,6 +147,8 @@ export function getPlayerView(
     winnerId: extras.winnerId ?? null,
     finance: {
       cents: me.cents,
+      bankBorrowLimitCents,
+      lenderLimits,
       bankLoans: myBankLoans,
       bankDebtCents: myBankLoans
         .filter((loan) => loan.status !== "REPAID")

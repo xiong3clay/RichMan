@@ -10,7 +10,9 @@ export function viewFixture(): WireSnapshotView {
       { playerId: "p1", seatId: 1, nickname: "甲", credit: "GOOD", status: "ALIVE", alive: true, defaultedBankDebtCents: "0" },
       { playerId: "p2", seatId: 2, nickname: "乙", credit: "GOOD", status: "ALIVE", alive: true, defaultedBankDebtCents: "0" },
     ],
-    finance: { cents: "10000", bankLoans: [], bankDebtCents: "0", bankDefaultedDebtCents: "0",
+    finance: { cents: "10000", bankBorrowLimitCents: "5000",
+      lenderLimits: [{ playerId: "p2", maxCents: "10000" }],
+      bankLoans: [], bankDebtCents: "0", bankDefaultedDebtCents: "0",
       privateLoans: [], privateDebtCents: "0", receivableCents: "0", frozenCents: "0", badDebtCents: "0",
       pendingRequest: null, incomingRequests: [], myBet: null, betsSubmitted: [], aliveCount: 2 },
   };

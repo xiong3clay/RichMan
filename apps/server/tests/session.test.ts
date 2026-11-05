@@ -238,6 +238,20 @@ it("private_events_filtered: 第三人快照/事件不含私人请求、合同�
   expect(JSON.stringify(clients[2]!.messages)).not.toContain("4321");
 });
 
+it("borrow_limit_wire: 快照下发的可借额度与出借上限是十进制字符串", async () => {
+  const { s, room, identities } = await game();
+  const replacement = await open(s.port, room);
+  replacement.send({ type: "resume", roomCode: room, sessionToken: identities[0]!.sessionToken });
+  await replacement.next("joined");
+  const snapshot = await replacement.next("snapshot");
+  expect(snapshot.view.finance.bankBorrowLimitCents).toBe("5000");
+  expect(typeof snapshot.view.finance.bankBorrowLimitCents).toBe("string");
+  expect(Array.isArray(snapshot.view.finance.lenderLimits)).toBe(true);
+  expect(snapshot.view.finance.lenderLimits).toEqual([{ playerId: "p2", maxCents: "10000" }]);
+  expect(typeof snapshot.view.finance.lenderLimits[0]!.maxCents).toBe("string");
+  expect(JSON.stringify(snapshot.view.publicPlayers)).not.toContain('"cents"');
+});
+
 it("half_open_closed: 每10s ping，两次无pong关闭并保留离线座位", async () => {
   const manager = new RoomManager(), room = manager.createRoom(), raw = http.createServer();
   let tick: (() => void) | undefined;
