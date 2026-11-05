@@ -15,6 +15,8 @@ export interface RoundSettlement {
   round: number;
   lines: SettlementLine[];
   hasData: boolean;
+  /** 本轮开奖点；事件缺少 drawResult 时为 null（不显示“未知”）。 */
+  drawResult: 0 | 1 | null;
   /**
    * 按事件推导的本轮结算后余额：优先本人 TAX_CHARGED 的 centsAfter，
    * 其次本人 BET_SETTLED 的 nextCents，都没有时为 null（展示层回退到 before）。
@@ -117,11 +119,14 @@ export function deriveRoundSettlement(
   }
 
   let balanceAfterBet: string | null = null;
+  let drawResult: 0 | 1 | null = null;
   const betEvent = scoped.find((event) => {
     if (event.type !== "BET_SETTLED") return false;
     return payloadOf(event)["round"] === round;
   });
   if (betEvent !== undefined) {
+    const rawDraw = payloadOf(betEvent)["drawResult"];
+    if (rawDraw === 0 || rawDraw === 1) drawResult = rawDraw;
     const players = payloadOf(betEvent)["players"];
     const own =
       Array.isArray(players)
@@ -142,7 +147,9 @@ export function deriveRoundSettlement(
         parts.push("猜 " + guess + " · " + leverage + " 倍 · 押 " + formatCents(betCents));
       }
       if (deltaCents !== null) {
-        parts.push((won ? "赢 +" : "输 ") + formatCents(deltaCents));
+        // deltaCents 带负号时展示绝对值，避免“输 -500 分”叠两个负号。
+        const magnitude = deltaCents.startsWith("-") ? deltaCents.slice(1) : deltaCents;
+        parts.push((won ? "赢 +" : "输 ") + formatCents(magnitude));
       }
       if (nextCents !== null) {
         parts.push("结算后余额 " + formatCents(nextCents));
@@ -152,6 +159,14 @@ export function deriveRoundSettlement(
         value: parts.length === 0 ? "已开奖" : parts.join("；"),
         tone: won ? "good" : "bad",
       });
+      const overdraftCents = text(own["overdraftCents"]);
+      if (overdraftCents !== null && Number(overdraftCents) > 0) {
+        lines.push({
+          label: "透支贷款",
+          value: formatCents(overdraftCents) + "（按银行贷款计息）",
+          tone: "bad",
+        });
+      }
     }
   }
 
@@ -159,6 +174,35 @@ export function deriveRoundSettlement(
     round,
     lines,
     hasData: lines.length > 0,
+    drawResult,
     balanceAfterEvent: balanceAfterTax ?? balanceAfterBet,
   };
+}
+
+/**
+ * 危险原因只从本轮事件推断：本人下注亏损 → 本轮下注；本人被扣税 → 本轮扣税；
+ * 否则不编原因。其它玩家的事件一律不看。
+ */
+export function deriveDangerReason(
+  events: readonly WireGameEvent[],
+  round: number,
+  viewerId: string,
+): string {
+  const scoped = eventsOfRound(events, round);
+  const bet = scoped.find((event) => event.type === "BET_SETTLED" && payloadOf(event)["round"] === round);
+  if (bet !== undefined) {
+    const players = payloadOf(bet)["players"];
+    const own = Array.isArray(players)
+      ? (players as Array<Record<string, unknown>>).find((player) => player["playerId"] === viewerId)
+      : undefined;
+    const delta = own === undefined ? null : text(own["deltaCents"]);
+    if (delta !== null && delta.startsWith("-") && delta !== "-0" && delta !== "0") {
+      return "本轮下注亏损导致金币为负";
+    }
+  }
+  const taxed = scoped.some(
+    (event) => event.type === "TAX_CHARGED" && payloadOf(event)["playerId"] === viewerId,
+  );
+  if (taxed) return "本轮扣税导致金币为负";
+  return "余额为负，需要在时限内自救";
 }

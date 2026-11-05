@@ -342,6 +342,75 @@ p {
   font-size: 13px;
 }
 
+/* 07B 下注风险块：只做展示，随输入变化；360px 下允许任意换行。 */
+.bet-risk {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  margin: 10px 0;
+  padding: 10px 12px;
+  background: #0d1620;
+  border: 1px solid #24374a;
+  border-radius: 10px;
+}
+
+.bet-risk-line {
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.bet-risk-line.good {
+  color: #8ce0a8;
+}
+
+.bet-risk-line.bad {
+  color: #ffb0b0;
+}
+
+.bet-risk-line.neutral {
+  color: #9fb0c3;
+}
+
+.bet-locked {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.final-roster {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  margin: 10px 0;
+}
+
+.final-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 64px 64px;
+  gap: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #0d1620;
+  font-size: 13px;
+}
+
+.final-row > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.final-head {
+  background: transparent;
+  color: #7f8fa3;
+  font-size: 12px;
+}
+
 .mono {
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
   color: #9fb0c3;

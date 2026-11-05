@@ -48,7 +48,7 @@ export function privateLimitText(view: WireSnapshotView, lenderId: string): stri
 }
 
 /** 只接受规范十进制整数分（无符号、无小数点、无指数、无前导零）；其他写法交给原有表单校验。 */
-const CANONICAL_CENTS = /^(0|[1-9]\d*)$/;
+export const CANONICAL_CENTS = /^(0|[1-9]\d*)$/;
 
 /** 整数分字符串比较；空值或非法输入交给原有表单校验，不在这里判超限。 */
 export function withinLimit(value: string, limit: string | null): boolean {

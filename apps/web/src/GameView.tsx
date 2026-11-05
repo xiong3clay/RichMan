@@ -7,6 +7,7 @@ import {
   formatCents,
   isNonNegativeCents,
   isPositiveCents,
+  loanStatusLabel,
   phaseLabel,
   rateLabel,
   statusLabel,
@@ -28,8 +29,15 @@ import {
   withinLimit,
   BANK_LOAN_LIMIT_HINT,
 } from "./game/steps";
-import { deriveRoundSettlement, deriveSettlementBalance, hasInterestBearingDebt } from "./game/settlement";
+import {
+  deriveDangerReason,
+  deriveRoundSettlement,
+  deriveSettlementBalance,
+  hasInterestBearingDebt,
+} from "./game/settlement";
 import type { RoundSettlement } from "./game/settlement";
+import { deadlineSeconds, deriveBetRisk, remainingAfterRepay } from "./game/bet-outcome";
+import type { BetRisk } from "./game/bet-outcome";
 import { rememberLoanRequests } from "./game/notices";
 import type { KnownLoanRequest } from "./game/notices";
 import { DebtCenter } from "./game/DebtCenter";
@@ -74,6 +82,19 @@ function stageHeadline(view: WireSnapshotView): string {
   if (view.phase === "TAX") return view.me.status === "DANGER" ? "危险自救" : "交税与自救";
   if (view.phase === "INTEREST") return "计息";
   return "对局结束";
+}
+
+/** 下注风险块：随输入实时更新，只渲染纯函数给出的文本，不在这里算钱。 */
+function BetRiskBlock({ risk }: { risk: BetRisk }) {
+  return (
+    <div className={"bet-risk " + risk.state} role="group" aria-label="本轮下注风险">
+      {risk.lines.map((line, index) => (
+        <p className={"bet-risk-line " + line.tone} key={String(index) + ":" + line.text}>
+          {line.text}
+        </p>
+      ))}
+    </div>
+  );
 }
 
 function parseRateBps(text: string): number | null {
@@ -347,6 +368,17 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
     chosenLender === null ? null : lenderLimitOf(view, chosenLender.playerId);
   const bankOverLimit = bankLimit !== null && !withinLimit(amount, bankLimit);
   const privateOverLimit = chosenLenderLimit !== null && !withinLimit(amount, chosenLenderLimit);
+  /** 下注风险：只读当前金币与本人输入/杠杆；失信时按 1 倍估算。 */
+  const betRisk = deriveBetRisk({
+    cents: finance.cents,
+    betInput: amount,
+    leverage,
+    credit: view.me.credit,
+  });
+  const borrowableLenders = Array.isArray(finance.lenderLimits)
+    ? finance.lenderLimits.filter((limit) => limit.maxCents !== "0").length
+    : 0;
+  const dangerDeadline = deadlineSeconds(view.deadlineAt, view.serverNow);
   /** 额度为 0 时“是，输入金额”是死路：进去后任何金额都会被禁用，故直接禁用并给出原因。 */
   const bankUnavailable = blockedBank !== null || bankLimit === "0";
 
@@ -552,6 +584,31 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
                   : current.winnerName + " 获胜"}
           </h2>
           <p className="step-hint">你的最终金币：{formatCents(finance.cents)}</p>
+          <p className="step-hint">
+            你的最终信用：{view.me.credit === "GOOD" ? "良好" : "永久失信"} · 存活轮次{" "}
+            {view.round}
+          </p>
+          {view.me.status === "BANKRUPT" ? (
+            <p className="step-hint danger-text">
+              你已破产：私人债务已转坏账，出借人的应收被冻结
+            </p>
+          ) : null}
+          <div className="final-roster" role="group" aria-label="终局名单">
+            <div className="final-row final-head">
+              <span>座位</span>
+              <span>昵称</span>
+              <span>状态</span>
+              <span>信用</span>
+            </div>
+            {view.publicPlayers.map((player) => (
+              <div className="final-row" key={player.playerId}>
+                <span>#{player.seatId}</span>
+                <span>{player.nickname}</span>
+                <span>{statusLabel(player.status)}</span>
+                <span>{creditLabel(player.credit)}</span>
+              </div>
+            ))}
+          </div>
           {hostId === view.me.playerId ? (
             <button type="button" className="primary wide" disabled={!canSubmit || rematchPending}
               onClick={() => {
@@ -583,17 +640,36 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
     }
 
     if (current.kind === "bankDue") {
+      const afterRepay = remainingAfterRepay(finance.cents, current.loan.remainingCents);
+      const bankDueSeconds = deadlineSeconds(view.deadlineAt, view.serverNow);
       return (
         <section className="panel wizard">
           <p className="eyebrow">银行到期</p>
           <h2 className="question">有一笔银行贷款已到期</h2>
           <p className="step-hint">
-            应还 {formatCents(current.loan.remainingCents)}，当前金币 {formatCents(finance.cents)}
-            {current.loan.origin === "OVERDRAFT" ? "（透支贷款）" : ""}
-            ，第 {current.loan.dueRound} 轮到期。
+            欠款 {formatCents(current.loan.remainingCents)}（本金+已计息）
+            {current.loan.origin === "OVERDRAFT" ? "（透支贷款）" : ""} · 状态{" "}
+            {loanStatusLabel(current.loan.status)}
+          </p>
+          <p className="step-hint">
+            发放第 {current.loan.issuedRound} 轮 · 到期第 {current.loan.dueRound} 轮 · 当前第{" "}
+            {view.round} 轮
+          </p>
+          <p className="step-hint">
+            当前金币 {formatCents(finance.cents)} · 还清后余额{" "}
+            {afterRepay === null ? "—" : formatCents(afterRepay)}
+            {afterRepay !== null && Number(afterRepay) < 0 ? "（金币不足，只能拒绝或等待超时）" : ""}
+          </p>
+          <p className="step-hint">
+            倒计时：
+            {bankDueSeconds !== null && bankDueSeconds <= 0 ? (
+              "即将按超时处理"
+            ) : (
+              <Countdown deadlineAt={view.deadlineAt} {...countdownProps} />
+            )}
           </p>
           <p className="step-hint danger-text">
-            拒绝还款会立即记为失信：失信欠款保留、本局信用不再恢复，并影响后续借款。
+            拒绝或超时 = 永久失信：不能还这笔款、不能再用银行贷款、下注只能 1 倍；仍可向私人借款（对方会看到失信风险）。
           </p>
           <div className="choice-grid">
             <Choice
@@ -752,8 +828,9 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
               inputMode="numeric"
               placeholder="下注金额（分）"
               value={amount}
-              onChange={(event) => setAmount(event.target.value.trim())}
+              onChange={(event) => setAmount(event.target.value)}
             />
+            <BetRiskBlock risk={betRisk} />
             <div className="choice-grid">
               <Choice
                 label="下一步"
@@ -792,7 +869,7 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
               />
               <Choice
                 label="2 倍"
-                hint={defaulted ? "失信玩家不可选" : "输赢翻倍"}
+                hint={defaulted ? "失信玩家只能 1 倍" : "输赢翻倍"}
                 disabled={defaulted}
                 onClick={() => {
                   setLeverage(2);
@@ -800,6 +877,7 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
                 }}
               />
             </div>
+            <BetRiskBlock risk={betRisk} />
             <div className="choice-grid">
               <Choice
                 label="返回"
@@ -818,6 +896,7 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
             猜 {String(guess)} · 押 {isNonNegativeCents(amount) ? formatCents(amount) : "（未填写）"} · {String(leverage)} 倍
           </p>
           <p className="step-hint">锁定后不可修改；开奖前别人看不到你的金额、猜测与杠杆。</p>
+          <BetRiskBlock risk={betRisk} />
           <div className="choice-grid">
             <Choice
               label="锁定下注"
@@ -837,28 +916,32 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
     }
 
     if (current.kind === "betLocked") {
-      const others = view.publicPlayers.filter(
-        (player) => player.alive && player.playerId !== view.me.playerId,
-      );
+      const zeroBet = current.bet.betCents === "0";
       return (
         <section className="panel wizard">
           <p className="eyebrow">已锁定</p>
           <h2 className="question">已锁定，等待其他玩家</h2>
-          <p className="step-hint">
-            {current.bet.betCents === "0" ? "已放弃（0 注）" :
-              "你押了 " + formatCents(current.bet.betCents) + "，猜 " + String(current.bet.guess) + "，" + String(current.bet.leverage) + " 倍。"}
-          </p>
-          <p className="step-hint">
-            已提交 {String(current.submitted)} / {String(current.alive)} 人。锁定后不可修改。
-          </p>
-          <div className="loan-list">
-            {others.map((player) => (
-              <div className="loan-row" key={player.playerId}>
-                <span>{player.nickname}</span>
-                <span>{finance.betsSubmitted.includes(player.playerId) ? "已提交" : "未提交"}</span>
-              </div>
-            ))}
+          <div className="bet-locked" role="group" aria-label="我的本轮下注">
+            <p className="step-hint">
+              {zeroBet ? "已放弃（0 注）" :
+                "你押了 " + formatCents(current.bet.betCents) + "，猜 " + String(current.bet.guess) + "，" + String(current.bet.leverage) + " 倍。"}
+            </p>
+            <p className="step-hint">
+              模式：{zeroBet ? "已放弃 0 注" : "正常下注"} · 猜点：猜 {String(current.bet.guess)} ·
+              杠杆：{String(current.bet.leverage)} 倍
+            </p>
           </div>
+          <p className="step-hint">
+            已提交 {String(current.submitted)} / {String(current.alive)} 人；全员提交立即开奖。
+          </p>
+          <p className="step-hint">
+            剩余时间：<Countdown deadlineAt={view.deadlineAt} {...countdownProps} />
+            {deadlineSeconds(view.deadlineAt, view.serverNow) !== null &&
+            (deadlineSeconds(view.deadlineAt, view.serverNow) ?? 0) <= 0
+              ? "（等待服务端开奖）"
+              : ""}
+          </p>
+          <p className="step-hint">锁定后不可修改；开奖前不会显示任何人的金额、猜测与杠杆。</p>
         </section>
       );
     }
@@ -870,9 +953,34 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
             <p className="eyebrow">危险自救</p>
             <h2 className="question">金币为负，需要自救</h2>
             <p className="step-hint">
-              当前金币 {formatCents(finance.cents)} · 自救剩余 <Countdown deadlineAt={view.deadlineAt} {...countdownProps} />
+              当前金币 {formatCents(finance.cents)}（负余额照实显示） · 自救剩余{" "}
+              <Countdown deadlineAt={view.deadlineAt} {...countdownProps} />
+              {dangerDeadline !== null && dangerDeadline <= 0 ? "（等待服务端结算）" : ""}
             </p>
-            <p className="step-hint">补到 0 以上即解除危险；放弃或超时会被破产结算。</p>
+            <p className="step-hint">
+              原因：{deriveDangerReason(events, view.round, view.me.playerId)}
+            </p>
+            <div className="loan-list">
+              <div className="loan-row">
+                <span>应收</span>
+                <span>{formatCents(finance.receivableCents)}</span>
+              </div>
+              <div className="loan-row">
+                <span>可借银行</span>
+                <span>{bankLimit === null ? BANK_LOAN_LIMIT_HINT : formatCents(bankLimit)}</span>
+              </div>
+              <div className="loan-row">
+                <span>可向他人借</span>
+                <span>{String(borrowableLenders)} 人</span>
+              </div>
+            </div>
+            <p className="step-hint">
+              向他人借款/催收应收：成功后余额转正即解除危险。
+            </p>
+            <p className="step-hint danger-text">
+              放弃自救 = 破产：金币归 0、永久退出本局、私人债务转坏账、出借人应收冻结。
+            </p>
+            <p className="step-hint danger-text">超时同样按破产处理。</p>
             <div className="choice-grid">
               <Choice
                 label="紧急借款"
@@ -1501,7 +1609,7 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
 
       {debtOpen ? <DebtCenter view={view} onClose={() => setDebtOpen(false)} /> : null}
 
-      {settlement !== null && settlementCard !== null && step.kind !== "gameOver" ? (
+      {settlement !== null && settlementCard !== null ? (
         <div className="overlay" role="dialog" aria-modal="true">
           <div className="overlay-card">
             <p className="eyebrow">第 {settlement.round} 轮结算</p>
@@ -1515,7 +1623,7 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
               </span>
             </div>
             <button type="button" className="primary wide" onClick={() => setSettlement(null)}>
-              继续
+              {step.kind === "gameOver" ? "关闭" : "继续"}
             </button>
           </div>
         </div>
@@ -1544,11 +1652,16 @@ function debtOptionHint(option: DebtOption): string {
 }
 
 function SettlementBody({ card }: { card: RoundSettlement }) {
-  if (!card.hasData) {
+  if (!card.hasData && card.drawResult === null) {
     return <p className="step-hint">本轮没有利息、税或下注结算事件。</p>;
   }
   return (
     <div className="settle-lines">
+      {card.drawResult === null ? null : (
+        <div className="settle-line neutral">
+          <span>开奖：{String(card.drawResult)}</span>
+        </div>
+      )}
       {card.lines.map((line) => (
         <div className={"settle-line " + line.tone} key={line.label}>
           <span className="stat-label">{line.label}</span>
