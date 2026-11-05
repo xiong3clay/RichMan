@@ -1,0 +1,726 @@
+============================================================
+RichMan 单元 06 独立复核报告
+============================================================
+复核员：Qoder（独立复核，只读）
+复核时间：2026-11-05
+工作区：D:\Lianjunjie\biancheng\RichMan
+复核对象：commit 40f8a6e（feat(unit06): 存档落盘、原子提交与进程重启恢复）
+当前 HEAD：f491618（docs(unit06) ... 481 测试，提交 40f8a6e；HEAD 只多文档）
+复核范围：apps/server/src/storage/*、rooms/manager.ts、rooms/command-queue.ts、
+          rooms/session.ts、ws.ts、http.ts、rooms/recovery.ts；
+          packages/game-core/src/engine.ts 的 resumeFromPause；
+          apps/server/tests/persistence*.ts、crash-recovery.test.ts、resume.test.ts；
+          packages/game-core/tests/resume.test.ts；对照 handoff/单元06-* 规格与注意事项。
+
+结论：4 项 must-fix，6 项 should-fix，另有若干 nit。
+全量 481 条测试、typecheck、build 均通过，但不代表故障点已覆盖。
+复核过程只写临时探针脚本到系统 /tmp，未改仓库源码、未 commit。
+
+------------------------------------------------------------
+一、must-fix
+------------------------------------------------------------
+
+M1. 恢复码轮换 / durablePending 对齐后，旧 socket 会被重新赋予新 epoch，
+    旧 token 在“已被撤换”后仍能作为房主继续操作（身份越权）。
+
+位置：apps/server/src/ws.ts:104-113
+代码原文：
+  const reconcileOwners = (code: string): void => {
+    const previous = [...owners.values()].filter(owner => owner.identity?.roomCode === code)
+      .map(owner => ({ owner, authenticated: current(owner) }));
+    if (!manager.reconcileDurable(code)) return;
+    // 仅延续提交前仍有效的owner；离开/复用座位后，即使新旧epoch碰巧相同也不能复活旧身份。
+    for (const { owner, authenticated } of previous) {
+      const record = manager.sessionRecords().find(r => r.roomCode === code && r.playerId === owner.identity!.playerId);
+      if (!authenticated || !record || record.seatId !== owner.identity!.seatId) detach(owner);
+      else owner.epoch = record.connectionEpoch;
+    }
+  };
+
+位置：apps/server/src/ws.ts:193-199（join/resume 在 await 后连接已断的补偿分支）
+代码原文：
+  if (conn.closed || conn.replaced) {
+    const previous = owners.get(ownerKey(joined));
+    if (previous && !previous.closed && !previous.replaced) {
+      const keptEpoch = await manager.transact(roomCode, () => sessions.claim(joined));
+      previous.epoch = keptEpoch;
+    } else await manager.transact(roomCode, () => sessions.disconnect(joined));
+    return;
+  }
+
+对照：apps/server/src/rooms/session.ts:130-137（恢复码换新 token，旧 token 应失效）
+  if (credentials.recoveryCode !== undefined) {
+    const record = this.store.getByRecoveryDigest(recoveryDigest);
+    if (this.validForRoom(record, roomCode)) {
+      const sessionToken = secret();
+      const result = this.manager.restoreIdentity(roomCode, record.playerId, sessionToken);
+      this.store.save({ ...record, tokenDigest: digest(sessionToken) });
+      return result;
+    }
+  }
+
+为什么错：
+- reconcileOwners 的 authenticated 是在 manager.reconcileDurable() 之前用旧 token/旧 epoch
+  算出的；reconcileDurable 之后只检查 record.seatId，没有检查 tokenDigest 或 epoch 是否
+  仍然对应旧连接。
+- manager.reconcileDurable()（manager.ts:155-158）恢复 pending 快照后，player.tokenDigest
+  已经是新 token；旧连接的 epoch 已经失效，但代码把 owner.epoch 直接改成新 record 的
+  connectionEpoch，使旧 socket 重新通过 current() 检查。
+- join 分支在 conn.closed 时也会对 previous 调 sessions.claim，再赋 epoch；恢复码路径
+  同样会把旧 socket 复活。
+- 这与规格 A4“恢复码能换新 token（旧 token 随即失效）”、
+  handoff/单元06-注意事项.txt:32“旧socket只可延续对齐前仍有效的身份”直接冲突。
+
+现有测试反而固化了错误行为：
+apps/server/tests/persistence.test.ts:104-122
+  h.store.options.failAt='after_rename';
+  failedRecovery=...resume recoveryCode...
+  expect(await failedRecovery.next('error')).toMatchObject({code:'ERROR_PAUSED'});
+  ...
+  a.p.send({type:'resume_game'});
+  const view=(await a.p.next('snapshot',m=>m.view.paused===false&&m.view.version>1)).view;
+这里 a 是旧 token 的旧连接；恢复码已轮换 token，但测试仍期望旧连接能 resume_game。
+本次只读探针实际输出：
+  failed recovery {"type":"error","code":"ERROR_PAUSED",...}
+  old a storage error {"type":"error","code":"ERROR_PAUSED",...}
+  old token resume_game accepted {"playerId":"p1","paused":false,"version":2}
+  failed client got joined? false
+即：新 token 从未下发，旧 socket 却获得了继续对局的权限。
+
+复现思路：
+1) diskHarness 启动两人局；设置 store.options.failAt='after_rename'；
+2) 新连接发送 resume + 房主的 recoveryCode；收到 ERROR_PAUSED，未收到 joined；
+3) 清 failAt；旧连接 a（旧 sessionToken）发送 {type:'resume_game'}；
+4) 观察 a 收到 paused=false 的 snapshot；再重启后旧 token 已不能 resume，说明只有这个
+   仍存活的旧 socket 被错误复活。
+修复建议：
+- reconcileOwners 在 restore 后必须重新验证旧 owner 与新 record 的 token/epoch 对应关系，
+  至少要求 record.connectionEpoch === owner.epoch；不再无条件 owner.epoch = record.connectionEpoch。
+- join 分支 conn.closed 时，若本次 joined 使用 recoveryCode 换了新 token，不能把 previous
+  claim 成当前；应 detach previous，要求重新认证。
+- 修改 after_rename_identity_write 的断言：旧 socket 应 NOT_JOINED；用 recoveryCode 重新
+  取得新 token 后才能 resume_game；补“恢复码轮换后旧 socket 不能发命令”的测试。
+
+M2. 新加入在 await 期间断线、或 after_rename 失败时，会留下没有 token 的玩家座位；
+    如果是第一个玩家，还会留下无凭据房主，房间将永久无法开始（身份不可恢复）。
+
+位置：apps/server/src/ws.ts:187-199
+代码原文：
+  const { joined, epoch } = await manager.transact(roomCode, () => {
+    const joined = message.type === "resume" ? sessions.resume(roomCode, message)
+      : message.sessionToken !== undefined ? sessions.resume(roomCode, { sessionToken: message.sessionToken })
+        : sessions.join(roomCode, message.nickname);
+    return { joined, epoch: sessions.claim(joined) };
+  });
+  if (conn.closed || conn.replaced) {
+    ...
+    } else await manager.transact(roomCode, () => sessions.disconnect(joined));
+    return;
+  }
+  bind(conn, joined, epoch);
+  send(conn, { type: "joined", ... sessionToken: joined.sessionToken,
+    ...("recoveryCode" in joined ? { recoveryCode: ... } : {}) });
+
+位置：apps/server/src/rooms/manager.ts:160-166 / 170-190（durablePending 路径）
+代码原文：
+  private storageFailed(code, before, error): never {
+    if (before) this.restoreRoom(before); else this.rooms.delete(code);
+    if (error instanceof RoomCommitError && error.durable) this.durablePending.set(code, error.durable);
+    ...
+  }
+  async transact(...) {
+    ...
+    if (this.store) { if (candidate) await this.store.commitRoom(code, candidate, []); ... }
+    ...
+  }
+
+对照：apps/server/src/rooms/session.ts:108-120（join 在提交成功后才返回 token/recoveryCode）
+  join(...) {
+    const result = this.manager.join(roomCode, nickname);
+    const recoveryCode = secret();
+    this.store.save({...tokenDigest: digest(result.sessionToken), recoveryDigest: digest(recoveryCode)});
+    return { ...result, recoveryCode };
+  }
+
+为什么错：
+- 新 join 的 player/session 已经通过 commitRoom 落盘；但 joined 消息尚未发出。
+- 若连接在 transact await 后已断开，分支只 sessions.disconnect（online=false），不移除
+  玩家/session；token 与 recoveryCode 都从未送达客户端。
+- 若 commitRoom 在 rename 后失败，storageFailed 保留 durablePending，同样没有 token 送达；
+  重启后 loadAll 恢复该玩家。
+- 若这是房间第一个玩家，它就是 hostId，但没有 token；后续玩家加入后 hostId 仍是这个
+  无主玩家，无法 ready/start/resume，房间永久卡死；第二个玩家也无法替代房主。
+- 这不是“提前暴露 token”，而是“提交了无法交付的座位”，与规格 A4 的身份目标冲突。
+
+本次只读探针实际输出（新房间、首个 join、after_rename 失败）：
+  join result {"type":"error","code":"ERROR_PAUSED",...}
+  got joined? false
+  disk players [{"playerId":"p1","seatId":1,"nickname":"甲"}] paused false hostId p1
+  after restart room {"paused":true,"players":[{"playerId":"p1",...}],"hostId":"p1","state":"LOBBY"}
+  second join seat {"playerId":"p2","seatId":2}
+  host after second join p1
+  room players [p1 offline, p2 online]
+即重启后 p1 仍是无 token 的房主，p2 无法开局。
+
+复现思路：
+1) POST /api/rooms 建空房；
+2) 第一个 WebSocket 发 join，store.failAt='after_rename'（或让首 join 的
+   transact await 后连接关闭）；
+3) 客户端只收到 ERROR_PAUSED/断线，没有 joined；重启后查看 /api/rooms 与快照；
+4) 再让第二个客户端 join 并尝试 ready/start，确认无法成功。
+修复建议（二选一或组合）：
+- 新 join 未发送 joined 前失败/断线，必须做补偿删除（leave/remove player + session），
+  而不是 disconnect 留座；after_rename 的 durablePending 若包含“未确认的新 join”，
+  启动或对齐时也应清理或标记为不可用，不能恢复成真实房主。
+- 或引入客户端 join nonce / 幂等 join：快照保存 pending join 的 nonce，重试可以取回
+  同一 token/recoveryCode；否则服务端无法交付秘密。
+- 至少补两条真实测试：join 提交后、joined 前 kill 子进程；以及 after_rename 使 join
+  失败后重启，验证房间仍可继续而不是被无 token 房主卡死。
+
+M3. 版本未变化的拒绝结果仍被缓存，并随后续整房快照写入磁盘；
+    违反规格 A2，且会让拒绝命令占用/驱逐 5000 条去重记录。
+
+位置：apps/server/src/rooms/command-queue.ts:113-118
+代码原文：
+  const record = { payloadHash, reply: structuredClone(reply) };
+  if (!this.options.atomicCommit) this.store.set(key, record);
+  try {
+    if (result.state.version !== state.version) await this.options.commit(roomCode, result, { key, record });
+  } catch (error) { if (!this.options.atomicCommit) this.store.delete?.(key); throw error; }
+  this.store.set(key, record);
+  return reply;
+
+位置：apps/server/src/rooms/manager.ts:134-138（生产 store）
+  setCommand(key, value) {
+    const [gameId] = JSON.parse(key) as string[];
+    const r = [...this.rooms.values()].find(r => r.gameId === gameId);
+    if (r) { r.commands.set(key, structuredClone(value)); while (r.commands.size > 5000) r.commands.delete(r.commands.keys().next().value!); }
+  }
+
+位置：apps/server/src/rooms/manager.ts:144（exportRoom 会把它写进快照）
+  commands: [...r.commands].map(([key, value]) => ({ key, ...value }))
+
+对照规格 handoff/单元06-存档落盘与重启恢复.txt:112-113：
+  “保留既有语义：version 未变化的命令（被拒/冲突）不写盘、不广播…”
+handoff/单元06-注意事项.txt:11 承认“后续整房快照可能带入内存里该类去重记录”，
+这实际上是把规格的“不写盘”改成了“不立即写盘”，需要在规格里明确，否则复核必须按
+规格判失败。
+
+本次只读探针实际输出：
+  bad reply {"outcome":{"ok":false,"code":"INVALID_AMOUNT",...}}
+  good reply {"outcome":{"ok":true}}
+  saved commands [{"key":"[...\"bad\"]","ok":false},{"key":"[...\"good\"]","ok":true}]
+  bad in memory {"payloadHash":"...","reply":...}
+即一条被拒的 BORROW_BANK 被后续 good 命令的 snapshot 带入磁盘。
+
+影响：
+- 被拒/冲突结果没有作为“成功”回执返回，但会跨重启存活，重试返回旧拒绝；
+- 5000 条上限会被拒绝命令占用，最旧的有效去重记录可能被提前淘汰；淘汰后同 commandId
+  重放不再命中 COMMAND_ID_REUSED，可被当成新命令重新执行（尤其配合新 expectedGameVersion
+  或本身无 version 的命令），削弱“命令只执行一次”。
+- 这与“命令结果与状态同一 rename、拒绝不落盘”的验收语义不一致。
+
+复现思路：
+1) 用 diskHarness 开一局；发送 amountCents="0" 的 BORROW_BANK，收到失败；
+2) 再发送一条合法命令成功；
+3) 读 snapshot.json，确认 commands 同时包含失败与成功记录；manager.getCommand 也能
+   查到失败记录；
+4) 也可循环发送 5001 条不同的拒绝命令，观察成功记录被淘汰。
+修复建议：
+- atomicCommit=true 时，只有 result.state.version !== state.version 且 commit 成功后才
+  this.store.set；拒绝/冲突不要缓存（旧内存适配器 atomicCommit=false 保留预暂存契约）。
+- 补测试断言：失败命令不在 snapshot.commands、getCommand 为 undefined；5000 淘汰测试
+  使用成功记录并验证淘汰后的重放行为。
+- 如果确实要保留拒绝去重，必须先改规格 A2，并把“拒绝记录可驱逐成功记录”的风险写清。
+
+M4. GAME_OVER 状态 resume_game 会把 lastEvents 清空，丢掉 BET_SETTLED.drawResult；
+    与“开奖结果重启后不变”的验收冲突。
+
+位置：apps/server/src/rooms/manager.ts:213-217
+代码原文：
+  const next = resumeFromPause(room.game, { nowMs });
+  const events: GameEvent[] = next === room.game ? [] : [{ seq: next.eventSeq, type: 'GAME_RESUMED', ... }];
+  const before = this.exportRoom(code)!; const candidate = { ...before, paused: false, game: next, lastEvents: events };
+  try { if (this.store) await this.store.commitRoom(code, candidate, events); } catch (e) { this.storageFailed(code, before, e); }
+  Object.assign(room.game, next); room.paused = false; room.lastEvents = events;
+
+对照：packages/game-core/src/engine.ts:215（GAME_OVER 直接返回原 state）
+  if (state.phase === "GAME_OVER") return state;
+对照：handoff/单元06-成果报告.txt:29
+  “lastEvents是最近提交的原始事件批次，保留BET_SETTLED.drawResult”
+对照：handoff/单元06-注意事项.txt:12
+  “lastEvents ... 保留 BET_SETTLED.drawResult”
+
+为什么错：
+- GAME_OVER 时 resumeFromPause 返回同一个 state，manager 构造 events=[]；
+- candidate.lastEvents 和 room.lastEvents 都被覆盖为 []；
+- BET_SETTLED 的 drawResult 没有 EngineState 字段承载，只在 lastEvents/events.ndjson；
+  snapshot 的 lastEvents 被清空后，恢复后的房间不再有开奖结果批次，审计文件也不会被重放。
+- 这不是重抽，但属于“开奖结果在恢复后丢失”，不符合 06B #3 和备注的保留承诺。
+
+本次只读探针实际输出：
+  before lastEvents [{"seq":3,"type":"BET_SETTLED","payload":{"drawResult":1,...}}]
+  after lastEvents []
+  after game phase/version/eventSeq {"phase":"GAME_OVER","version":2,"eventSeq":3}
+（GAME_OVER 的 engine version/eventSeq 未变，但 lastEvents 被清空。）
+
+复现思路：
+1) 将房间 game 置 GAME_OVER，并通过 commitTransition 写入一个 BET_SETTLED lastEvents；
+2) restart 加载 paused 房间，房主 resume_game；
+3) 读取 snapshot.lastEvents，确认从非空变为 []；再查 events.ndjson，确认只在上一条
+   审计行里有 drawResult，而 snapshot 不再携带。
+修复建议：
+- resumeGame 在 next === room.game（GAME_OVER）时保留 before.lastEvents；
+  或用 `lastEvents: events.length ? events : before.lastEvents`；
+- 补 server 测试：GAME_OVER restart → host resume → lastEvents 仍含 BET_SETTLED drawResult，
+  engine version/eventSeq 不变；同步加 core/UI 断言。
+- 这与 M4 之外的其他 resume 场景无关；非 GAME_OVER 用 GAME_RESUMED 替换 lastEvents 合理。
+
+------------------------------------------------------------
+二、should-fix
+------------------------------------------------------------
+
+S1. rename 成功后的清理失败、以及 transact 提交后的 publish/emit 异常，
+    会被误判为“未提交”，回滚内存而不设置 durablePending，可能用旧账覆盖已提交账。
+
+位置：apps/server/src/storage/atomic.ts:28-29
+代码原文：
+  } catch (cause) { throw new AtomicWriteError(committed, { cause }); }
+  finally { await rm(temp, { force: true }); }
+
+位置：apps/server/src/storage/file-store.ts:83-91
+代码原文：
+  let renamed = false;
+  try {
+    await writeSnapshotAtomic(..., snapshot, this.options); renamed = true;
+    if (events.length) { ...append events... }
+  } catch (error) { throw new RoomCommitError(renamed || (error instanceof AtomicWriteError && error.committed) ? structuredClone(snapshot) : null, error); }
+
+问题：
+- rename 已成功、committed=true 后，如果 finally 的 rm(temp) 失败，抛出的不是
+  AtomicWriteError，而是 rm 的原始错误；writeSnapshotAtomic 返回前 `renamed` 变量仍为
+  false（FileRoomStore 的 renamed 只在 await 正常返回后置 true）。于是
+  RoomCommitError.durable=null；manager.storageFailed 回滚旧内存、paused，但没有
+  durablePending；磁盘已经有新快照，下一次写入可能基于旧账覆盖它。
+- 同样，manager.transact（manager.ts:170-190）的 try 覆盖了 commit 后的 publish 和
+  deferred emit；如果监听器（例如 broadcast 的 ws.send）在提交后抛错，catch 会走
+  storageFailed，error 不是 RoomCommitError，durable=null；磁盘已提交，内存回滚，没有
+  durablePending。commitTransition 提交后的 Object.assign/setCommand 异常也类似。
+- 这是“rename 后失败”路径中的真实分叉，不只是测试注入问题。
+
+复现思路：
+1) 在 Windows 上使 data/.tmp 在 rename 后不可删除（权限/占用/杀毒软件），或给
+   writeSnapshotAtomic 增加 cleanup 失败注入；
+2) 触发一次 commit，观察 snapshot.json 已是新值，但 manager 内存仍是旧值、
+   isPaused=true、reconcileDurable 为 false；随后 resume_game/下一次写入会覆盖新快照；
+3) 对 transact 路径可在 manager.subscribe 上注册一个抛异常的 listener，提交成功后
+   触发，观察同样的 fork。
+修复建议：
+- finally 清理失败应只告警，不应覆盖已提交结果；或者先设置 commit 状态，再在
+  catch 中保留 AtomicWriteError(committed=true)。
+- FileRoomStore 不应只依赖 `renamed` 变量；应确保所有 post-rename 异常都携带
+  committed=true。
+- transact 把“磁盘提交”和“发布/emit”拆成两个 try；提交成功后的异常不得回滚内存或
+  丢掉 durablePending。
+- 补测试：cleanup 失败、publish 抛错、submit 后 setCommand 抛错。
+
+S2. validateSnapshot 的结构校验仍可被绕过：金额/座位/凭证格式本身有校验，
+    但 lenderId、窗口 deadline、roomState/game/host 一致性、摘要唯一性、commands
+    上限、lastEvents 类型都没有校验。
+
+位置：apps/server/src/storage/file-store.ts:18-26（房间/玩家）
+代码原文：
+  if (s.roomCode !== code || !/^\d{4,8}$/.test(code) || !Object.values(ROOM_STATE).includes(s.roomState) ||
+    !Array.isArray(s.players) || !Array.isArray(s.sessions) || !Array.isArray(s.commands) || !Array.isArray(s.usedGameIds)) throw new Error('房间结构无效');
+  ...
+  if (s.hostId !== null && !ids.has(s.hostId)) throw new Error('房主无效');
+
+位置：apps/server/src/storage/file-store.ts:35-61（引擎）
+代码原文：
+  if (g.gameId !== s.gameId || !s.usedGameIds.includes(g.gameId) || !PHASES.includes(g.phase) || ... ||
+    (g.deadlineAt !== null && !Number.isFinite(Date.parse(g.deadlineAt)))) throw new Error('引擎结构无效');
+  ...
+  for (const loan of [...g.bankLoans,...g.privateLoans]) {
+    if (typeof loan.loanId !== 'string' || !ids.has(loan.borrowerId) || !amount(loan.principalCents) || ...
+  }
+
+位置：apps/server/src/storage/file-store.ts:68-73（命令/lastEvents）
+代码原文：
+  for (const c of s.commands) {
+    const tuple = JSON.parse(c.key) as unknown[];
+    if (tuple.length !== 3 || tuple[0] !== s.gameId || !ids.has(tuple[1]) || typeof tuple[2] !== 'string' ||
+      !digest(c.payloadHash) || c.reply.gameId !== s.gameId || c.reply.commandId !== tuple[2] || typeof c.reply.outcome?.ok !== 'boolean') throw new Error('命令记录无效');
+  }
+  s.lastEvents ??= [];
+
+具体缺口（都能构造出 validateSnapshot 不抛错的快照）：
+- privateLoans 只检查 borrowerId，不检查 lenderId；bank/private loan 的 status、dueRound、
+  origin、seatId 也不校验；loanId/requestId 唯一性不校验。
+- g.windowDeadlineMs、g.dangerDeadlineMs 没有类型/有限数校验；g.currentSeatId、
+  g.pendingRequestId、g.pendingDueLoanId、g.taxSeats、g.actedSeats 也没有校验。
+- s.roomState 与 game/gameId/hostId 的一致性没有校验：例如 roomState="PLAYING"、
+  game=null、gameId=null 可以通过；之后 join/resume_game 都拒绝，房间永久不可用。
+  又如 players 非空、hostId=null 可以加载，但没有房主可 start。
+- tokenDigest/recoveryDigest 只校验格式，不校验不同玩家/会话之间唯一；一个损坏快照
+  可让两个座位共享摘要（matchesIdentity 会同时成立）。
+- commands 只校验数组，不限制 ≤5000；超大快照可占用内存。
+- lastEvents 只做 `??= []`，不校验数组、事件 seq、drawResult 等。
+- 现有 snapshot_shape_guard（persistence.test.ts:40-51）只测 malformed cents、重复引擎
+  身份、坏 remainingCents，没有上述用例。
+
+复现思路：
+1) 从 diskHarness 导出合法 snapshot；分别写入：
+   - game.windowDeadlineMs="x"；
+   - roomState="PLAYING"、game=null、gameId=null；
+   - players 非空、hostId=null；
+   - privateLoans[].lenderId="ghost"；
+   - 两个 players 使用同一 tokenDigest；
+   - commands 长度 6000；
+   - lastEvents="not-array"。
+2) 调用 validateSnapshot / 重启 loadAll，观察多数不抛错并进入 manager；部分会
+   卡死房间或产生身份歧义。
+修复建议：
+- 对 engine 结构做与 normalizeState/engine 规则一致的关键字段校验；至少补
+  lenderId、windowDeadlineMs/dangerDeadlineMs、currentSeatId/pending ids、roomState
+  与 game/host 的互斥关系、digest 唯一性、commands ≤5000、lastEvents 数组；
+- 每个缺口补 snapshot_shape_guard 用例，并断言 loadAll 将其移入 corrupt-* 而不是加载。
+这是数据目录损坏的防御边界；数据目录私有，故列为 should-fix 而非远程 must-fix。
+
+S3. events.ndjson append 失败没有被真正覆盖；现有 after_rename 故障点发生在
+    append 之前，无法证明审计写失败时的回放/去重正确。
+
+位置：apps/server/src/storage/atomic.ts:4-6
+代码原文：
+  export interface AtomicOptions {
+    failAt?: 'before_rename' | 'after_rename';
+    checkpoint?: (point: 'before_rename' | 'after_rename') => void | Promise<void>;
+  }
+
+位置：apps/server/src/storage/file-store.ts:86-90
+  if (events.length) {
+    const h = await open(path.join(this.roomDir(code), 'events.ndjson'), 'a');
+    try { await h.writeFile(JSON.stringify({...}) + '\n'); await h.sync(); }
+    finally { await h.close(); }
+  }
+
+问题：
+- after_rename checkpoint 发生在 writeSnapshotAtomic 返回前，此时 commitRoom 的
+  events append 还没执行；crash_after_rename_before_ack 测试杀进程时审计还没开始，
+  不等于“append 失败”。
+- 规格/复核重点 1 要求 append 失败时内存/磁盘也不分叉；代码看起来会走
+  RoomCommitError.durable=snapshot，但没有任何测试证明；也没有注入 open/write/sync
+  失败的选项。
+- 若 append 失败被误分类或 replay 处理不当，前一次命令的 reply 与审计会不一致。
+复现思路：
+- 给 FileStoreOptions 增加 failAt:'append'（或在 open/handle.writeFile/h.sync 注入），
+  执行一条带事件的命令；断言 command result 仍可从快照恢复、事件缺失只告警、
+  重试同 commandId 不重复执行；再检查 manager 内存 paused 与 durablePending。
+建议：
+- 增加 append 注入点和测试；至少覆盖“append 失败后重启 → 原 reply 可命中、账只变一次、
+  audit 缺行告警”。
+
+S4. 存档失败会对命令发起者重复发送 ERROR_PAUSED（广播 + 直发），不符合 05E
+    单条反馈/单条提示的约定，测试只取第一条，未断言数量。
+
+位置：apps/server/src/rooms/manager.ts:164
+  this.emit({ type: 'storage_error', roomCode: code });
+位置：apps/server/src/ws.ts:151-152
+  if (event.type === 'storage_error') { sendError(conn,'ERROR_PAUSED',...); continue; }
+位置：apps/server/src/ws.ts:246-249
+  } catch (error) {
+    if (error instanceof LobbyError) throw error;
+    manager.pauseRoom(...); throw new LobbyError('ERROR_PAUSED',...);
+  }
+位置：apps/server/src/ws.ts:285-287
+  conn.serial = conn.serial.then(...).catch(error => {
+    if (error instanceof LobbyError) { if (error.code !== 'ERROR_PAUSED' || !current(conn)) sendError(conn,error.code,error.message); }
+  });
+
+为什么：
+- storageFailed 先 emit storage_error，broadcast 给房内所有连接（含命令发起者）；
+- processor.execute 的 commit 异常再抛 LobbyError ERROR_PAUSED，handle 重新抛出，serial
+  catch 对当前连接再发一次；发起者收到两条 error 消息。
+- write_failure（persistence.test.ts:87-103）只 next('error') 取第一条，不检查历史条数。
+复现思路：
+- 在 write_failure 场景记录 a.p.history 中 ERROR_PAUSED 的数量；预期 1，实际 2
+  （broadcast + direct）。
+建议：
+- storageFailed 只向其他连接广播，发起者由命令 catch 直发；或 serial catch 对
+  ERROR_PAUSED 不再直发。
+- 补一条断言 history 中 ERROR_PAUSED 恰好一条的测试，防止 05E 单反馈回归。
+
+S5. 服务器级 resume 测试只覆盖 BETTING；缺少 ACTION/TAX/INTEREST/BANK_DUE 的
+    真实 resume 后调度、GAME_OVER lastEvents、以及 join/身份故障注入。
+
+位置：apps/server/tests/resume.test.ts:33-52（只有 restart_paused BETTING）
+  it('restart_paused: 过期锁注重启不追赶，只有房主继续且续时不解锁', ...)
+  ... expect(resumed.phase).toBe('BETTING');
+
+缺口：
+- core resume.test.ts 覆盖了函数级 ACTION/BANK_DUE/BETTING/TAX/INTEREST，但没有经过
+  ws + scheduler + snapshot 的真实路径；TAX/INTEREST deadlineAt=null 是否被卡死没有
+  自动化用例。
+- 本次只读探针（two separate diskHarness）实际得到：
+    INTEREST {"resumedPhase":"INTEREST","resumedDeadline":null,"advancedPhase":"ACTION","version":4}
+    TAX {"resumedPhase":"TAX","resumedDeadline":null,"advancedPhase":"ACTION","version":4}
+  说明当前实现能推进、不卡死；但这是手工探针，未进入 481 条回归。
+- GAME_OVER resume 的 lastEvents 未测（M4）；join 提交后 kill / after_rename 未测（M2）；
+  append 失败未测（S3）；command 5000 淘汰后的重放未测（M3）。
+- crash-recovery.test.ts:24-87 两次真实 SIGKILL 都只杀 ACCEPT 命令；没有杀 join/ready/
+  start/resume_game。
+建议：
+- 增加 server 级 resume 用例：ACTION（含 pending request）、TAX（danger + pending）、
+  INTEREST、BANK_DUE、GAME_OVER；断言 phase/version/deadline/锁注/请求/账本和
+  lastEvents；
+- 增加真实子进程在 join 提交后、joined 前 kill；以及 after_rename 后 join 失败的重启用例；
+- 增加 5000 淘汰后的重放用例和 append 故障注入用例。
+
+S6. createRoomPersisted 在 after_rename 失败时会删除内存房间但保留磁盘空房，
+    形成“客户端收到建房失败、磁盘却存在房间”的孤立目录。
+
+位置：apps/server/src/rooms/manager.ts:192-196
+  async createRoomPersisted(): Promise<string> {
+    const code = this.createRoom();
+    try { await this.persist(code); return code; }
+    catch { this.rooms.delete(code); throw new LobbyError('ERROR_PAUSED', '存档写入失败，建房未完成'); }
+  }
+位置：apps/server/src/http.ts:103
+  sendJson(res, 201, { ok: true, roomCode: await manager.createRoomPersisted() });
+
+问题：
+- persist 直接 commitRoom，没有 storageFailed/durablePending 语义；after_rename 已提交
+  空房后异常，catch 只删内存，不删除磁盘；重启后该空房被 loadAll 恢复为 paused，
+  可能出现在 /api/rooms，但创建者没有房间码。
+- 空房没有 host/token，后续 join 者可以成为房主，危害小于 M2，但仍是“失败建房留下
+  不可关联目录”的脏状态。
+复现思路：
+- store.failAt='after_rename'；POST /api/rooms；观察 503 后重启 /api/rooms 出现该房间，
+  且 snapshot 存在；HTTP 响应没有房间码。
+建议：
+- createRoomPersisted 失败后按 durable 结果删除磁盘房间（或复用 leave 路径），至少不
+  把无主空房恢复进列表；补测试。
+
+S7. 大厅/身份变更不写 events.ndjson；transact 固定传空事件数组。
+
+位置：apps/server/src/rooms/manager.ts:178
+  if (this.store) { if (candidate) await this.store.commitRoom(code, candidate, []); else await this.store.deleteRoom(code); }
+
+问题：
+- commitRoom 的第三参数固定为 []；join/ready/start/rematch/leave/身份换 token 的事件只在
+  内存 deferred 中广播，不进入 events.ndjson；与规格“事件流水”及审计预期不一致。
+- 游戏命令/continue 路径写审计，身份路径不写；故障恢复时无法从审计看到大厅变更。
+- 这不是资金错误，但会让审计完整性有缺口。
+复现思路：
+- 做一次 join/ready/start，检查 events.ndjson 是否有对应行（当前没有）；对比命令事件。
+建议：
+- 将 deferred 事件传给 commitRoom(code,candidate,events)，或在规格中明确审计只覆盖
+  游戏事件；后者需更新交接说明，避免下一位误以为大厅事件可审计。
+
+------------------------------------------------------------
+三、nit
+------------------------------------------------------------
+
+N1. handoff/单元06-注意事项.txt:32 声称“旧socket只可延续对齐前仍有效的身份”，
+    但实现没有比较 token/epoch（M1）；文档与代码需一起修。
+N2. apps/web/src/net/wire.ts:236-238 仍写“服务端为内存房间，重启后原房间码与 token
+    都不再生效”；单元06后已不成立，建议更新入口提示/注释。
+N3. apps/web/src/net/client.ts:420-425 acceptSnapshot 只在 gameId 变化时 beginGame；
+    若备份恢复让 snapshot.version < lastVersion，客户端会丢弃权威低版本快照。
+    这是 web 层问题，超出本轮 server 重点，但与 bak 回退有关，建议 07 处理。
+N4. packages/game-core/src/engine.ts:222-225 对 BANK_DUE/ACTION/BETTING 无条件给窗口；
+    当没有 pending due / 无 current seat / 全部已下注时可能多等一个完整窗口。
+    正常状态推进不会留下这些中间态，故只列为 nit；如要更贴近“当前窗口”，可加空态判断。
+N5. FileRoomStore.loadAll:117-119 在 corrupt 目录 rename 失败时直接抛出，整个启动失败；
+    可考虑逐房间记录并继续，避免一个坏目录阻断所有房间（当前测试没有覆盖）。
+N6. atomic.ts:21 copyFile 备份不是 fsync/原子；断电窗口可能产生坏 bak（current 仍好）。
+    规格已声明只承诺进程崩溃，不承诺物理断电；保留说明即可。
+N7. apps/server/tests/persistence.test.ts:40-51 snapshot_shape_guard 的覆盖较窄；
+    建议与 S2 一起扩展（金额/座位/摘要/结构）。
+N8. command_capacity（persistence.test.ts:242-252）直接调用 manager.setCommand，
+    未经过 processor/commit，也没有验证淘汰后重放；S5 中建议补真实路径测试。
+N9. apps/server/tests/resume.test.ts:14-19 的 paused_banner 只用 renderToStaticMarkup；
+    05E 真机 CSS 契约不覆盖暂停横幅（但 05E 的 CSS 测试仍通过）。
+N10. apps/server/src/rooms/manager.ts:192-196 / http.ts:103 的建房失败响应没有房间码；
+    与 S6 的孤立目录一起处理。
+
+------------------------------------------------------------
+四、通过项（按复核重点）
+------------------------------------------------------------
+
+A. 原子写、备份、损坏恢复（大部分通过）
+- 顺序正确：atomic.ts:19-27 先写 tmp + sync + close，copyFile 备份，checkpoint，
+  rename，再 checkpoint；rename 是权威点。
+- FileRoomStore.commitRoom（file-store.ts:81-91）在快照写入后 append events；
+  writeSnapshotAtomic 的 AtomicWriteError(committed) 被用于区分 rename 前/后。
+- 主快照坏 → bak 恢复并保留 invalid-current（file-store.ts:106-115），测试
+  backup_survives_failed_commit（persistence.test.ts:52-61）通过。
+- schema99 → corrupt-* 隔离（file-store.ts:117-119；schema_guard:173-184 实测
+  /health.rooms=0、/api/rooms 空）。
+- orphan events 多行忽略、坏行/断号/缺行告警（checkAudit:125-138；
+  orphan_events:147-159 通过）。
+- empty_lobby_deleted（200-210）重启不复活空房；cold_start_and_rematch（185-199）
+  空目录与再开清旧局通过。
+- 未发现无限循环：readdir 只匹配 4-8 位房间目录，corrupt-* 不会再次被载入；
+  invalid-current 不会被当作 snapshot。
+- 例外：S1 的 post-rename cleanup、S2 的结构校验缺口。
+
+B. 身份正常路径（除 M1/M2 的异常路径外通过）
+- SnapshotSessionStore 与会话注册表走 manager 的 sessionRecords；join/resume/claim
+  在 manager.transact 内；SessionRegistry.resume 恢复码换 token 并撤销旧 token
+  （session.ts:123-139）。
+- candidate_identity_isolation（persistence.test.ts:25-39）证明 await 期间旧 epoch
+  仍可见、提交后才切换；transact 在 await 前 restoreRoom(before)，不提前暴露候选
+  token/epoch。
+- credentials_restored（62-86）证明重启后旧 token 可恢复、恢复码换新 token 后旧 token
+  被拒、epoch 递增、MAX-1 分精确、快照/备份/审计无秘密原文。
+- 这里的安全例外是 M1（旧 socket 被复活）和 M2（新 join 未交付 token/座位）。
+
+C. resume 语义（大部分通过）
+- resumeFromPause（engine.ts:214-242）GAME_OVER 返回原 state；其他 phase 换
+  phaseInstanceId、version/eventSeq+1，ACTION/BANK_DUE/BETTING/TAX 重建窗口；
+  ACTION/TAX 的 pending request 与 danger deadline 同步续时；不调用 runSystem，
+  不补计息/税/开奖。
+- core resume.test.ts 15 条覆盖标准/快速 ACTION/BANK_DUE/BETTING/TAX、请求续时、
+  自救续时、旧实例拒绝、自动阶段不预先计息、GAME_OVER 同引用。
+- server resume.test.ts:33-52 BETTING 重启后不追赶、非房主 NOT_HOST、房主继续后
+  锁注仍在、deadline=now+45000、phaseInstance 更新。
+- 本次探针实际验证 INTEREST/TAX（deadlineAt=null）重启后 resume 不会卡死：
+    INTEREST → ACTION，version 4；TAX → ACTION，version 4。
+- 例外：M4 的 GAME_OVER lastEvents；S5 缺少 ACTION/TAX/BANK_DUE 的 server 自动化测试。
+
+D. 命令去重、跨局、重启回执（部分通过）
+- 同 commandId 同载荷在重启后返回原 reply；换载荷 COMMAND_ID_REUSED；stale_payload
+  （160-171）与 crash_after_rename（crash-recovery:67-75）通过。
+- key 包含 gameId/playerId/commandId（command-queue.ts:82），rematch 清 commands
+  （manager.ts:386）且 cold_start_and_rematch（185-199）证明旧 gameId 不串账。
+- command_capacity（242-252）证明最多 5000 条、最旧淘汰。
+- 例外：M3 拒绝结果落盘/驱逐；淘汰后的重放没有测试；见 S5。
+- 结论：不能简单说“旧结果会被当成成功”；旧记录被淘汰后不存在，服务端会把它当新命令，
+  但大多数 action command 有 expectedGameVersion，通常会被 VERSION_CONFLICT 拦截。
+  真正的风险是拒绝记录消耗 5000 容量，以及恶意客户端配合新 version 重发无版本命令。
+
+E. 存档校验与凭证隐私（格式检查通过，结构有缺口）
+- 金额：g.players.cents 使用 Number.isSafeInteger + abs<=MAX（file-store.ts:44-46）；
+  bank/private loan principal/remaining 使用 amount()；requests/bets 也校验。
+- 座位：s.players seat 1..10/唯一，engine players 与 room players seat/playerId 对应
+  （22-25、44-46）；session seat 与 player 对应（30-31）。
+- 凭证摘要：players/sessions tokenDigest/recoveryDigest 必须是 64 位 SHA256 十六进制
+  （13、23、30-31）；恢复写出只含 digest。
+- 隐私：credentials_restored（78-84）扫描房间目录所有文件，未发现 token/recovery 原文；
+  publicPlayers 仍无 cents；snapshot 只含 sessionDigest；/api/rooms 只给
+  roomCode/state/paused/playerCount（http.ts:184-188）；静态目录不指向 data。
+- 例外：S2 的 lenderId、窗口 deadline、roomState/game/host、摘要唯一性、commands
+  上限、lastEvents 类型。
+
+F. 回归、协议、05E、测试真实性
+- pnpm test：33 文件 / 481 条通过，退出 0（本次复跑 8.31s）；
+  pnpm typecheck 退出 0；pnpm build 退出 0（129 modules，304ms）。
+- 原 443 条未修改：40f8a6e 的新增测试都在新文件/新增 describe；全量 481 通过。
+- 协议版本未升；只新增 resume_game、ERROR_PAUSED、RoomMessage.paused、snapshot paused；
+  未新增依赖、未改 package.json/lock。
+- 05E/05F：GameView 暂停横幅放在 game-sticky；steps.ts/styles.css 未改；
+  05E 的 CSS 契约测试仍通过；没有删除旧通知/吸顶语义。
+- 真实强杀不是 throw：crash-recovery.test.ts 用 fork + SIGKILL（24-87），
+  recovery-worker 在 checkpoint 挂起，非 mock；两次场景真实。
+- 测试未 skip：persistence/crash/resume 中没有 .skip/.todo（grep 确认）。
+- 例外：M1 的 after_rename_identity_write 把错误的安全行为写成通过断言；S3/S5 的覆盖
+  缺口；S4 的重复错误消息没有被计数断言。
+
+------------------------------------------------------------
+五、实际命令与真实输出
+------------------------------------------------------------
+1) 全量测试
+$ cd D:/Lianjunjie/biancheng/RichMan && pnpm -s test
+ Test Files  33 passed (33)
+      Tests  481 passed (481)
+   Start at  21:19:18
+   Duration  8.31s (transform 39%, import 32%, tests 28%, worker 1%)
+test exit=0
+
+2) 类型检查（首次并行执行因终端超时被转后台后停止，单独重跑）
+$ pnpm -s typecheck
+typecheck exit=0
+（无错误输出）
+
+3) 构建
+$ pnpm -s build
+✓ 129 modules transformed.
+apps/web/dist/index.html                   0.41 kB │ gzip:   0.27 kB
+apps/web/dist/assets/index-Z0VPCPB8.css    9.32 kB │ gzip:   2.65 kB
+apps/web/dist/assets/index-Dljk9omM.js   386.47 kB │ gzip: 114.55 kB
+✓ built in 304ms
+build exit=0
+
+4) M1 只读探针（/tmp/richman-probe-owner.ts，未改仓库）
+  failed recovery {"type":"error","code":"ERROR_PAUSED","message":"存档写入失败，本局已暂停，请房主重试或联系管理员"}
+  old a storage error {"type":"error","code":"ERROR_PAUSED",...}
+  old token resume_game accepted {"playerId":"p1","paused":false,"version":2}
+  failed client got joined? false
+
+5) M2 只读探针（/tmp/richman-probe-join2.ts）
+  join result {"type":"error","code":"ERROR_PAUSED",...}
+  got joined? false
+  disk players [{"playerId":"p1","seatId":1,"nickname":"甲"}] paused false hostId p1
+  after restart room {"paused":true,"players":[{"playerId":"p1",...}],"hostId":"p1","state":"LOBBY"}
+  second join seat {"playerId":"p2","seatId":2}
+  host after second join p1
+
+6) M3 只读探针（/tmp/richman-probe-reject.ts）
+  bad reply {"type":"command_result","commandId":"bad",...,"outcome":{"ok":false,"code":"INVALID_AMOUNT",...}}
+  good reply {"type":"command_result","commandId":"good",...,"outcome":{"ok":true}}
+  saved commands [{"key":"[...\"bad\"]","ok":false},{"key":"[...\"good\"]","ok":true}]
+  bad in memory {"payloadHash":"...","reply":{...}}
+
+7) M4 只读探针（/tmp/richman-probe-gameover.ts）
+  before lastEvents [{"seq":3,"type":"BET_SETTLED","at":"1970-01-01T00:00:01.000Z","payload":{"drawResult":1,"players":[]}}]
+  after lastEvents []
+  after game phase/version/eventSeq {"phase":"GAME_OVER","version":2,"eventSeq":3}
+
+8) INTEREST/TAX 可达性探针（/tmp/richman-probe-auto-resume.ts）
+  INTEREST {"resumedPhase":"INTEREST","resumedDeadline":null,"advancedPhase":"ACTION","version":4}
+  TAX {"resumedPhase":"TAX","resumedDeadline":null,"advancedPhase":"ACTION","version":4}
+（说明：当前实现不会在这些 null-deadline 阶段卡死，但该路径未进自动化回归。）
+
+9) 工作区（写本报告前）
+$ git status --short
+（空）
+$ git log -1 --oneline
+f491618 docs(unit06): 成果报告/运行验收/交接/注意事项/实施记录 + 项目当前状态（481 测试，提交 40f8a6e）
+
+本次复核未保留任何仓库改动、未 commit；只新增本报告。
+
+------------------------------------------------------------
+六、仍需人工/真机验证（未验证）
+------------------------------------------------------------
+1. 真实物理断电、文件系统掉电、Windows 杀毒软件占用导致的 rename/cleanup 行为；
+   本轮只有进程 SIGKILL 与注入式 store 故障，未声称硬件断电。
+2. 手机/弱网重连：暂停横幅、resume_game 按钮、断线时 join 的 token 交付窗口；
+   本轮未做真人网络切换。
+3. 多 server 进程并发写同一 data 目录：当前设计单进程、每房串行；未验证跨进程锁。
+4. 大体量审计文件/大量 room 目录的启动扫描时间与内存占用；未压测。
+5. M1/M2/S1/S3 修复后的真实子进程测试：join 提交后 kill、append 失败、旧 socket
+   不能复活、GAME_OVER lastEvents 保留，均应新增。
+
+------------------------------------------------------------
+七、复核结论摘要
+------------------------------------------------------------
+- must-fix 4 项：
+  M1 恢复码轮换/durablePending 对齐后旧 socket 被复活（身份越权）；
+  M2 新 join 在 await/after-rename 断线后留下无 token 座位，首个玩家会造成无主房主；
+  M3 版本未变化的拒绝结果被后续快照落盘，违反 A2 并污染 5000 去重容量；
+  M4 GAME_OVER resume 清空 lastEvents，丢失 BET_SETTLED.drawResult。
+- should-fix 6 项：
+  S1 post-rename cleanup / transact publish 异常误判未提交，可能内存磁盘分叉；
+  S2 validateSnapshot 结构校验缺口（lenderId、deadline、roomState/game/host、摘要唯一性、
+     commands 上限、lastEvents）；
+  S3 events append 失败没有真实注入/测试；
+  S4 ERROR_PAUSED 对命令发起者广播 + 直发重复，05E 单反馈回归；
+  S5 server resume/crash 覆盖缺 ACTION/TAX/INTEREST/BANK_DUE/GAME_OVER/join/5000 重放；
+  S6 createRoomPersisted after-rename 失败留下孤立空房目录。
+- 通过：原子写顺序/备份/损坏隔离/schema guard/orphan 审计、正常身份与恢复码、resume
+  不补计息/税/开奖、锁注/请求/自救续时、同 commandId 去重与跨局隔离、金额/座位/摘要
+  格式与秘密扫描、481 测试/typecheck/build、真实 fork SIGKILL 测试、05E/05F 未破坏。
+- 结论：自动化验收通过不等于故障语义通过；M1/M2 属于身份安全/可用性阻塞，M3/M4 属于
+  规格/数据完整性阻塞，必须在宣布 06 完成前修复并补真实测试。
+
+复核基线 40f8a6e

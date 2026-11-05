@@ -1,0 +1,143 @@
+单元06复核修复记录（2026-11-05）
+基线HEAD f491618，实现40f8a6e；本轮未commit、未加依赖。
+依据：handoff/复核-单元06.txt与handoff/单元06-*规格。
+状态：M1-M4、S1-S6的工单要求已补修并自动化验证；人工/手机/物理断电未验证。
+原481条继续运行，新增54条，共37文件535条全绿；两条错误旧断言按用户明确授权修正。
+独立子agent只读分析/探针/复核，所有源码与测试由root串行写入。
+
+一、逐条问题→改法→对应测试
+M1 身份越权
+问题：恢复对齐无条件升级旧owner epoch；恢复码轮换后旧socket重新有权；断线补偿会claim旧owner。
+改法：WS连接固定保存认证时tokenDigest，current同时核摘要与epoch；reconcile后重新核current，
+不迁移旧epoch；失效owner detach；await后断线不claim previous。仅保存摘要，不保存原文凭证。
+测试：review06.test.ts的M1 revoked_socket；review06-crash.test.ts的M1_M2 disconnect_during_recovery；
+授权修改after_rename_identity_write：旧连接command/resume_game必须NOT_JOINED，恢复码重新换token才能继续。
+红灯：06fix-M-red.txt旧实现等待NOT_JOINED超时（实际旧连接仍能操作）；修后与全量通过。
+
+M2 未交付join留下无凭据座位/房主
+改法：仅新join在sessions持久记录pendingDelivery=true；joined的WS发送回调成功后才另事务确认false。
+交付失败/await断线时补偿撤销；durablePending对齐和启动loadAll也撤销未交付标记，移除player/session，
+房主被移除则选最低座位仍在者；首join撤销保留原空房间码，后续能重新加入准备开局。
+补偿若再次遇到写盘故障，原磁盘pending标记仍使重启可撤销；不会恢复成正式无凭据身份。
+确认事务期间断线后再次检查连接，保持已交付座位但正确标offline，不bind死连接。
+测试：M2 failed_join_restart、M2 join_commit_kill、M1_M2 disconnect_during_join、M2 confirmation_disconnect。
+join_commit_kill是真fork+SIGKILL：提交后未joined强杀，同目录重启players/sessions为空、host=null，
+两位新玩家可加入并开局。原两次资金命令强杀测试也仍运行。
+红灯：06fix-M-red.txt旧快照重启残留never-issued玩家；06fix-final-review-red.txt覆盖确认中断线错误在线态。
+
+M3 拒绝结果污染持久化去重/容量
+改法：生产atomicCommit路径在version未变化时直接返回，不store.set、不进后续快照、不消耗容量；
+重试重新校验。同ID同载荷成功原reply与payloadHash仍随状态同rename。
+测试：M3 rejected_not_cached（重发拒绝稳定、getCommand undefined、下一次成功快照只含good）；
+M3 successful_capacity_replay（5001次真实规则成功命令经processor/commit；夹杂5001次拒绝均不缓存；
+保存5000条成功记录并重启；最旧ID不命中；旧version信封重放VERSION_CONFLICT，保留ID返回原reply；
+淘汰外换成当前合法信封按新命令处理，明确5000窗口不承诺永久幂等）。
+容量测试使用内存提交适配器省去5001次重复磁盘IO，末尾用真实FileStore持久化和重启；不是绕过processor塞记录。
+兼容边界：未触动commands.test.ts“纯业务拒绝缓存原始失败与版本”及预暂存旧契约。
+它们专测atomicCommit=false的独立内存适配器；该模式保留旧行为，正式WS固定atomicCommit=true，
+实际共享内存去重表和文件均不缓存无版本变化拒绝。不能把独立旧适配器接入生产持久化路径。
+红灯：06fix-M-red.txt旧bad在getCommand中存在；改后无记录。
+
+M4 GAME_OVER结果批次丢失
+改法：resumeFromPause返回原state时沿用before.lastEvents，paused=false落盘；不新增事件或改version/eventSeq。
+测试：M4 game_over_events：真实WS重启继续，BET_SETTLED.drawResult原样、version/seq原样。
+红灯：06fix-M-red.txt原lastEvents=[]；改后保留原批次。
+
+S1 提交后异常分叉
+改法：atomic finally清理失败只告警，告警本身异常也不能改变提交结果；
+transact用明确committed状态分隔存储失败与发布失败，publish/emit抛错保留已提交candidate并暂停；
+commitTransition提交后Object.assign/setCommand异常恢复candidate含原reply，不能回旧账。
+测试：S1 cleanup_warning、S1 post_commit_publish/emit/setCommand。
+最初S1发布fixture错误地对PLAYING调用ready（会在提交前被业务拒绝），已改用合法disconnect变更，
+没有调整预期来迁就实现。最终验证真实内存与磁盘一致、原reply未丢。
+
+S2 快照结构绕过
+改法：补合法银行/私贷/请求枚举、银行dueRound/origin/seat、私贷lender、loan/request ID唯一；
+window/danger时限有限安全整数或null、current/danger座位、tax/acted无重复有效座位、taxIndex；
+pending引用真实且相应ACTIVE/PENDING；房间state/game/gameId/host一致性；token/recovery摘要唯一；
+commands<=5000；lastEvents必须数组，seq/type/at/payload/audience和drawResult校验。
+pendingDelivery=true只允许LOBBY，防止清理损坏PLAYING快照后房间与引擎名单分叉。
+保留合法DEFAULTED/FROZEN/BAD_DEBT、系统中间态null座位/窗口，不套用不存在于私贷的银行字段。
+测试：review06-shape.test.ts中31条S2 snapshot_shape_guard <字段>，逐项实际写坏文件、去掉好bak，
+断loadAll不载入而将原目录隔离corrupt-*；有合法bak时仍按原规格回退，不将正确备份恢复算失败。
+红灯：06fix-shape-red.txt 30缺口；独立复核补出的playing.pendingDelivery在06fix-final-review-red.txt。
+
+S3 append故障
+改法：FileStoreOptions.appendFailAt支持open/writeFile/sync，在真实append对应步骤抛错；
+已rename快照仍携带durable，原命令reply和账是权威，日志不重放。
+测试：S3 append_open/writeFile/sync，重启原ID返回原reply、余额只增500、银行贷款仅1笔。
+open/writeFile造成缺行只告警；sync失败前完整行可能已经写出，不假定同步失败必等于缺行。
+
+S4 重复ERROR_PAUSED
+普通当前owner的原基线探针本来count=1（报告该普通路径描述不准确）；新增回归覆盖更窄身份撤销路径。
+改法：每次处理消息记录该连接ERROR_PAUSED发送计数，catch只在本次尚未广播到它时直发；
+不再用catch时current身份状态猜测它以前是否收到过广播。未joined的失败发起者仍会收到错误。
+测试：S4 single_error，大厅leave写失败的storage_error广播后立即reconcile撤权；同socket发非法消息作
+串行完成屏障，再断言ERROR_PAUSED总数恰好1，未使用sleep凑时序。
+
+S5 服务端恢复覆盖
+测试：S5 server_resume_ACTION/TAX/BANK_DUE/INTEREST/TAX_AUTO、M4 game_over_events。
+ACTION/TAX由真实引擎创建pending request，再走真实WS resume、请求同意；TAX同时核danger续时。
+BANK_DUE恢复后真实决策还款；INTEREST/TAX_AUTO经过真实scheduler推进到ACTION并仅结息/扣税一次，
+将原手工探针变成自动化。另有join真kill与5000成功记录重放，见M2/M3。
+
+S6 失败建房孤立目录
+改法：createRoomPersisted失败除了移除内存，也调用store.deleteRoom原子墓碑删除磁盘房间。
+测试：S6 failed_create，after_rename后HTTP503、重启roomCount=0、磁盘无数字房间目录。
+
+二、授权变更旧测试
+1. after_rename_identity_write：用户工单允许修正错误“旧token连接能继续”断言；原成功账恢复/不重复断言保留。
+2. stale_owner_not_revived：用户在2026-11-05本聊天额外授权；注释原断言强制失败join留座属于M2错误。
+   保留a的ERROR_PAUSED/NOT_JOINED、b的room事件；新增失败身份不在players/session、重启仍不存在、
+   房主转b、b可继续准备/开局；全新join取新token，旧failed tokenDigest不能匹配新座位。
+   p1/座位号可复用，但秘密独立重新取样，不能用旧摘要恢复身份。
+3. persistence-harness.connect增加joined后的room完成屏障：交付确认落盘完成才返回，避免下一测试注入
+   错误命中前一join的确认事务；没有删/改其他旧测试断言。
+
+三、真实最终验收（日志原始输出）
+$ pnpm test
+ Test Files  37 passed (37)
+      Tests  535 passed (535)
+   Start at  22:09:32
+   Duration  11.37s
+exit=0
+$ pnpm typecheck
+$ tsc --noEmit -p tsconfig.json
+exit=0
+$ pnpm build
+vite v8.3.5 building client environment for production...
+✓ 129 modules transformed.
+✓ built in 308ms
+exit=0
+新增54：review06.test.ts 13、review06-shape.test.ts 31、review06-crash.test.ts 4、review06-resume.test.ts 6。
+全部旧481仍运行，仅上述两条错误断言按授权改正。没有skip/todo、弱化或删除旧用例。
+证据：artifacts/test-logs/06fix-{test,typecheck,build}-final.txt。
+过程：06fix-M-red.txt、06fix-S-red.txt、06fix-shape-red.txt、06fix-final-review-red.txt、
+06fix-identity-green.txt、06fix-resume.txt、06fix-review-green.txt、06fix-S4-green.txt、06fix-join-kill.txt。
+独立复核笔记：06fix-{identity,validation,coverage}-review.txt；两项新发现已先红后绿，并入最终535。
+早期失败/fixture类型错误日志保留作为过程，不冒充最终通过；最终三条命令均真实退出0。
+
+四、仍未处理的nit/限制（不隐瞒）
+S7：大厅/身份deferred事件仍不写events.ndjson，该文件只审计GameEvent；本轮未扩展大厅审计协议。
+N2：web/wire.ts旧“重启丢房”提示仍未改；N3：客户端拒收备份回退的低version快照留07处理。
+N4：无待办的ACTION/BANK_DUE/BETTING中间态可能多等窗口，未改冻结引擎。
+N5：corrupt目录移动失败会阻断启动，未改成逐房容错；N6：备份copyFile不承诺物理断电原子性。
+N9：没有新增手机CSS真机记录；N1/N7/N8/N10已随对应M/S修正。
+新join无客户端ACK协议：WS发送回调成功只代表传输边界，不能证明客户端真正消费了消息；
+发送成功到确认提交之间若崩溃，pending身份会被安全撤销，客户端需全新join。
+升级前旧快照无pendingDelivery的历史幽灵无法自动区别于合法离线玩家，需要人工核对受影响房间。
+单进程每房串行；无跨进程锁/大规模启动压测/物理断电/真人手机弱网验收。
+本轮只改server源码/测试与06交接，不改core/shared/web/docs/README/依赖/项目当前状态，不commit。
+
+五、Lead 验收（2026-11-05，本文件与代码同一提交）
+- 亲自重跑：pnpm test 37 文件 / 535 条全过（exit 0）；pnpm typecheck TSC=0；pnpm build BUILD=0（index-Dljk9omM.js 386.47kB）。
+- 逐条看 diff 核实 M1–M4、S1–S6 的真实落点，不是只看报告：
+  M1 身份固定 tokenDigest + isCurrent 双核 + reconcileOwners 不再升 epoch；
+  M2 pendingDelivery 落盘、joined 送达确认后才转 false、未交付座位在断线/durablePending/启动时撤销并按最低座位重选房主；
+  M3 version 未变化的拒绝在 store.set 之前 return，不进快照不占 5000；
+  M4 GAME_OVER 沿用 before.lastEvents，BET_SETTLED.drawResult 不再被空数组覆盖；
+  S1 清理失败只告警 + transact 区分存储/发布失败；S2 校验清单补齐；S3 三个 append 注入点；S4 pauseErrors 去重；S5 补全阶段级 resume；S6 建房失败删磁盘。
+- 授权改正的两条旧断言（persistence.test.ts）：after_rename_identity_write、stale_owner_not_revived；
+  理由是新行为才是正确语义（旧 token 不得复活、失败 join 不得留座），已在 handoff/项目当前状态.txt 记录，供下一次复核对照。
+- 我同意本轮不处理 S7 / N2–N6 的理由；N3 归入 07，其余作为已知限制，不当作“已解决”。
+- 线上服务尚未重启，重启后会用本提交的代码；验收顺序：先重启 RichManServer，再用房间码+恢复码走一次真实暂停→恢复。

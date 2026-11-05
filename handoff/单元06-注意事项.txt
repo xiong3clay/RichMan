@@ -5,12 +5,12 @@ RichMan 单元06 注意事项
 schemaVersion=1；snapshot.json是唯一提交点，snapshot.bak.json是上一提交备份。
 保存rulesVersion/protocolVersion用于兼容检查；金额沿用引擎整数分，禁止浮点转换。
 房间完整保存hostId、座位、usedGameIds、paused、EngineState、session摘要、当前局去重记录。
-sessions目前额外保存roomCode；导出/校验/恢复都使用同一格式。
+sessions额外保存roomCode与可选pendingDelivery。仅LOBBY新join首提交置true，joined发送成功后才另事务确认；失败/重启撤销pending座位和会话、重选仍在的房主，首join撤销保留空房间码。旧无标记历史幽灵需人工核对。
 commands键仍是JSON.stringify([gameId,playerId,commandId])；hash为SHA256；reply为原命令回执。
 按本轮唯一工单，仅最近一局、最多5000条、最旧淘汰，rematch清旧局；不得误恢复旧的无限保留要求。
-版本未变化的拒绝结果仍不立即写盘/广播；后续整房快照可能带入内存里该类去重记录。
+生产WS的version未变化拒绝结果不进内存去重、不进后续快照、不占5000容量；同ID重试重新校验。独立atomicCommit=false内存测试适配器仅为保留旧测试契约，不得接入生产。
 lastEvents是最近提交的原始事件批次，保留BET_SETTLED.drawResult；不是事件重放入口或客户端视图。
-events.ndjson用于审计，未来seq/其他gameId忽略，坏行/缺行/断号告警，绝不靠日志重放账本。
+events.ndjson仅审计游戏GameEvent（大厅/身份deferred事件尚未写入），未来seq/其他gameId忽略，坏行/缺行/断号告警，绝不靠日志重放账本。
 快照/备份/审计不得包含sessionToken、token或recoveryCode原文，只允许tokenDigest/recoveryDigest。
 磁盘文件有完整私有账务，只能留服务端数据目录，不能静态公开或下发整个snapshot。
 
@@ -29,7 +29,7 @@ rename后或append失败：磁盘可能已提交，仍先回旧内存并暂停/�
 后续身份、在线标记、继续对局等写入前必须先对齐durablePending，不能用旧账覆盖已提交快照/原reply。
 同ID同载荷命中已提交原reply可以返回，表示以前确已提交，不表示在暂停中执行新交易。
 磁盘恢复后由房主继续；若仍失败保持暂停；不要手工清command记录后重发转账。
-旧socket只可延续对齐前仍有效的身份；权威已删除的身份必须detach，不能因seat/epoch重用复活。
+旧socket只在对齐前后tokenDigest与原epoch均保持有效时延续；不升级旧epoch。恢复码轮换token、epoch被替换或权威身份删除均必须detach并重新认证；断线补偿不得claim旧owner。
 特别回归：stale_owner_not_revived覆盖连续两次after_rename故障后大厅复用同p1/seat，旧连接必须NOT_JOINED。
 
 四、不得回退
@@ -50,3 +50,11 @@ rename后或append失败：磁盘可能已提交，仍先回旧内存并暂停/�
 物理断电持久性还受文件系统/设备保障影响，本轮不作超出文件fsync与进程崩溃测试的承诺。
 
 【Lead 交付注记 2026-11-05】Codex 工作区已由 Lead 独立验收并提交 feat(unit06) 40f8a6e；全量 481 测试 / typecheck 0 / build 0 复跑通过，另做真实 CLI taskkill 重启恢复（/api/rooms 恢复为 paused:true）与快照凭证抽查。自本条起以该提交状态为准，前文“未commit”为写作时历史。
+
+【2026-11-05 复核修复补充；本轮仍未commit】
+最新37文件535条（原481+新增54）、typecheck/build退出0。仅两条旧错误断言按用户授权修正；
+完整问题→改法→测试、原始输出与未处理nit见单元06-复核修复记录.txt，优先于旧成果报告里的错误行为描述。
+GAME_OVER继续保留原lastEvents和drawResult，不新增version/seq；清理失败只告警，提交后发布/缓存异常不回旧账；
+append open/writeFile/sync故障有真实存储测试；失败建房会删除磁盘房间。
+5000条以外的旧ID不承诺永久幂等；原旧version重放重新拒绝，换当前合法信封按新命令处理。
+无客户端ACK时只能确认WS发送边界；发送后、确认前崩溃可能撤销该暂存join，需重新加入。

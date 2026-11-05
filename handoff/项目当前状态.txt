@@ -1,6 +1,6 @@
 RichMan 项目当前状态
 更新日期：2026-11-05
-更新者：Lead（DSH 统筹；06 由 Codex 实现，Lead 独立验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复）
+更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复）
 
 【版本】
 方案版本：V1.3.3（V1.3.2 + 引导式界面 + 连接实测）
@@ -19,12 +19,15 @@ RichMan 项目当前状态
      Q1/Q2/自身面板显示具体数字；额度 0 的入口一律禁用并给原因；非规范金额串不判超限。
 06 起会话与命令去重已落盘（apps/server/data，RICHMAN_DATA_DIR 可覆盖），服务重启后房间恢复为暂停态，房主 resume_game 继续。
 
-【测试与构建（2026-11-05 单元06 验收实测）】
-pnpm test      33 文件 / 481 条（新增 core resume 15、server persistence 18、crash 2、resume 3），TEST_EXIT=0
+【测试与构建（2026-11-05 单元06 复核修复后实测）】
+pnpm test      37 文件 / 535 条（06 初版 481 + 复核修复新增 54：review06 13、review06-shape 31、review06-crash 4、review06-resume 6），TEST_EXIT=0
 pnpm typecheck TSC_EXIT=0
 pnpm build     BUILD_EXIT=0（index-Z0VPCPB8.css 9.32kB、index-Dljk9omM.js 386.47kB）
 pnpm smoke:lan PASS（05D 验收时）
-原 443 条一条未改、未跳过；引擎改动只有新增 resumeFromPause（35 行，0 删除）。
+旧 481 条中只有两条断言按 Lead 明确授权改正（都在 persistence.test.ts）：
+  after_rename_identity_write：旧 token 连接必须 NOT_JOINED，只有恢复码换的新 token 能继续；
+  stale_owner_not_revived：失败 join 不得留座，新人要拿全新 token 重新 join。
+其余旧断言未删、未跳过、未放宽；引擎改动仍只有新增 resumeFromPause。
 【06 不得回退的点】
 - 提交顺序：tmp + fsync → 备份旧 snapshot 到 snapshot.bak.json → rename 才算出账；rename 成功后才发布内存/广播/回成功。
 - 失败一律回滚旧内存 + paused=true + ERROR_PAUSED；rename 后失败要把已提交快照记入 durablePending，后续写入先对齐，禁止旧内存覆盖已提交账。
@@ -35,6 +38,12 @@ pnpm smoke:lan PASS（05D 验收时）
 - 主快照坏用 bak，且先保留坏 current 再修复；不可恢复的目录移入 rooms/corrupt-* 并告警，绝不静默新建空局。
 - 大厅/身份/epoch 也要走 manager.transact 与房间串行队列；await 期间不得提前暴露候选 token/epoch/座位。
 - 5000 条上限按最旧淘汰、rematch 清旧局；审计 events.ndjson 只审计不重放。
+- 身份 current 必须同时核 tokenDigest 与 epoch：session.ts isCurrent 的 tokenDigest 比较不能删；ws.ts reconcileOwners 不得再把旧 owner 的 epoch 升到权威记录的值。恢复码轮换后旧 socket 必须失效。
+- 新 join 持久化时带 pendingDelivery=true，joined 送达并确认后才转 false；未交付的座位/会话在断线、durablePending 对齐、启动载入时一律撤销，房主被撤销要按最低座位重选，不能留无 token 房主。
+- atomicCommit=true 时 version 未变化的拒绝/冲突不缓存、不进快照、不占 5000 容量；只有提交成功的结果才落盘（command-queue.ts 的提前 return 不能删）。
+- GAME_OVER 恢复必须沿用原 lastEvents（含 BET_SETTLED.drawResult），不 bump version/eventSeq、不重开奖。
+- rename 成功后任何异常（临时文件清理失败、publish/emit 失败）不得回滚已提交状态；transact 必须区分"存储失败"与"发布失败"。
+- validateSnapshot 的 S2 清单（lenderId/时限有限数/座位与 pending 引用/roomState-game-host 一致性/摘要唯一/commands≤5000/lastEvents 结构）不得删减；pendingDelivery 只允许出现在 LOBBY。
 
 【05F 不得回退的点】
 - bankBorrowLimitCents = min(floor(金币/2), MAX_MONEY_CENTS - 金币)：engine.ts:1340-1345 的入账上限是硬约束，
@@ -66,9 +75,11 @@ https://reservations-decimal-peas-indexed.trycloudflare.com（2026-11-05 重启�
 1) 05B 真机复测：按 handoff/单元05B-试玩清单.txt 记录等待/卡点，重点看 05E 提示可见性与 05F 额度数字/禁用态。
 2) 05F 复核已处理（handoff/复核-单元05F.txt）：1 must-fix + 4 should-fix 已修复并全量验证；
    未重拍 360px 截图、“借到贷款后额度 0”只做了单测，并入 05B。
-3) 单元 06 已完成并验收（Codex 实现，Lead 复核）：证据 artifacts/test-logs/06-*；Lead 另外亲手跑通
-   真实 CLI 重启（POST /api/rooms → taskkill /T /F → 重启 → /api/rooms 显示房间 paused:true），
-   并抽查临时目录快照无 token/recoveryCode 原文。未做硬件断电/弱网/多进程同写，不作为承诺。
-   06 的独立复核（Qoder 或第二批故障注入）尚未做，发现新问题按 06 注意事项修复，不要回退上述约束。
+3) 单元 06 已完成、已独立复核并完成复核修复（Codex 实现 → Lead 验收 → Qoder 只读复核 → Codex 修复 → Lead 复验）。
+   证据：artifacts/test-logs/06-*（初版）与 06fix-*（修复）；复核意见 handoff/复核-单元06.txt；
+   逐条修复记录 handoff/单元06-复核修复记录.txt（M1–M4、S1–S6 已修，S7/N2–N6 未处理并写明原因）。
+   Lead 亲手跑通真实 CLI 重启与快照秘密扫描；未做硬件断电/弱网/多进程同写/大规模压测，不作为承诺。
+   遗留 nit：大厅事件不写 events.ndjson（S7）、web 旧"重启丢房"提示（N2）、客户端拒收低 version 快照（N3，
+   07 处理）、无待办中间态多等窗口（N4）、corrupt 目录移动失败阻断启动（N5）、copyFile 备份不承诺物理断电（N6）。
 4) 07A 债务中心、07B 赌博/到期/自救/结算界面（交 Trae）；08 教程/手机适配/音频；09 加固/跨网/验证一键发布包。
 并行约束：同一仓库同时只让一个 AI 改代码；Qoder 只读复核可与之并行，但复核对象要写清 commit。
