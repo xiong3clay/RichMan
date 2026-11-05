@@ -140,4 +140,6 @@ N9：没有新增手机CSS真机记录；N1/N7/N8/N10已随对应M/S修正。
 - 授权改正的两条旧断言（persistence.test.ts）：after_rename_identity_write、stale_owner_not_revived；
   理由是新行为才是正确语义（旧 token 不得复活、失败 join 不得留座），已在 handoff/项目当前状态.txt 记录，供下一次复核对照。
 - 我同意本轮不处理 S7 / N2–N6 的理由；N3 归入 07，其余作为已知限制，不当作“已解决”。
-- 线上服务尚未重启，重启后会用本提交的代码；验收顺序：先重启 RichManServer，再用房间码+恢复码走一次真实暂停→恢复。
+- 已用 dfcfb27 重启线上服务（计划任务 RichManServer）：POST /api/rooms 建房 → /End 终止 → /Run 重启 →
+  GET /api/rooms 返回该房间 paused:true，证明落盘与“重启即暂停”在新代码下生效；随后清理测试房间并再重启，/health rooms=0、隧道 /health 200。
+- 真机“暂停→房主 resume_game→继续”仍需在 05B 真人局里走一次；本轮只用 server 集成测试（review06-resume）覆盖各阶段的 resume。

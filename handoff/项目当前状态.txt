@@ -67,7 +67,7 @@ pnpm smoke:lan PASS（05D 验收时）
 【运行环境】
 服务器与隧道由 Windows 计划任务托管（RichManServer / RichManTunnel，需 -AllowStartIfOnBatteries
 -DontStopIfGoingOnBatteries）。当前隧道地址：
-https://reservations-decimal-peas-indexed.trycloudflare.com（2026-11-05 重启用；域名每次重启会变）
+https://alt-gravity-cloudy-directors.trycloudflare.com（2026-11-05 22:51 重启用；域名每次重启会变）
 校园网 sdu_net 有客户端隔离，手机必须走隧道，不能直连 10.25.241.x:8000；
 换域名后 sessionStorage token 失效，用「房间码 + 恢复码」恢复。
 
@@ -79,6 +79,7 @@ https://reservations-decimal-peas-indexed.trycloudflare.com（2026-11-05 重启�
    证据：artifacts/test-logs/06-*（初版）与 06fix-*（修复）；复核意见 handoff/复核-单元06.txt；
    逐条修复记录 handoff/单元06-复核修复记录.txt（M1–M4、S1–S6 已修，S7/N2–N6 未处理并写明原因）。
    Lead 亲手跑通真实 CLI 重启与快照秘密扫描；未做硬件断电/弱网/多进程同写/大规模压测，不作为承诺。
+   Lead 另用线上端口实测：POST /api/rooms 建房 → 终止/重启计划任务 → GET /api/rooms 显示 paused:true → 清理测试房间。
    遗留 nit：大厅事件不写 events.ndjson（S7）、web 旧"重启丢房"提示（N2）、客户端拒收低 version 快照（N3，
    07 处理）、无待办中间态多等窗口（N4）、corrupt 目录移动失败阻断启动（N5）、copyFile 备份不承诺物理断电（N6）。
 4) 07A 债务中心、07B 赌博/到期/自救/结算界面（交 Trae）；08 教程/手机适配/音频；09 加固/跨网/验证一键发布包。
