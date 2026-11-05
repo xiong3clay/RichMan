@@ -1221,25 +1221,9 @@ function GameSessionView({ roomCode, hostId = null, view, client, status, status
     </section>;
   }
 
-  return (
-    <div className="game">
-      <header className="game-top">
-        <div>
-          <p className="eyebrow">房间 {roomCode}</p>
-          <p className="top-line">
-            第 {view.round} 轮 · {stageHeadline(view)}
-            <span className="top-sep">·</span>
-            剩余 <Countdown deadlineAt={view.deadlineAt} {...countdownProps} />
-          </p>
-        </div>
-        <div className={"conn " + status} title={statusDetail ?? undefined}>
-          <span className={"dot " + status} />
-          {CONN_LABELS[status]}
-        </div>
-      </header>
-
-      {phaseToast !== null ? <div className="phase-toast">{phaseToast}</div> : null}
-
+  /** 命令结果/服务端 error/本地校验提示放在顶部吸顶区，滚动到操作卡后仍然可见。 */
+  const feedback = (
+    <>
       {resultVisible && result !== null ? (
         <div className={"banner " + (result.outcome.ok ? (resultKind === "accept" || resultKind === "bankDue" || resultKind === "giveUp" ? "info" : "ok") : "fail")}>
           <span>
@@ -1274,21 +1258,49 @@ function GameSessionView({ roomCode, hostId = null, view, client, status, status
           </button>
         </div>
       ) : null}
-      {eventNotices.map((item) => (
-        <div className={"banner " + item.tone} role="status" key={item.id}>
-          <span>{item.text}</span>
-          <button
-            type="button"
-            className="link"
-            onClick={() => {
-              dismissEventNotice(noticeHistoryRef.current, item.id);
-              refreshNotices(tick => tick + 1);
-            }}
-          >
-            关闭
-          </button>
-        </div>
-      ))}
+    </>
+  );
+
+  return (
+    <div className="game">
+      <div className="game-sticky">
+        <header className="game-top">
+          <div>
+            <p className="eyebrow">房间 {roomCode}</p>
+            <p className="top-line">
+              第 {view.round} 轮 · {stageHeadline(view)}
+              <span className="top-sep">·</span>
+              剩余 <Countdown deadlineAt={view.deadlineAt} {...countdownProps} />
+            </p>
+          </div>
+          <div className={"conn " + status} title={statusDetail ?? undefined}>
+            <span className={"dot " + status} />
+            {CONN_LABELS[status]}
+          </div>
+        </header>
+        {feedback}
+        {eventNotices.length > 0 ? (
+          <div className="notice-shelf" role="status">
+            {eventNotices.slice(0, 4).map((item) => (
+              <div className={"banner " + item.tone} key={item.id}>
+                <span>{item.text}</span>
+                <button
+                  type="button"
+                  className="link"
+                  onClick={() => {
+                    dismissEventNotice(noticeHistoryRef.current, item.id);
+                    refreshNotices(tick => tick + 1);
+                  }}
+                >
+                  关闭
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+
+      {phaseToast !== null ? <div className="phase-toast">{phaseToast}</div> : null}
 
       <section className="panel self-panel">
         <div className="self-head">
@@ -1338,12 +1350,14 @@ function GameSessionView({ roomCode, hostId = null, view, client, status, status
         </div>
       </section>
 
-      {step.kind === "gameOver" ? renderStep(step) : !canSubmit ? <section className="panel wizard">
-        <p className="eyebrow">连接未就绪</p><h2 className="question">连接恢复后才能继续操作</h2>
-        <p className="step-hint">当前仅显示最后一次快照；重连后以服务端最新状态重新确认。</p>
-      </section> : currentConfirmation !== null ? renderConfirm(currentConfirmation) : abandonPending && step.kind === "betting" ?
-        <section className="panel wizard"><p className="eyebrow">下注</p><h2 className="question">正在提交放弃…</h2>
-          <p className="step-hint">等待服务端确认锁定。</p></section> : renderStep(step)}
+      <section className="stage">
+        {step.kind === "gameOver" ? renderStep(step) : !canSubmit ? <section className="panel wizard">
+          <p className="eyebrow">连接未就绪</p><h2 className="question">连接恢复后才能继续操作</h2>
+          <p className="step-hint">当前仅显示最后一次快照；重连后以服务端最新状态重新确认。</p>
+        </section> : currentConfirmation !== null ? renderConfirm(currentConfirmation) : abandonPending && step.kind === "betting" ?
+          <section className="panel wizard"><p className="eyebrow">下注</p><h2 className="question">正在提交放弃…</h2>
+            <p className="step-hint">等待服务端确认锁定。</p></section> : renderStep(step)}
+      </section>
 
       {finance.privateLoans.length > 0 ? (
         <section className="panel">

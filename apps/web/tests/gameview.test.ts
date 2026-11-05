@@ -135,7 +135,8 @@ describe("F1 命令结果与事件通知只显示一次", () => {
     await mounted.update(createElement(GameView, props));
     expect(mounted.text()).toContain("你的余额不足");
     expect(mounted.text().match(/未转账/g)).toHaveLength(2);
-    expect(mounted.container.querySelectorAll(".banner")[0]?.textContent).toContain("未成立");
+    expect(mounted.container.querySelector(".game-sticky .banner")?.textContent).toContain("未成立");
+    expect(mounted.container.querySelector(".notice-shelf .banner")?.textContent).toContain("未转账");
   });
 });
 
@@ -241,18 +242,20 @@ it("50%提示实际出现在本人面板、银行问题和银行金额页，禁�
   expect(mounted.container.querySelector(".self-panel")?.textContent).not.toContain(hint);
 });
 
-it("F3 到期结果横幅位于事件通知之前，兜底文案不指向上方", async () => {
+it("F3 到期结果横幅与失信事件都在顶部吸顶区，兜底文案不指向上方", async () => {
   const props = gameProps(inPhase("BANK_DUE")); props.view.eventSeq = 4;
   mounted = await mountDom(createElement(GameView, props));
   await mounted.click("拒绝还款"); await mounted.click("确认拒绝并失信");
   props.result = okResult;
   props.events = [gameEvent(5, "BANK_LOAN_DEFAULTED", { loanId: "another-bank", borrowerId: "p1", reason: "timeout" })];
   await mounted.update(createElement(GameView, props));
-  const banners = mounted.container.querySelectorAll(".banner");
-  expect(banners).toHaveLength(2);
-  expect(banners[0]?.textContent).toContain("到期决策已提交");
-  expect(banners[1]?.textContent).toContain("到期超时未处理");
-  expect(banners[0]?.textContent).not.toContain("上方");
+  const resultBanner = mounted.container.querySelector(".game-sticky .banner");
+  const shelfBanners = mounted.container.querySelectorAll(".notice-shelf .banner");
+  expect(shelfBanners).toHaveLength(1);
+  expect(resultBanner?.textContent).toContain("到期决策已提交");
+  expect(shelfBanners[0]?.textContent).toContain("到期超时未处理");
+  expect(resultBanner?.textContent).not.toContain("上方");
+  expect(mounted.container.querySelector(".stage .banner")).toBeNull();
 });
 it("status=open但hasJoined=false时五阶段操作区均无提交按钮", () => {
   for (const phase of phases) {
@@ -272,4 +275,99 @@ it("F4 只有DEFAULTED债务和全局计息事件时，跨轮结算卡不渲染�
   expect(mounted.text()).not.toContain("本轮有贷款计息");
   expect(mounted.container.querySelectorAll(".overlay-card")).toHaveLength(1);
   expect(mounted.text()).toContain("本轮没有利息、税或下注结算事件");
+});
+
+const failResult = { type: "command_result" as const, commandId: "command-1", gameId: "render-game",
+  gameVersion: 2, outcome: { ok: false as const, code: "INVALID_AMOUNT", message: "金额超过可借上限" } };
+
+/** 直接子节点的 class 序列，用于断言操作区确实在 .self-panel 之后。 */
+function directChildClasses(element: NonNullable<ReturnType<Awaited<ReturnType<typeof mountDom>>["container"]["querySelector"]>>): string[] {
+  const nodes = (element as unknown as { childNodes: Array<{ className?: string }> }).childNodes;
+  return Array.from(nodes, node => node.className ?? "");
+}
+
+async function goToBankAmount(dom: Awaited<ReturnType<typeof mountDom>>): Promise<void> {
+  await dom.click("跳过");
+  await dom.click("是，输入金额");
+}
+
+describe("05E 移动端提示可见性", () => {
+  it("R1 借款失败结果横幅在 .game-sticky 吸顶区内，滚动到操作卡后仍可见", async () => {
+    const props = gameProps();
+    props.client = { ...props.client, borrowBank: () => "command-1" } as unknown as RichmanClient;
+    mounted = await mountDom(createElement(GameView, props));
+    await goToBankAmount(mounted);
+    await mounted.input("借款金额（分）", "13000");
+    await mounted.click("确认借款");
+    props.result = failResult;
+    await mounted.update(createElement(GameView, props));
+
+    const sticky = mounted.container.querySelector(".game-sticky");
+    const stickyBanner = sticky?.querySelector(".banner");
+    expect(stickyBanner?.textContent).toContain("INVALID_AMOUNT");
+    expect(stickyBanner?.textContent).toContain("金额超过可借上限");
+    // header 之后紧跟结果横幅，保证吸顶区把错误显示在折叠线以上
+    const stickyChildren = directChildClasses(sticky!);
+    expect(stickyChildren.indexOf("game-top")).toBeLessThan(stickyChildren.indexOf("banner fail"));
+
+    const game = mounted.container.querySelector(".game");
+    expect(game).not.toBeNull();
+    const classes = directChildClasses(game!);
+    expect(classes.indexOf("game-sticky")).toBeLessThan(classes.indexOf("panel self-panel"));
+    expect(classes.indexOf("stage")).toBeGreaterThan(classes.indexOf("panel self-panel"));
+    expect(mounted.container.querySelector(".stage .banner")).toBeNull();
+  });
+
+  it("R1 本地校验失败 notice 同样进入吸顶区可见", async () => {
+    mounted = await mountDom(createElement(GameView, gameProps()));
+    await goToBankAmount(mounted);
+    await mounted.input("借款金额（分）", "0");
+    await mounted.click("确认借款");
+    expect(mounted.container.querySelector(".game-sticky .banner")?.textContent).toContain("借款金额必须是大于 0");
+    expect(mounted.container.querySelector(".stage .banner")).toBeNull();
+  });
+
+  it("R2 事件提示在 .notice-shelf 常驻，跨阶段保留，关闭后消失", async () => {
+    const props = gameProps();
+    props.events = [
+      gameEvent(5, "LOAN_REQUESTED", { requestId: "req-1", borrowerId: "p1", lenderId: "p2" }),
+      gameEvent(6, "LOAN_REQUEST_CLOSED", { requestId: "req-1", status: "REFUSED" }),
+    ];
+    mounted = await mountDom(createElement(GameView, props));
+    expect(mounted.container.querySelector(".notice-shelf .banner")?.textContent).toContain("被拒绝");
+
+    props.view = { ...viewFixture(), phase: "BETTING", phaseInstanceId: "round1-bet-1" };
+    await mounted.update(createElement(GameView, props));
+    expect(mounted.container.querySelector(".notice-shelf .banner")?.textContent).toContain("被拒绝");
+
+    await mounted.click("关闭");
+    expect(mounted.container.querySelector(".notice-shelf")).toBeNull();
+  });
+
+  it("R2 无事件提示时不渲染 .notice-shelf 占位", async () => {
+    mounted = await mountDom(createElement(GameView, gameProps()));
+    expect(mounted.container.querySelector(".notice-shelf")).toBeNull();
+  });
+
+  it("R2 header、结果横幅与通知架同处 .game-sticky，顺序为 header→横幅→通知架", async () => {
+    const props = gameProps();
+    props.view.eventSeq = 4;
+    props.events = [
+      gameEvent(5, "LOAN_REQUESTED", { requestId: "req-1", borrowerId: "p1", lenderId: "p2" }),
+      gameEvent(6, "LOAN_REQUEST_CLOSED", { requestId: "req-1", status: "REFUSED" }),
+    ];
+    mounted = await mountDom(createElement(GameView, props));
+    expect(mounted.container.querySelector(".notice-shelf")).not.toBeNull();
+    await goToBankAmount(mounted);
+    await mounted.input("借款金额（分）", "0");
+    await mounted.click("确认借款");
+    const sticky = mounted.container.querySelector(".game-sticky");
+    expect(sticky).not.toBeNull();
+    expect(sticky?.querySelector(".game-top")).not.toBeNull();
+    const classes = directChildClasses(sticky!);
+    expect(classes.indexOf("game-top")).toBeGreaterThanOrEqual(0);
+    expect(classes.indexOf("game-top")).toBeLessThan(classes.indexOf("banner fail"));
+    expect(classes.indexOf("banner fail")).toBeLessThan(classes.indexOf("notice-shelf"));
+    expect(mounted.container.querySelector(".stage .banner")).toBeNull();
+  });
 });

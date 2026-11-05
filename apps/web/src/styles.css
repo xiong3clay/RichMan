@@ -406,12 +406,48 @@ p {
 /* 05C 引导式操作界面                                                    */
 /* ------------------------------------------------------------------ */
 
-.game-top {
-  align-items: center;
+.game-sticky {
+  display: flex;
+  flex-direction: column;
   position: sticky;
   top: 0;
-  z-index: 5;
+  z-index: 6;
+  max-height: 45vh;
+  gap: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: #0f1720;
+  border-bottom: 1px solid #1e2b3a;
+  box-shadow: 0 8px 14px rgba(0, 0, 0, 0.35);
+  padding: 8px 0 4px;
+}
+
+/* sticky 由 .game-sticky 承担，header 不再自身吸顶，避免两层叠加错位。 */
+.game-top {
+  flex: none;
+  align-items: center;
   backdrop-filter: blur(6px);
+}
+
+.notice-shelf {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 0 1 auto;
+  min-height: 0;
+  margin: 6px 0 10px;
+  max-height: 32vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.notice-shelf .banner,
+.game-sticky > .banner {
+  margin-bottom: 0;
+}
+
+.stage {
+  min-width: 0;
 }
 
 .top-line {
@@ -586,13 +622,24 @@ p {
 
 .banner {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
 }
 
+.banner > span {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+
 .banner .link {
   flex: none;
+  display: grid;
+  place-items: center;
+  min-width: 44px;
+  min-height: 44px;
 }
 
 .phase-toast {
