@@ -111,9 +111,13 @@ it('after_rename_identity_write: 未应答已提交账在暂停恢复码轮换�
     expect(await failedRecovery.next('error')).toMatchObject({code:'ERROR_PAUSED'});
     await a.p.next('error');h.store.options.failAt=undefined;
     a.p.send({type:'resume_game'});
-    const view=(await a.p.next('snapshot',m=>m.view.paused===false&&m.view.version>1)).view;
+    expect(await a.p.next('error')).toMatchObject({code:'NOT_JOINED'});
+    a.p.send(command({gameId:h.server().manager.getGame(code)!.gameId,version:1},'revoked-old'));
+    expect(await a.p.next('error')).toMatchObject({code:'NOT_JOINED'});
+    const fresh=await h.connect(code,{recoveryCode:a.joined.recoveryCode});fresh.p.send({type:'resume_game'});
+    const view=(await fresh.p.next('snapshot',m=>m.view.paused===false&&m.view.version>1)).view;
     const original=command(view,'committed-unacked');
-    h.store.options.failAt='after_rename';a.p.send(original);expect(await a.p.next('error')).toMatchObject({code:'ERROR_PAUSED'});
+    h.store.options.failAt='after_rename';fresh.p.send(original);expect(await fresh.p.next('error')).toMatchObject({code:'ERROR_PAUSED'});
     expect(h.server().manager.getGame(code)!.players[0]!.cents).toBe(10000);
     h.store.options.failAt=undefined;const rotated=await h.connect(code,{recoveryCode:a.joined.recoveryCode});
     await h.restart();const restored=await h.connect(code,{sessionToken:rotated.joined.sessionToken});
@@ -124,6 +128,7 @@ it('after_rename_identity_write: 未应答已提交账在暂停恢复码轮换�
   }finally{h.store.options.failAt=undefined;await failedRecovery?.close();await h.close();}
 });
 it('stale_owner_not_revived: 连续rename后失败与大厅座位复用不能使旧连接接管新身份', async()=>{
+  // 原断言要求失败 join 留座，属 M2 错误行为，2026-11-05 修正。
   const h=await diskHarness();let newcomer:Peer|undefined;
   try{
     const base=`http://127.0.0.1:${h.server().port}`;
@@ -133,15 +138,29 @@ it('stale_owner_not_revived: 连续rename后失败与大厅座位复用不能使
     expect(await a.p.next('error')).toMatchObject({code:'ERROR_PAUSED'});
     await b.p.next('error');
     newcomer=await new Peer(`ws://127.0.0.1:${h.server().port}/ws?room=${code}`).open();
+    let failedDigest='';
+    h.store.options.checkpoint=async point=>{if(point==='after_rename'){
+      const saved=JSON.parse(await readFile(path.join(h.dir,'rooms',code,'snapshot.json'),'utf8'));
+      failedDigest=saved.players.find((p:any)=>p.nickname==='新身份')?.tokenDigest??failedDigest;
+    }};
     newcomer.send({type:'join',nickname:'新身份'});
     expect(await newcomer.next('error')).toMatchObject({code:'ERROR_PAUSED'});
-    h.store.options.failAt=undefined;
+    h.store.options.failAt=undefined;h.store.options.checkpoint=undefined;
     a.p.send({type:'ready',ready:true});
     expect(await a.p.next('error')).toMatchObject({code:'NOT_JOINED'});
     b.p.send({type:'ready',ready:true});
     const room=await b.p.next('room',m=>m.players.find((p:any)=>p.playerId===b.joined.playerId)?.ready===true);
-    const replacement=room.players.find((p:any)=>p.playerId===a.joined.playerId);
-    expect(replacement.nickname).toBe('新身份');expect(replacement.ready).toBe(false);
+    expect(room.players.some((p:any)=>p.nickname==='新身份')).toBe(false);
+    expect(h.server().manager.sessionRecords().some(r=>r.playerId===a.joined.playerId)).toBe(false);
+    expect(room.hostId).toBe(b.joined.playerId);
+    await h.restart();expect(h.server().manager.getRoom(code)!.players.some(p=>p.playerId===a.joined.playerId)).toBe(false);
+    expect(h.server().manager.sessionRecords().some(r=>r.playerId===a.joined.playerId)).toBe(false);
+    const returned=await h.connect(code,{sessionToken:b.joined.sessionToken}),newJoin=await h.connect(code);
+    expect(newJoin.joined.sessionToken).toBeTruthy();
+    expect(failedDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(h.server().manager.matchesIdentity(code,newJoin.joined.playerId,failedDigest)).toBe(false);
+    newJoin.p.send({type:'ready',ready:true});await returned.p.next('room',m=>m.players.every((p:any)=>p.ready));
+    returned.p.send({type:'start'});await returned.p.next('started');
   }finally{h.store.options.failAt=undefined;await newcomer?.close();await h.close();}
 });
 it('orphan_events: 多3行不重放，断号/坏行/缺行均告警且保留权威快照', async()=>{

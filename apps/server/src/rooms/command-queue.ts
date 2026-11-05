@@ -111,6 +111,7 @@ export class GameCommandProcessor {
       if (!result.outcome.ok && result.outcome.code === 'RULE_INVARIANT') this.options.onInvariant?.(roomCode);
 
       const record = { payloadHash, reply: structuredClone(reply) };
+      if (this.options.atomicCommit && result.state.version === state.version) return reply;
       if (!this.options.atomicCommit) this.store.set(key, record);
       try {
         if (result.state.version !== state.version) await this.options.commit(roomCode, result, { key, record });

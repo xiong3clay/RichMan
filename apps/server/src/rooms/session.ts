@@ -8,6 +8,8 @@ export interface SessionIdentity {
   roomCode: string;
   playerId: string;
   seatId: number;
+  /** 固定于认证时，不能随权威恢复升级旧连接。 */
+  tokenDigest?: string;
 }
 
 /** 04 的内存记录；06 可通过同一接口注入持久化存储，原始秘密永不写入。 */
@@ -15,6 +17,7 @@ export interface SessionRecord extends SessionIdentity {
   tokenDigest: string;
   recoveryDigest: string;
   connectionEpoch: number;
+  pendingDelivery?: boolean;
 }
 
 export interface SessionStore {
@@ -146,10 +149,16 @@ export class SessionRegistry {
     return connectionEpoch;
   }
 
+  delivery(identity: SessionIdentity, pending: boolean): void {
+    const record = this.resolve(identity);
+    this.store.save({ ...record, pendingDelivery: pending });
+  }
+
   isCurrent(identity: SessionIdentity, epoch: number): boolean {
     const record = this.store.getByIdentity(identity.roomCode, identity.playerId);
     return this.validForRoom(record, identity.roomCode)
       && record.seatId === identity.seatId
+      && (identity.tokenDigest === undefined || identity.tokenDigest === record.tokenDigest)
       && record.connectionEpoch === epoch;
   }
 

@@ -11,7 +11,7 @@ import { createInitialState, RULES_VERSION, resumeFromPause } from "@richman/gam
 import { PROTOCOL_VERSION } from '@richman/shared';
 import type { GameEvent, TransitionResult } from '@richman/shared';
 import type { RoomSnapshot, RoomStore } from '../storage/types.js';
-import { RoomCommitError } from '../storage/types.js';
+import { RoomCommitError, discardPendingDeliveries } from '../storage/types.js';
 import type { SessionRecord } from './session.js';
 import type { CommandResultRecord } from './command-queue.js';
 import type { EngineState } from "@richman/game-core";
@@ -154,8 +154,20 @@ export class RoomManager {
   }
   reconcileDurable(code: string): boolean {
     const pending = this.durablePending.get(code);
-    if (pending) { this.restoreRoom({ ...pending, paused: true }); this.durablePending.delete(code); return true; }
+    if (pending) { discardPendingDeliveries(pending); this.restoreRoom({ ...pending, paused: true }); this.durablePending.delete(code); return true; }
     return false;
+  }
+  async discardUndelivered(code: string): Promise<void> {
+    this.reconcileDurable(code);
+    const snapshot = this.exportRoom(code);
+    if (!snapshot) return;
+    discardPendingDeliveries(snapshot);
+    this.restoreRoom(snapshot);
+    // 若补偿也写失败，磁盘pending标记仍让下次启动安全撤销；不得恢复成正式座位。
+    try { if (this.store) await this.store.commitRoom(code, snapshot, []); }
+    catch (error) {
+      if (error instanceof RoomCommitError && error.durable) this.durablePending.set(code,error.durable);
+    }
   }
   private storageFailed(code: string, before: RoomSnapshot | null, error: unknown): never {
     if (before) this.restoreRoom(before); else this.rooms.delete(code);
@@ -170,12 +182,14 @@ export class RoomManager {
   async transact<T>(code: string, action: () => T, publish?: () => void): Promise<T> {
     this.reconcileDurable(code);
     const before = this.exportRoom(code); this.deferred.set(code, []);
+    let committed: RoomSnapshot | null | undefined;
     try {
       const result = action();
       const candidate = this.exportRoom(code);
       // 候选已捕获，await前撤回共享可见态，身份与账务都只在持久成功后发布。
       if (before) this.restoreRoom(before); else this.rooms.delete(code);
       if (this.store) { if (candidate) await this.store.commitRoom(code, candidate, []); else await this.store.deleteRoom(code); }
+      committed = candidate;
       if (candidate) this.restoreRoom(candidate); else {
         this.rooms.delete(code); for (const [key, roomCode] of this.sessions) if (roomCode === code) this.sessions.delete(key);
       }
@@ -185,6 +199,11 @@ export class RoomManager {
       return result;
     } catch (error) {
       this.deferred.delete(code);
+      if (committed !== undefined) {
+        // 发布失败不能撤销已提交身份/账本，保留权威点并暂停，供重新认证/重试。
+        if (committed) { this.restoreRoom(committed); this.rooms.get(code)!.paused = true; }
+        throw new LobbyError('ERROR_PAUSED','提交已保存，发布失败，请重新连接');
+      }
       if (error instanceof LobbyError) { if (before) this.restoreRoom(before); throw error; }
       return this.storageFailed(code, before, error);
     }
@@ -192,7 +211,11 @@ export class RoomManager {
   async createRoomPersisted(): Promise<string> {
     const code = this.createRoom();
     try { await this.persist(code); return code; }
-    catch { this.rooms.delete(code); throw new LobbyError('ERROR_PAUSED', '存档写入失败，建房未完成'); }
+    catch {
+      this.rooms.delete(code);
+      if (this.store) await this.store.deleteRoom(code);
+      throw new LobbyError('ERROR_PAUSED', '存档写入失败，建房未完成');
+    }
   }
   async commitTransition(code: string, result: TransitionResult, command?: {key: string; record: CommandResultRecord}): Promise<void> {
     const before = this.exportRoom(code); if (!before) throw new Error('房间不存在');
@@ -202,8 +225,14 @@ export class RoomManager {
     }
     try { if (this.store) await this.store.commitRoom(code, candidate, result.events); }
     catch (error) { this.storageFailed(code, before, error); }
-    const r = this.rooms.get(code)!; Object.assign(r.game!, result.state); r.lastEvents = structuredClone(result.events);
-    if (command) this.setCommand(command.key, command.record);
+    try {
+      const r = this.rooms.get(code)!; Object.assign(r.game!, result.state); r.lastEvents = structuredClone(result.events);
+      if (command) this.setCommand(command.key, command.record);
+    } catch (error) {
+      // 快照已包含原reply，缓存/发布异常不能丢弃它或让下一次写入覆盖它。
+      this.restoreRoom(candidate); this.rooms.get(code)!.paused = true;
+      throw new LobbyError('ERROR_PAUSED','提交已保存，发布失败，请重新连接');
+    }
   }
   async resumeGame(code: string, id: string, nowMs: number): Promise<GameEvent[]> {
     this.reconcileDurable(code);
@@ -212,9 +241,10 @@ export class RoomManager {
     if (!room.paused || room.state !== ROOM_STATE.PLAYING || !room.game) throw new LobbyError('INVALID_STATE', '当前对局不能继续');
     const next = resumeFromPause(room.game, { nowMs });
     const events: GameEvent[] = next === room.game ? [] : [{ seq: next.eventSeq, type: 'GAME_RESUMED', at: new Date(nowMs).toISOString(), payload: { code: 'GAME_RESUMED' } }];
-    const before = this.exportRoom(code)!; const candidate = { ...before, paused: false, game: next, lastEvents: events };
+    const before = this.exportRoom(code)!; const lastEvents = next === room.game ? before.lastEvents : events;
+    const candidate = { ...before, paused: false, game: next, lastEvents };
     try { if (this.store) await this.store.commitRoom(code, candidate, events); } catch (e) { this.storageFailed(code, before, e); }
-    Object.assign(room.game, next); room.paused = false; room.lastEvents = events;
+    Object.assign(room.game, next); room.paused = false; room.lastEvents = lastEvents;
     this.emit({ type: 'room', roomCode: code, room: this.viewOf(room) }); return events;
   }
   private readonly rooms = new Map<string, RoomRecord>();

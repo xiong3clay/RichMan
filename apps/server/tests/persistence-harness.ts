@@ -43,7 +43,10 @@ export async function diskHarness(options: FileStoreOptions = {}) {
   const connect = async (code: string, credentials?: Record<string, string>) => {
     const p = await new Peer(`ws://127.0.0.1:${server.port}/ws?room=${code}`).open(); peers.push(p);
     p.send(credentials ? {type: 'resume', roomCode: code, ...credentials} : {type: 'join', nickname: '玩家' + peers.length});
-    return { p, joined: await p.next('joined') };
+    const joined = await p.next('joined');
+    // joined后还有交付确认落盘；room是bind完成屏障，避免下一次故障注入抢到确认事务。
+    await p.next('room');
+    return { p, joined };
   };
   const restart = async () => { await server.close(); await Promise.all(peers.splice(0).map(p => p.close()));
     server = await startServer({ port: 0, host: '0.0.0.0', store, wsOptions: { now: () => now } }); };

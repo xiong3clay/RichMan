@@ -4,6 +4,8 @@ import path from 'node:path';
 export interface AtomicOptions {
   failAt?: 'before_rename' | 'after_rename';
   checkpoint?: (point: 'before_rename' | 'after_rename') => void | Promise<void>;
+  failCleanup?: boolean;
+  warn?: (message: string) => void;
 }
 export class AtomicWriteError extends Error {
   constructor(readonly committed: boolean, options: ErrorOptions) { super('快照提交失败', options); }
@@ -26,5 +28,8 @@ export async function writeSnapshotAtomic(filePath: string, value: unknown, opti
     await options.checkpoint?.('after_rename');
     if (options.failAt === 'after_rename') throw new Error('injected after_rename');
   } catch (cause) { throw new AtomicWriteError(committed, { cause }); }
-  finally { await rm(temp, { force: true }); }
+  finally {
+    try { if (options.failCleanup) throw new Error('injected cleanup'); await rm(temp, { force: true }); }
+    catch { try { (options.warn ?? console.warn)('存档临时文件清理失败'); } catch { /* 诊断不能改变提交结果。 */ } }
+  }
 }
