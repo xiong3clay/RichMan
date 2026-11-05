@@ -3,11 +3,13 @@
 1. jsdom 没有布局引擎：测试只能断言 DOM 位置与选择器，不能证明“首屏可见”。
    360×640 的真实位置必须人工/截图验收，勿用测试全绿替代。
 2. sticky 高度预算：header 106px + 结果横幅 66px + 通知架 60px ≈ 232px；360×640 实测吸顶区 288px、
-   390×844 为 294px，均在 max-height:45vh 内。.game-sticky 自身 overflow-y:auto + 子项 flex:none，
-   .notice-shelf 另设 32vh/内部滚动；给 header 或横幅加行必须重新核对 45vh 上限。
+   390×844 为 294px，均在 max-height:45vh 内。.game-sticky 自身 overflow-y:auto；其中只有 .game-top
+   是 flex:none，横幅与 .notice-shelf 是 flex:0 1 auto（可被压缩），.notice-shelf 另设 32vh/内部滚动。
+   给 header 或横幅加行必须重新核对 45vh 上限。
    实测 288px 已占 640 屏的 45%，若再高会挤掉操作卡，不能再往上加内容。
-3. 关闭按钮 44×44 会把单条 banner 高度抬到约 64px；4 条时通知架内部滚动是预期行为，
-   不是 bug。不要把按钮触控区改回小尺寸。
+3. 关闭按钮 44×44 会把单条 banner 高度抬到约 64px，因此反馈区只渲染一条（优先级
+   本地 notice > error > result）：否则两三条横幅会把通知架挤到接近 0 高。通知架自身最多 4 条、
+   内部滚动是预期行为，不是 bug。不要把按钮触控区改回小尺寸，也不要改回多横幅并排。
 4. .notice-shelf 渲染时已 slice(0,4) 兜底；通知历史本身也限制 4 条。两处都保留，防止未来
    派生逻辑变化后通知架无限增高。
 5. 结果 banner 色：accept/bankDue/giveUp 为 info，普通成功 ok，失败 fail；位置移动不改颜色语义。
@@ -18,7 +20,13 @@
 7. 不要再给 .game-top 加 position:sticky；吸顶由 .game-sticky 单独承担，否则两层叠加错位。
    .game-sticky 的内边距是 padding:8px 0 4px，左右留白由 .app 的 padding 提供，别在 sticky 上加重排
    导致与页面左右边距不一致。
-8. phase-toast 仍是 fixed 顶部 84px 的临时提示（既有实现），它不覆盖操作卡按钮；
-   若未来调整，需避免与 .game-sticky 重叠。
+8. phase-toast 仍是 fixed 顶部 84px 的临时提示（既有实现），它可能短暂盖住结果横幅，但不覆盖
+   操作卡按钮；Qoder 复核按“既有实现、可接受”记录。若未来调整，需避免与 .game-sticky 重叠。
 9. 视觉验收脚本（Edge headless CDP + 临时 fixture）不提交；验收后必须 git checkout 还原
-   apps/web/tests/ui-preview.tsx，并用 git status 确认它不在改动列表里。
+   apps/web/tests/ui-preview.tsx，并用 git status 确认它不在改动列表里。该夹具不含生产页面
+   fixed .footer，截图不能当作完整生产布局证据。
+10. 反馈语义改动过：05C 的“同一 commandId 只显示一次”去重、FAILED/REFUSED 常驻、
+   DANGER_RESCUED 的 2.5s TTL 都没动，只改了“同时最多显示一条”的展示策略；
+   改这块前先看 gameview.test.ts 的“05E 复核修复”3 条用例。
+11. styles-05e.test.ts 是 CSS 契约测试：删 sticky/45vh/44px/overflow-wrap 会直接失败，
+   改样式时必须同步改契约，不允许删用例了事。

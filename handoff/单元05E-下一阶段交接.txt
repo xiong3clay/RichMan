@@ -4,8 +4,8 @@
 <div className="game">
   <div className="game-sticky">        // sticky top:0, z-index:6, max-height:45vh, overflow-y:auto
     <header className="game-top">…</header>
-    <feedback/>                        // 结果 banner / error banner / 本地 notice（验收时移入吸顶区）
-    <div className="notice-shelf" role="status">…eventNotices.slice(0,4)…</div>  // 仅有通知时渲染
+    <feedbackBanner/>                  // 单条：本地 notice > error > result；失败 role=alert / 成功 role=status
+    <div className="notice-shelf" role="log" aria-label="事件通知">…eventNotices.slice(0,4)…</div>  // 仅有通知时渲染
   </div>
   <div className="phase-toast">…</div>
   <section className="panel self-panel">…</section>
@@ -16,7 +16,9 @@
 </div>
 
 二、数据流
-- feedback 仍由 props.result / props.error / 本地 notice 状态驱动，去重键不变。
+- feedback 仍由 props.result / props.error / 本地 notice 状态驱动，去重键不变；
+  渲染层在多条同时存在时只取一条（优先级 notice > error > result，IIFE 计算 feedbackBanner），
+  关闭当前一条后按优先级回落到下一条。
 - eventNotices 仍来自 notice-history 派生（NOTICE_LIMIT=4、TTL、关闭 id 集合均未改），
   仅在展示位置上移到 .game-sticky。
 - .stage 只做布局包裹，不参与状态；横幅已全部在 .game-sticky 内（header→横幅→通知架）。
@@ -26,6 +28,8 @@
 - 关键 FAILED/REFUSED/DEFAULTED 通知常驻直到手动关闭；DANGER_RESCUED 的 2.5s TTL 不动。
 - 不改 game/steps.ts 的 deriveStep 派生顺序与命令提交流程。
 - 不引入 scrollTo/scrollIntoView；不用 fixed 浮层遮操作卡。
+- 反馈区同一时刻最多一条横幅；关闭按钮可访问名必须区分（校验/错误/结果/通知）。
+- styles.css 的吸顶、45vh/32vh、44px、overflow-wrap 由 styles-05e.test.ts 契约锁定，改样式同步改契约。
 - 服务端、packages、协议、依赖均未改。
 
 四、下一单元入口

@@ -1,0 +1,322 @@
+单元 05E 独立复核报告
+
+复核时间：2026-11-05 11:16（UTC+8）
+复核角色：Qoder 独立复核员（只读）
+工作区：D:\Lianjunjie\biancheng\RichMan
+基线 commit：635a521 docs(unit05E): 交接文档、状态与 README 更新
+实现 commit：a585f64 feat(unit05E): 手机端提示可见性（吸顶提示区，404 测试）
+复核范围：a585f64 完整 diff（3 个文件）、相关源码/测试/交接文档、工作区状态
+
+结论一句话：无 must-fix；R1/R2 的结构目标成立，05C F1/F2 通知语义未被改动，
+主要遗留是 360×640 下“结果横幅 + 本地提示 + 事件架”组合的空间挤压、CSS 契约缺少自动化回归，
+以及反馈横幅的 ARIA 语义不足。
+
+============================================================
+一、must-fix
+============================================================
+
+无 must-fix。
+
+逐条排除了复核要求中列出的“提示仍会被遮住/滚出视口”的路径：
+
+1) 结果/服务端 error/本地 notice 全部在 .game-sticky 内，位置为 header 之后、.notice-shelf 之前。
+   - apps/web/src/GameView.tsx:1225-1262 定义 feedback（结果横幅 1227-1238、error 1239-1252、本地 notice 1253-1260）。
+   - apps/web/src/GameView.tsx:1266-1301 渲染顺序：.game-sticky(1266) → header.game-top(1267-1280) →
+     {feedback}(1281) → .notice-shelf(1282-1300)。
+   - apps/web/src/GameView.tsx:1353-1360 的 .stage 只包含 gameOver / 连接未就绪 / 确认卡 / 放弃等待 / renderStep，
+     没有任何 banner。
+
+2) 确认卡：currentConfirmation !== null ? renderConfirm(...) 在 .stage 内（GameView.tsx:1357），
+   feedback 仍在 sticky（1281），提示不会被确认卡挤走。
+
+3) 连接未就绪：.stage 内提示“连接恢复后才能继续操作”（GameView.tsx:1354-1356）；
+   send() 在未就绪时写本地 notice（GameView.tsx:158、GameView.tsx:1239-1260 渲染），仍在 sticky。
+
+4) 放弃下注等待：.stage 显示“正在提交放弃…”（GameView.tsx:1357-1359），feedback 仍在 sticky。
+
+5) rematch / gameOver overlay：
+   - gameOver overlay 为 fixed（GameView.tsx:511，styles.css:660），错误/本地 notice 在 overlay 内以
+     role="alert" 显示（GameView.tsx:542-543）。
+   - 此时 sticky 内刻意隐藏 error/notice，避免重复（GameView.tsx:1239、1253 的 step.kind !== "gameOver"）。
+   - rematch 失败由服务端抛 LobbyError（apps/server/src/rooms/manager.ts:245-251）并经 ws 转为 error，
+     走的就是 GameView.tsx:542 的 overlay 内展示，不依赖 sticky。
+
+6) 被替换页（status=replaced）在进入 .game 之前提前返回（GameView.tsx:1216-1222），不涉及 sticky 遮挡。
+
+============================================================
+二、should-fix
+============================================================
+
+【级别 should-fix】多条反馈横幅会把事件通知架挤到接近 0 高
+— apps/web/src/styles.css:409-423、426-430、432-442；apps/web/src/GameView.tsx:1281-1300
+— 现状代码：
+  .game-sticky { max-height:45vh; overflow-y:auto; gap:6px; ... }        (styles.css:415-417)
+  .game-top { flex:none; ... }                                           (styles.css:426-430)
+  .notice-shelf { flex:0 1 auto; min-height:0; max-height:32vh;
+                  overflow-y:auto; margin:6px 0 10px; }                  (styles.css:432-442)
+  {feedback} 是 .game-sticky 的直接子项，结果/error/notice 可同时渲染三条 (GameView.tsx:1281)。
+— 为什么有问题：
+  .game-sticky 总高被 45vh 封顶（360×640 时 288px），操作卡因此始终在 288px 以下，主目标“操作卡可见”成立；
+  但 feedback 横幅没有被限制为“只显示一条”。每个横幅因 44px 关闭按钮至少约 64px 高；header 约 90–106px
+  （且 styles.css:251 的 margin-bottom:16px 未在 sticky 内复位），两条反馈横幅 + gap 后，留给
+  .notice-shelf 的高度只剩约 20–40px，小于单条事件的 64px。由于 .notice-shelf 是 flex:0 1 auto 且
+  min-height:0，它会先被压缩到接近 0，用户必须先在 sticky 内部滚动才能看到事件通知。
+  当前 360×640 截图只覆盖了“1 条失败横幅 + 通知架”，没有覆盖“结果横幅 + 本地 notice + 4 条事件”的组合，
+  所以该挤压未被截图发现。
+  交接文档 handoff/单元05E-注意事项.txt:6 写“子项 flex:none”，但实际只有 .game-top 是 flex:none；
+  .notice-shelf 明确是 flex:0 1 auto（styles.css:436），该描述与实现不一致。
+— 建议改法（任选其一，不要抬高 45vh）：
+  a. feedback 同时只渲染一条，按“本地 notice > error > result”优先级取一条；
+  b. 或给 .notice-shelf 保留最小可见高度（如 min-height:64px），让 feedback 自己进入 sticky 内滚动；
+  c. 降低移动端 banner 内边距/关闭按钮占位，减少每条横幅高度；
+  d. 补一张 360×640 下“结果横幅 + 本地 notice + 4 条事件”同时存在的截图，并同步修正注意事项:6 的
+     “子项 flex:none”描述。
+
+【级别 should-fix】吸顶/触控/换行没有自动化契约测试，改坏 CSS 仍会 404 全绿
+— apps/web/tests/gameview.test.ts:294-373；apps/web/tests/dom-harness.ts
+— 现状代码：
+  05E 的 5 条测试只断言 DOM 归属和顺序，例如
+    expect(mounted.container.querySelector(".game-sticky .banner")?.textContent).toContain("INVALID_AMOUNT"); (307)
+    expect(classes.indexOf("game-top")).toBeLessThan(classes.indexOf("banner fail"));                    (311)
+    expect(mounted.container.querySelector(".stage .banner")).toBeNull();                                 (318)
+  tests/dom-harness.ts 中没有 getBoundingClientRect / scroll / clientHeight / offsetHeight，
+  gameview.test.ts 也没有 import "../src/styles.css"（grep 均无结果）。
+— 为什么有问题：
+  jsdom 无布局引擎，当前测试不能证明“滚动到操作卡后可见”。若把 styles.css:412 的 position:sticky 删掉、
+  删除 max-height:45vh、删除 .banner .link 的 44×44、删除 overflow-wrap:anywhere，404 条测试仍会全部通过。
+  换句话说，05E 的核心修复（吸顶、上限、触控尺寸）没有回归保护。
+— 建议改法：
+  a. 增加静态 CSS 契约测试：读取 apps/web/src/styles.css，断言 .game-sticky 含 position:sticky / top:0 /
+     max-height:45vh、.notice-shelf 含 max-height:32vh 与 overflow-y:auto、.banner .link 含 min-width:44px /
+     min-height:44px、.banner > span 含 overflow-wrap:anywhere；或
+  b. 把已用于验收的 Edge headless 截图脚本固化为可重复的视觉测试（至少覆盖 360×640），并在交接中记录运行命令。
+
+【级别 should-fix】反馈横幅没有 live-region 语义，所有关闭按钮可访问名都叫“关闭”
+— apps/web/src/GameView.tsx:1227-1260、1283-1298
+— 现状代码：
+  结果横幅：<div className={"banner " + ...}>(1228) ... <button type="button" className="link" ...>关闭</button>(1234-1236)
+  error：<div className="banner fail">(1240) ... 关闭(1244-1250)
+  本地 notice：<div className="banner fail">(1254) ... 关闭(1256-1258)
+  事件架：<div className="notice-shelf" role="status">(1283) ... 每条内也有“关闭”(1287-1296)
+— 为什么有问题：
+  只有 .notice-shelf 带 role="status"；命令结果、服务端 error、本地校验 notice 这三类最关键提示没有
+  role="alert"/aria-live，屏幕阅读器不会主动播报。多个按钮的可访问名完全相同（全部为“关闭”），
+  在同时存在结果/错误/本地提示/事件通知时无法区分。把可交互 button 放在 role="status" 的 live region 内，
+  部分阅读器会在播报时连按钮一起读出，语义也不理想。
+— 建议改法：
+  a. 结果/error/本地 notice 的失败类横幅加 role="alert"（成功类可用 role="status"），或给 feedback 外层
+     加 aria-live="polite"/"assertive"；
+  b. 关闭按钮加 aria-label，例如 aria-label={"关闭结果提示：" + 文本摘要} / "关闭错误提示" / "关闭事件通知"；
+  c. .notice-shelf 可考虑 role="log" 或 role="region" + aria-live，避免把按钮当作状态内容播报。
+
+============================================================
+三、nit
+============================================================
+
+【级别 nit】测试名夸大了 jsdom 能证明的范围
+— apps/web/tests/gameview.test.ts:295
+— 现状代码：it("R1 借款失败结果横幅在 .game-sticky 吸顶区内，滚动到操作卡后仍可见", ...)
+— 为什么有问题：用例实际只断言 DOM 归属与顺序，没有滚动、没有布局，无法证明“滚动后仍可见”；
+  交接文档 handoff/单元05E-运行与验收说明.txt 自己也写明 jsdom 无法验证布局。
+— 建议改法：改名为“结果横幅位于 .game-sticky 内且 .stage 无重复横幅”，把真实可见性交给真机/截图项。
+
+【级别 nit】成果报告状态行已过期
+— handoff/单元05E-成果报告.txt:4
+— 现状代码：状态：代码、自动化验证与 360×640 / 390×844 截图验收均完成；未提交
+— 为什么有问题：实现提交 a585f64 与文档提交 635a521 均已存在，工作区干净；“未提交”与实际不符。
+— 建议改法：改为“已提交 a585f64（文档 635a521）”，或删掉提交状态由项目当前状态统一维护。
+
+【级别 nit】截图来自 ui-preview 夹具，不含生产 App 的 fixed footer
+— apps/web/tests/ui-preview.tsx:1-2；apps/web/src/styles.css:361
+— 现状代码：ui-preview.tsx 只渲染 <div className="app"><GameView .../></div>，没有生产 App 的 .footer；
+  .footer { position:fixed; ... }（styles.css:361）。
+— 为什么有问题：360×640 / 390×844 截图能证明组件在夹具中的布局，但不能证明生产页面中 fixed footer
+  与 sticky 同时存在时下方操作卡仍完整可点。
+— 建议改法：补一张真实 App + 真实房间的 360×640 截图，或在运行与验收说明中明确“截图不含生产 footer”。
+
+【级别 nit】README 在 05E 文档提交中被修改，超出原 05E 写入范围
+— commit 635a521 文件列表：README.md + 6 个 handoff 文件
+— 现状代码：git show 635a521 --name-only 显示 README.md。
+— 为什么有问题：原始实现约束是“只改 apps/web/src/**、apps/web/tests/**、handoff/单元05E-*”；
+  README 不属于该范围。不过该提交仅文档、无代码/协议影响，风险低。
+— 建议改法：无需回退；后续交接时说明 README 的改动原因，避免范围审计时误判夹带。
+
+【级别 nit】phase-toast 的 fixed 定位在吸顶区出现后可能短暂压住结果横幅
+— apps/web/src/styles.css:645-658；apps/web/src/GameView.tsx:1303
+— 现状代码：.phase-toast { position:fixed; top:84px; z-index:20; ... }
+— 为什么有问题：进入新阶段时 toast 会在 top:84px 悬浮 2.2 秒，正好落在 header/结果横幅区域；
+  这是 05C 既有实现，不是本次新增，也不会盖住操作卡，但会短暂遮挡最上方提示。
+— 建议改法：可接受则不改；若要消除，可把 top 改为随 .game-sticky 高度计算，或把 toast 放入 sticky 流内。
+
+============================================================
+四、逐条复核证据（A–F）
+============================================================
+
+A. 提示是否真的看得见 —— 已验证通过
+   - feedback 位于 .game-sticky：GameView.tsx:1266-1301；header 1267-1280 → {feedback} 1281 →
+     .notice-shelf 1282-1300，顺序正确。
+   - .stage 无 banner：GameView.tsx:1353-1360；测试断言 .stage .banner 为 null：
+     gameview.test.ts:318（R1 结果）、327（R1 本地 notice）、371（R2 顺序）、258（F3）。
+   - 所有候选路径（确认卡/连接未就绪/放弃等待/rematch/gameOver）见本报告“一、must-fix”第 2–6 条，
+     提示要么在 sticky、要么在 overlay 内以 role="alert" 展示，没有被 .stage 挤出视口的情况。
+   - 唯一限制：jsdom 不能证明真实可见性，见 should-fix 第 2 条与真机遗留项。
+
+B. 吸顶高度预算 —— 部分通过（操作卡可见成立；通知架可能被挤压）
+   - .game-sticky 有 max-height:45vh + overflow-y:auto（styles.css:415-417），不会无限增高；
+     子项不会把容器顶破，超出部分在 sticky 内部滚动。
+   - 360×640 时 45vh=288px，操作卡从 288px 以下开始，viewport 尚余约 352px，操作卡按钮可见；
+     交接截图记录操作卡 318–624px（handoff/单元05E-成果报告.txt:66）。
+   - 但两条 feedback 横幅 + header 会把 .notice-shelf 压到接近 0（flex:0 1 auto + min-height:0，
+     styles.css:436-437），事件通知需要滚动 sticky 才能看到。见 should-fix 第 1 条。
+   - 未发现 header/横幅/通知架无限增高路径：max-height 封顶 + 通知架自身 32vh/overflow-y:auto。
+
+C. 05C F1/F2 语义 —— 已验证通过
+   - apps/web/src/game/notice-history.ts 不在 a585f64 diff 中（git diff 仅 3 个 web 文件）。
+   - NOTICE_LIMIT=4、RESCUED_TTL_MS=2500 未变（notice-history.ts:6-7）。
+   - DANGER_RESCUED 仍要求 phase === "TAX" + 同 phaseInstanceId + 未超 2500ms，否则删除：
+     notice-history.ts:78-80。
+   - dismissed 过滤与 slice(-NOTICE_LIMIT) 仍在 notice-history.ts:95。
+   - 对应测试仍存在且通过：
+     - 2.5s TTL 且快照变更不重置：gameview.test.ts:179；
+     - 离开 TAX 立即移除、重回不回放：gameview.test.ts:191；
+     - FAILED/REFUSED 超过 toast 时限仍保留到手动关闭：gameview.test.ts:222；
+     - 同 commandId 去重：gameview.test.ts:96、122；
+     - 历史超过四条只显示最近四条：gameview.test.ts:144。
+   - 05E 只是把渲染位置移入 sticky，没有改 notice-history 的状态机。
+
+D. 可访问性与触控 —— 部分通过
+   - 已验证通过：
+     - 关闭按钮 44×44：.banner .link { min-width:44px; min-height:44px; display:grid; place-items:center; }
+       （styles.css:637-643）。
+     - 长文案换行：.banner > span { flex:1 1 auto; min-width:0; overflow-wrap:anywhere; line-height:1.5; }
+       （styles.css:630-635）；.banner align-items:flex-start（styles.css:623-628）。
+     - 无强制滚动：grep -rn "scrollTo\|scrollIntoView" apps/web/src 无输出。
+     - 本次没有新增 fixed 浮层；sticky 使用 position:sticky（styles.css:412），fixed 的
+       .phase-toast / .overlay / .footer 均为既有实现（styles.css:645、660、361），不盖操作卡。
+     - 360×640 / 390×844 截图中未见横向滚动条（D:\Lianjunjie\shot-manual-360.png、shot-manual-390.png）。
+   - 未通过/不足：feedback 横幅缺少 live-region、关闭按钮可访问名重复，见 should-fix 第 3 条。
+   - 360px 横向滚动的结论仅覆盖截图夹具场景；长昵称贷款行、自面板等既有元素未在本次截图中全部覆盖，
+     列入真机遗留项。
+
+E. 测试能否挡住回退 —— 部分通过
+   新用例逐条判断：
+   1) gameview.test.ts:295-319 “R1 借款失败结果横幅…”：强。
+      断言 sticky 内横幅文案（307-308）、sticky 直接子项 game-top 在 banner fail 之前（311）、
+      .game 子项 sticky < self-panel < stage（316-317）、.stage .banner 为空（318）。
+      但它证明的是 DOM 结构，不是 CSS sticky/可见性。
+   2) gameview.test.ts:321-328 “R1 本地校验失败 notice…”：中。
+      断言 .game-sticky .banner 文案（326）+ .stage 无 banner（327）；未断言相对 header/shelf 的顺序。
+   3) gameview.test.ts:330-345 “R2 事件提示…跨阶段保留，关闭后消失”：强。
+      断言 shelf 文案（337）、跨阶段仍存在（341）、关闭后 shelf 为 null（344），覆盖常驻/关闭生命周期。
+   4) gameview.test.ts:347-350 “R2 无事件提示时不渲染 .notice-shelf 占位”：强，直接断言 null。
+   5) gameview.test.ts:352-372 “R2 header、结果横幅与通知架同处 .game-sticky，顺序为…”：强。
+      断言 game-top < banner fail < notice-shelf（368-370）+ .stage 无 banner（371）。
+   空洞：
+   - 没有任何一条断言 CSS 属性或真实布局；删掉 sticky/45vh/32vh/44px/overflow-wrap 后测试仍全绿
+     （见 should-fix 第 2 条）。
+   - 没有“结果横幅 + 本地 notice + 4 条事件同时存在”的组合断言，无法发现通知架被压到 0。
+   - 没有断言 max 4 条在 .notice-shelf 内（现有 F2 的 4 条测试在 gameview.test.ts:144，仍有效）。
+   F1/F3 改动未削弱原断言：
+   - F1（gameview.test.ts:136-139）从全局 .banner 改为 .game-sticky .banner，并新增
+     .notice-shelf .banner 断言，比原来更精确、更强。
+   - F3（gameview.test.ts:245-258）改为 .game-sticky .banner + .notice-shelf .banner，新增
+     .stage .banner 为 null（258），并保留“不包含上方”（257），同样更强。
+
+F. 夹带/回退检查 —— 已验证通过
+   - git diff --name-only 19c5fbb..a585f64：
+     apps/web/src/GameView.tsx
+     apps/web/src/styles.css
+     apps/web/tests/gameview.test.ts
+     未触碰 apps/server、packages、协议、依赖、game/steps.ts。
+   - .game-top 没有重新加回 sticky：基础规则 styles.css:242-252 无 position/top/z-index；
+     05C/05E 覆盖 styles.css:426-430 只有 flex:none/align-items/backdrop-filter，注释也明确
+     “header 不再自身吸顶”。
+   - 文档提交 635a521 只改 README.md + 6 个 handoff 文件，无代码。
+
+============================================================
+五、实际执行的命令与关键输出
+============================================================
+
+1) pnpm -s test（2026-11-05 11:16）
+   Test Files  27 passed (27)
+   Tests       404 passed (404)
+   Duration    6.11s (tests 40%, import 39%, transform 20%, worker 1%)
+
+2) pnpm -s typecheck
+   typecheck exit=0（无输出）
+
+3) git diff --name-only 19c5fbb..a585f64
+   apps/web/src/GameView.tsx
+   apps/web/src/styles.css
+   apps/web/tests/gameview.test.ts
+
+4) grep -rn "scrollTo\|scrollIntoView" apps/web/src
+   （无输出）
+
+5) git status --porcelain
+   （复核开始与结束时代码工作区干净；本报告为本轮唯一新增文件）
+
+说明：本轮未重跑 build；交接报告声称 build exit 0（vite 129 modules / CSS 9.32 kB / JS 383.73 kB），
+复核未独立复现该项。
+
+============================================================
+六、仍需真机/真人验证的遗留项
+============================================================
+
+1) 真实 360×640、390×844 设备/浏览器（含地址栏伸缩与安全区）复测：
+   吸顶区 ≤45vh、操作卡按钮完整可见、页面无横向滚动。
+2) “结果横幅 + 本地校验 notice + 4 条事件通知”同时存在的组合：确认 .notice-shelf 不被压到 0，
+   或在产品上接受“需在 sticky 内滚动查看事件”。
+3) 生产 App（含 fixed .footer，styles.css:361）而非 ui-preview 夹具的截图/实测，确认 footer 不遮挡操作卡。
+4) 输入借款金额时软键盘弹出后的可达性：sticky 与输入框、确认按钮是否仍可见可点。
+5) 弱网/隧道断线重连场景：连接恢复前后 result/error/notice 是否仍能被看到。
+6) iOS VoiceOver / Android TalkBack 实际播报（result/error/本地 notice/事件架）与 44×44 触控实测。
+7) 长昵称、4 条长事件文案、失信债务超长金额在 360px 下的换行/横向滚动实测。
+
+（复核结束）
+
+============================================================
+七、复核处理结论（Lead，2026-11-05）
+============================================================
+
+结论：3 条 should-fix 全部修复，无遗留 must-fix。
+
+1) should-fix 1（多条反馈横幅把通知架挤到接近 0 高）→ 已修
+   - apps/web/src/GameView.tsx:1229-1288：feedback 改为 IIFE 计算单一 feedbackBanner，
+     优先级 本地 notice > error > result；渲染处 {feedbackBanner}。
+   - 取舍：error 在场时旧命令回执不再同时显示（这是"只显示一条"的直接结果）；
+     两者各自出现时都可见，新局开始时都被清空。
+   - 测试：gameview.test.ts"05E 复核修复"用例 1（校验提示优先、关闭后旧结果回来）；
+     rematch-client.test.ts 的 05D 用例改为"旧回执单独可见 → 旧 error 到达后替换"，
+     新局清理断言未削弱。
+   - 未采用 b/c（shelf min-height、降横幅高度）：单条渲染已让 32vh 预算有实际空间，
+     避免为多横幅再叠约束。
+
+2) should-fix 2（吸顶/触控/换行缺 CSS 契约测试）→ 已修
+   - 新增 apps/web/tests/styles-05e.test.ts（4 条，readFileSync 静态断言）：
+     .game-sticky sticky/top:0/max-height:45vh/overflow-y:auto；
+     .game-top flex:none 且无 position:sticky；
+     .notice-shelf max-height:32vh/overflow-y:auto/min-height:0；
+     .banner .link 44×44、.banner > span overflow-wrap:anywhere + min-width:0。
+
+3) should-fix 3（缺 live-region、关闭按钮同名）→ 已修
+   - 失败横幅 role="alert"，成功横幅 role="status"；
+   - 关闭按钮 aria-label 分别为 关闭校验提示/关闭错误提示/关闭结果提示；
+   - .notice-shelf role="log" aria-label="事件通知"，每条通知按钮 aria-label 以"关闭通知："开头。
+   - 测试：gameview.test.ts"05E 复核修复"用例 2、3。
+
+4) nit 处理
+   - gameview.test.ts:295 用例名去掉"滚动后仍可见"，改为 DOM 契约 + 截图另测。
+   - 成果报告状态行改为"已提交 a585f64 + 635a521，复核修复待提交"；四、命令输出更新为 28 文件/411 条。
+   - 注意事项第 2 条改为：只有 .game-top 是 flex:none，横幅与 shelf 是 flex:0 1 auto。
+   - 运行与验收说明注明截图来自 ui-preview 夹具、不含生产 fixed .footer。
+   - README 在 05E docs 提交中越界更新的说明已补记（不回溯历史提交）。
+   - phase-toast fixed top:84px 会短暂盖住结果横幅：按"既有实现、可接受"记录在注意事项第 8 条。
+
+5) 验证命令（真实输出）
+   pnpm test       28 文件 / 411 条全绿（Duration 6.21s）
+   pnpm typecheck  退出码 0
+   pnpm build      退出码 0（index-Z0VPCPB8.css 9.32kB、index-CrNIVXQC.js 383.92kB）
+
+6) 复核第六节 7 条真机遗留项未在自动化中关闭，原样转交 05B（试玩清单），
+   不在 05E 内声称真机通过。

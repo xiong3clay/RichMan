@@ -1,7 +1,7 @@
 单元 05E 运行与验收说明
 
 一、环境与命令
-corepack pnpm test        # 27 文件 / 404 条全绿（399 基线 + 5 新增）
+corepack pnpm test        # 28 文件 / 411 条全绿（399 基线 + 05E 5 条 + 复核修复 7 条）
 corepack pnpm typecheck   # 0
 corepack pnpm build       # 0
 
@@ -13,9 +13,17 @@ corepack pnpm build       # 0
      对应用例：“R1 借款失败结果横幅在 .game-sticky 吸顶区内…”“R1 本地校验失败 notice…”。
   2) 结构断言：.game-sticky 同时包含 .game-top、结果横幅与 .notice-shelf，直接子节点顺序为
      header → banner → notice-shelf（对应用例“R2 header、结果横幅与通知架同处 .game-sticky…”）。
-  3) jsdom 不做布局计算，因此“是否在视口内”用 Edge headless + CDP 截图验收（见下）。
+  3) jsdom 不做布局计算，“是否在视口内”用 Edge headless + CDP 截图验收（见下）。
+4) CSS 契约测试：corepack pnpm vitest run apps/web/tests/styles-05e.test.ts
+   - 静态检查 .game-sticky 必须 sticky/top:0/max-height:45vh/overflow-y:auto；
+   - .game-top 含 flex:none 且不含 position:sticky；
+   - .notice-shelf 含 max-height:32vh/overflow-y:auto/min-height:0；
+   - .banner .link 44×44、.banner > span overflow-wrap:anywhere + min-width:0。
+5) 单条反馈语义（复核修复）：同时存在本地 notice、error、result 时只渲染一条，
+   优先级 notice > error > result；断言见 gameview.test.ts“05E 复核修复”3 条用例。
 
-已执行（2026-11-05，Edge headless + CDP 9333，临时 fixture 注入一条失败回执 + 一条被拒事件）：
+已执行（2026-11-05，Edge headless + CDP 9333，临时 fixture 注入一条失败回执 + 一条被拒事件；
+该夹具不含生产页面 fixed .footer，仅用于定位吸顶区与操作卡，不代表完整生产布局）：
   1) 360×640：吸顶区 288px（45vh 上限，内部可滚），失败横幅 136–202、事件条 214–274 均完整显示；
      操作卡 318–624px 完整可见；scrollWidth-clientWidth=0。截图 D:\Lianjunjie\shot-manual-360.png。
   2) 390×844：吸顶区 294px（约 35vh），header→横幅→事件条完整；操作卡 522–828px 完整可见；无横向滚动。
@@ -28,3 +36,5 @@ corepack pnpm build       # 0
 - 无通知时 .notice-shelf 不渲染，不占高度。
 - 关闭按钮 44×44；长文案 overflow-wrap:anywhere。
 - 未使用 scrollTo/scrollIntoView，无 fixed 浮层覆盖操作卡。
+- 反馈区 role=alert（失败）/status（成功），通知架 role=log；关闭按钮可访问名已区分。
+- 未做：真实手机复测、三横幅组合截图、软键盘/读屏/弱网（列为 05B 遗留项）。

@@ -1,7 +1,7 @@
 单元 05E 成果报告（手机端提示可见性修复）
 日期：2026-11-05
 基线：HEAD 19c5fbb（399 测试全绿，工作区干净）
-状态：代码、自动化验证与 360×640 / 390×844 截图验收均完成；未提交
+状态：主体已提交 a585f64（feat）+ 635a521（docs）；Qoder 复核后的 3 条 should-fix 修复已实现并通过全量测试，待提交（见第六节）
 修订：Lead 验收时发现“结果横幅仍在 .stage、滚动到卡片会被吸顶区遮住”，已把结果横幅移入 .game-sticky，并同步更新测试与本文档
 
 一、根因
@@ -30,24 +30,33 @@ GameView 页面顺序为 header → phaseToast → 结果 banner → error banne
    - .banner 改 align-items:flex-start；文本 span flex:1 1 auto; min-width:0;
      overflow-wrap:anywhere; line-height:1.5；.banner .link 44×44 + grid 居中。
 3. apps/web/tests/gameview.test.ts
-   - 全局 .banner 选择器改为 .stage .banner / .notice-shelf .banner，断言强度未降低。
-   - F3 改为分别断言操作区结果横幅与顶部通知架事件条。
-   - 新增 5 条 05E 移动端提示可见性用例（见下）。
+   - 全局 .banner 选择器改为 .game-sticky .banner / .notice-shelf .banner，断言强度未降低。
+   - F3 改为分别断言吸顶区反馈横幅与通知架事件条，并断言 .stage 内无 banner。
+   - 新增 5 条 05E 移动端提示可见性用例（见下）；复核修复后再加 3 条（单条反馈优先级、role/aria、error 横幅）。
+4. apps/web/tests/styles-05e.test.ts（复核修复新增）
+   - 4 条 CSS 契约：.game-sticky 的 sticky/top/45vh/overflow、.game-top 不吸顶、
+     .notice-shelf 的 32vh/内部滚动、关闭按钮 44px 与文案 overflow-wrap。
+5. apps/web/tests/rematch-client.test.ts
+   - 05D 用例按“反馈区只显示一条”调整：旧回执单独可见、旧 error 到达后替换它；
+     新局开始时两者都必须清空（清理断言未削弱）。
 
 三、新增测试
-1. R1 借款失败结果横幅在 .game-sticky 吸顶区内，滚动到操作卡后仍可见
+1. R1 借款失败结果横幅在 .game-sticky 吸顶区内（DOM 契约；真机滚动位置另由截图验收）
 2. R1 本地校验失败 notice 同样进入吸顶区可见
 3. R2 事件提示在 .notice-shelf 常驻，跨阶段保留，关闭后消失
 4. R2 无事件提示时不渲染 .notice-shelf 占位
-5. R2 header、结果横幅与通知架同处 .game-sticky，顺序为 header→横幅→通知架
+5. R2 header、反馈横幅与通知架同处 .game-sticky，顺序为 header→横幅→通知架
+6. 复核：本地校验提示优先于旧结果，反馈区同时只有一条横幅，关闭后旧结果回来
+7. 复核：失败横幅 role=alert，结果/通知的关闭按钮有区分性可访问名，通知架 role=log
+8. 复核：服务端 error 横幅同样 role=alert，可访问名“关闭错误提示”
 另：原 F1 去重用例（ACCEPT FAILED / BANK_DUE / REFUSED / CANCELLED / 晚到 commandId）
 与 F2 生命周期 10 条全部保留通过。
 
 四、真实命令输出
 $ corepack pnpm test
- Test Files  27 passed (27)
-      Tests  404 passed (404)     # 原 399 + 新增 5
-   Duration  6.17s
+ Test Files  28 passed (28)
+      Tests  411 passed (411)     # 原 399 + 05E 5 条 + 复核修复 7 条
+   Duration  6.21s
 
 $ corepack pnpm typecheck
 tsc --noEmit -p tsconfig.json，退出码 0
@@ -55,8 +64,8 @@ tsc --noEmit -p tsconfig.json，退出码 0
 $ corepack pnpm build
 ✓ 129 modules transformed.
 apps/web/dist/assets/index-Z0VPCPB8.css    9.32 kB
-apps/web/dist/assets/index-BWNTgKj-.js   383.73 kB
-✓ built in 260ms
+apps/web/dist/assets/index-CrNIVXQC.js   383.92 kB
+✓ built in 202ms
 
 日志：artifacts/test-logs/unit05E-{test,typecheck,build}.log
 
@@ -67,4 +76,18 @@ apps/web/dist/assets/index-BWNTgKj-.js   383.73 kB
   无横向滚动。
 - 结论：用户下滑到操作卡后，失败回执与事件提示都在视口内，05B 反馈的问题已修复。
 - 未做：实体手机上的第二次试玩（随 05B 继续）。
-- git status 仅 apps/web/src、apps/web/tests、handoff/单元05E-*；未 commit。
+- 截图来自 apps/web/tests/ui-preview.tsx 临时夹具，不含生产页面的 fixed .footer；只用于判断吸顶区与操作卡位置。
+
+六、Qoder 复核（handoff/复核-单元05E.txt）与修复
+结论：无 must-fix；should-fix 3 条已全部修复。
+1. should-fix 1（多条横幅把通知架挤到接近 0 高）→ 反馈区改为单条渲染，优先级
+   本地 notice > 服务端 error > 命令回执；notification shelf 的 32vh 预算因此有可用高度。
+   取舍：错误在场时旧回执不再同时显示；两者各自出现时可见，新局开始时都清空（rematch 用例覆盖）。
+2. should-fix 2（吸顶/触控/换行缺 CSS 契约）→ 新增 styles-05e.test.ts 4 条静态断言，
+   删掉 sticky/45vh/44px/overflow-wrap 会立刻失败。
+3. should-fix 3（缺 live-region、关闭按钮同名）→ 失败横幅 role=alert、成功横幅 role=status；
+   通知架 role=log + aria-label；三类关闭按钮 aria-label 分别区分。
+4. nit 处理：测试名去掉“滚动后仍可见”的夸大；注意事项第 2 条的 flex 描述更正；
+   README 越界说明补记；phase-toast 遮挡按“既有实现、可接受”记录。
+5. 遗留真机项（未做，交 05B）：真实 360×640/390×844、三横幅组合、生产 footer、软键盘、
+   弱网重连、VoiceOver/TalkBack、长昵称/长金额 360px。

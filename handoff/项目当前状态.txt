@@ -1,6 +1,6 @@
 RichMan 项目当前状态
 更新日期：2026-11-05
-更新者：Lead（DSH 统筹；Trae 实现 05E，Lead 验收修订）
+更新者：Lead（DSH 统筹；Trae 实现 05E，Lead 验收修订；Qoder 复核后由 Lead 修复 3 条 should-fix）
 
 【版本】
 方案版本：V1.3.3（V1.3.2 + 引导式界面 + 连接实测）
@@ -13,14 +13,16 @@ RichMan 项目当前状态
 当前子任务：05B 真人/真机试玩——已完成第一轮手机反馈（提示看不见）→ 立 05E 修复并验收；
 下一入口为 06 可靠存档与重启恢复（计划交 Codex），05B 剩余真机复测。
 05D 新增：放弃本轮下注（BETTING 猜点步直接提交 0 注）+ 游戏结束后房主再来一局（rematch）。
-05E 新增：顶部吸顶提示区——header + 结果/错误/校验横幅 + 事件通知架同处 .game-sticky，
-       .stage 只放当前步骤卡；滚到操作卡后提示仍可见。
+05E 新增：顶部吸顶提示区——header + 单条反馈横幅 + 事件通知架同处 .game-sticky，
+       .stage 只放当前步骤卡；滚到操作卡后提示仍可见。Qoder 复核后反馈区改为单条渲染
+       （优先级 本地提示 > 服务端 error > 命令回执），失败横幅 role=alert、通知架 role=log。
+05F：暂无（05E 复核修复已并入 05E）。
 会话与命令去重仍仅内存，持久化留 06。
 
 【测试与构建（2026-11-05 实测）】
-pnpm test      27 文件 / 404 条（core 134、server 111、web 159）
+pnpm test      28 文件 / 411 条（core 134、server 111、web 166）
 pnpm typecheck 退出码 0
-pnpm build     退出码 0（apps/web/dist/assets/index-Z0VPCPB8.css 9.32kB、index-BWNTgKj-.js 383.73kB）
+pnpm build     退出码 0（apps/web/dist/assets/index-Z0VPCPB8.css 9.32kB、index-CrNIVXQC.js 383.92kB）
 pnpm smoke:lan PASS（05D 验收时）
 
 【05E 复核要点（后续不得回退）】
@@ -30,7 +32,11 @@ pnpm smoke:lan PASS（05D 验收时）
 - .game-sticky：position:sticky; top:0; z-index:6; max-height:45vh; gap:6px; overflow-y:auto。
 - .notice-shelf：最多 4 条、max-height:32vh、内部滚动、可关闭、无通知不渲染。
 - 关闭按钮 ≥44×44；banner 文本 overflow-wrap:anywhere；360px 无横向滚动。
+- 反馈区同一时刻只显示一条（本地 notice > error > result）；关闭当前一条后按优先级回落，
+  不要改回多横幅并排（会把通知架挤到接近 0 高）。
+- styles-05e.test.ts 是 CSS 契约测试：sticky/45vh/32vh/44px/overflow-wrap 被锁定，改样式同步改契约。
 - 通知去重/TTL/关闭语义（05C F1/F2）未改。
+- 未做真机项：真实 360×640/390×844、三横幅组合、生产 footer、软键盘、弱网重连、读屏。
 
 【运行环境】
 服务器与隧道由 Windows 计划任务托管（RichManServer / RichManTunnel，需 -AllowStartIfOnBatteries
@@ -41,6 +47,7 @@ https://bernard-earned-starring-gender.trycloudflare.com
 
 【待办】
 1) 05B 真机复测：把新隧道地址给手机，按 handoff/单元05B-试玩清单.txt 记录等待/卡点/提示可见性。
-2) 05E 交 Qoder 独立复核（复核意见写 handoff/复核-单元05E.txt）。
+2) 05E 复核已完成（handoff/复核-单元05E.txt）：无 must-fix，3 条 should-fix 已修复并全量验证，
+   随 05E 文档一并提交；遗留真机项并入 05B。
 3) 单元 06 可靠存档与重启恢复（交 Codex）：房间/对局快照落盘、重启恢复、冷启动一致性。
 4) 07 完整借贷/赌博交互与债务中心；08 教程/手机适配/音频；09 加固/跨网验证/一键发布包。
