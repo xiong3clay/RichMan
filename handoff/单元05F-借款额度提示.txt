@@ -1,0 +1,105 @@
+单元 05F：借款额度提示（施工规格）
+版本：2026-11-05 / Lead 编写 / 依据：用户截图反馈 + 方案 V1.3.3 第六节 3.1
+
+一、问题与目标
+用户反馈（2026-11-05，附 Q1/Q2 截图）：“这些地方提示一下最多可以借到的钱”。
+现状：Q1 私人金额步只写“金额上限以服务端为准”，Q2 银行金额步只写“上限为当前金币的 50%，最终以服务端为准”，
+玩家看不到具体数字，只能试错。
+方案 3.1 已要求：Q1“输入金额（0～对方可出借上限）”、Q2“显示可用额度区间（0～可借上限）”、
+自身信息区含“可借额度”，且“所有金额范围与可用性以服务端快照为准”。
+原版 C++（docs/reference/大富翁.cpp:520-527）银行借款也会打印“本次最多可向银行贷款 X 金币”。
+目标：由服务端在每人快照中下发权威额度，前端 Q1/Q2/自身信息区显示具体数字；不改任何游戏规则。
+
+二、服务端额度（唯一改动点：packages/game-core/src/views.ts）
+在 PlayerFinanceView 增加两个字段（都用 Cents 整数）：
+
+1) bankBorrowLimitCents: Cents
+   - 仅当全部成立时 = min(ordinaryLoanCap(me.cents), MAX_MONEY_CENTS - me.cents)：
+     a) me.credit === "GOOD"
+     b) me.cents > 0
+     c) 本人没有任何 status !== "REPAID" 的银行贷款（bank.ts 的 ACTIVE_LOAN_EXISTS 条件）
+     其中 ordinaryLoanCap 见 packages/game-core/src/money.ts，等于 floor(cents/2)。
+   - 为什么取 min（Qoder 复核 M1）：engine.ts:1340-1345 assertCentsRange 要求借款入账后余额 ≤ MAX_MONEY_CENTS，
+     金币 999999999500 时 50% 上限 499999999750 会被服务端以 INVALID_AMOUNT 拒绝；只给 500 才是真能借到的数。
+     不放宽引擎上限，也不在前端截断。
+   - 任一不成立则为 0（不可借原因仍由前端 bankBlockedReason 文案给出，不在这里返回错误）。
+   - 金币只有 1 分时 floor(1/2)=0：额度为 0 但 bankBlockedReason 为 null，前端必须按“额度 0”禁用入口（见 3.2）。
+
+2) lenderLimits: { playerId: PlayerId; maxCents: Cents }[]
+   - 对 state.players 中 alive === true 且 playerId !== viewerId 的每个玩家给一条：
+     maxCents = max(0, min(该玩家 cents, MAX_MONEY_CENTS - me.cents))
+   - 为什么取 min：acceptLoanRequest 要求出借人余额 ≥ 本金（否则请求 FAILED），且借款人余额 + 本金 ≤ MAX_MONEY_CENTS
+     （private-loans.ts 会抛 INVALID_AMOUNT）。取两者较小值，前端显示的上限才真正可成。
+   - 只给上限，不给对方 cents，不新增任何他人的金额、合同、下注字段。
+
+注意：
+- apps/server/src/ws.ts:55-58 的 wireCopy 会把 key === "cents" 或 key 以 "Cents" 结尾的数字转成十进制字符串，
+  lenderLimits[].maxCents 会自动转换，不需要改 ws.ts / server。
+- 不要改引擎行为、不要改 acceptLoanRequest/createLoanRequest 校验、不要改 shared 协议与 SNAPSHOT_SCHEMA_VERSION。
+
+三、前端（apps/web）
+1) apps/web/src/net/wire.ts
+   - WireFinance 增加 bankBorrowLimitCents: string; lenderLimits: { playerId: string; maxCents: string }[];
+   - 同步所有测试 fixture：apps/web/tests/view-fixtures.ts、apps/web/tests/steps.test.ts 的 builder、
+     apps/web/tests/notices.test.ts 的 viewWithLoan、apps/web/tests/rematch-client.test.ts 的 snapshot、
+     以及任何手写 WireSnapshotView/WireFinance 的地方（用 grep 找 finance: {）。
+2) apps/web/src/game/steps.ts
+   - 新增 formatCents 数字展示与额度读取工具（如 lenderLimitOf(view, playerId): string | null）。
+   - 新增 bankLimitText(view)：可借时返回“最多可借 X 分（当前金币的 50%，向下取整）”；
+     不可借时保留 bankBlockedReason 的原因，额度显示 0 分。
+   - 私人：privateLimitText(view, lenderId) 返回“最多可借 X 分（受对方可用资金与你余额上限限制）”。
+   - 保留 BANK_LOAN_LIMIT_HINT 作为快照无该字段时的兜底文案（旧服务器/旧快照兼容），不要删。
+3) apps/web/src/GameView.tsx
+   - Q2 askBank（约 :1083-1102）：提示行改为“当前金币 X 分；最多可借 Y 分（当前金币的 50%，向下取整）”，
+     不可借时继续显示 blockedBank 原因，且“是，输入金额”保持禁用。
+   - Q2 bankAmount（约 :1104-1135）：同上提示；金额超过上限时行内红字“最多可借 Y 分”并禁用“确认借款”。
+   - Q1 privateAmount（约 :1051-1080）：选中出借人后，提示行改为“最多可借 Y 分（受对方可用资金与你余额上限限制）；
+     利率 0～10000 基点，本局标准利率为 10%（1000 基点）”；金额超过上限时行内提示“最多可借 Y 分”并禁用“提交借款请求”。
+   - Q1 出借人候选列表（约 :1030-1041）：hint 追加“ · 最多可借 Y 分”（可选，但同一套数值）。
+   - 自身信息区“可借额度”（约 :1359-1364）：显示“X 分”；不可借时显示原因 + 0 分，不再只显示通用文案。
+   - 比较金额：字符串转 Number 后整数比较（额度 ≤ MAX_MONEY_CENTS = 1e12，安全）；不要用 parseFloat/浮点。空输入不报错。
+4) 文案与无障碍
+   - 数字用中文“分”，千分位可选，不要出现“¢”。
+   - 超限提示用已有 role/aria 语义（本地 notice 或行内 p.step-hint danger-text 均可），不要新增弹窗。
+
+四、测试（旧测试不得削弱，新增至少 9 条）
+1) packages/game-core/tests/views.test.ts（新建）
+   - 10000 分、无贷款、GOOD → bankBorrowLimitCents = 5000；
+   - 有 ACTIVE 贷款 → 0；有 DEFAULTED 贷款 → 0；credit DEFAULTED → 0；cents = 0 → 0。
+   - lenderLimits：不含自己、不含已破产者；普通情况 = 出借人 cents；
+     me.cents 接近 MAX_MONEY_CENTS 时 = MAX - me.cents；出借人 cents = 0 时该条为 0（或省略，二选一但测试要固定）。
+   - 隐私：RichPlayerView 里仍没有他人 cents 字段（断言 publicPlayers 元素不含 cents），且本人 finance 字段齐全。
+2) apps/server/tests（已有 wire/session 测试文件，任选其一追加）
+   - 快照经 ws 发送后 bankBorrowLimitCents / lenderLimits[].maxCents 是十进制字符串，不是 number。
+3) apps/web/tests
+   - steps：bankLimitText 可借/不可借两种输出；privateLimitText 数字正确。
+   - GameView：Q2 提示含“最多可借 5000 分”；Q1 提示含该出借人上限；金额超限时确认按钮 disabled；
+     自身“可借额度”显示数字；快照缺字段时回退通用文案（旧快照兼容）。
+
+五、验收（必须贴真实命令输出）
+- pnpm test：全绿，总数 ≥ 420（当前 411）。
+- pnpm typecheck：退出码 0。
+- pnpm build：退出码 0。
+- 手机宽度 360：Q1/Q2 文案不溢出、不横向滚动。
+- 手工核对：借到银行贷款后再看“可借额度”= 0 并显示原因。
+
+六、约束
+- 只改 apps/web/src/**、apps/web/tests/**、packages/game-core/src/views.ts、packages/game-core/tests/views.test.ts，
+  如需服务端测试则只加 apps/server/tests/**。不改 apps/server/src、packages/shared、协议版本、依赖、引擎规则。
+- 不 commit。完成后报告：改了哪些文件（含行号）、测试命令与输出、还缺什么。
+- 隐私取舍（要写进报告注意事项）：显示“对方可出借上限”等价于向借款人暴露出借人当前金币，这是方案 3.1 Q1 的明确要求；
+  若将来要隐藏，删掉 lenderLimits 并回退 Q1 文案即可，不影响其他逻辑。
+
+七、Qoder 复核修复（2026-11-05，Lead 执行）
+复核文件：handoff/复核-单元05F.txt（1 must-fix + 4 should-fix）。
+1) M1 近 MAX 高报：按上面 min(ordinaryLoanCap, MAX - 本人金币) 修；新增 views 测试（MAX-500→500、MAX-1000→1000）、
+   engine-round 测试（额度 500 可借成功、501 被拒且账不变）。
+2) S1 行内红线测试空心：gameview.test 改断言 .stage .danger-text 文本，并加“未输入时无 danger-text”反向断言。
+3) S2 视图测试缺口：补 REPAID-only 仍 5000、金币 1 分→0、三名玩家全部存活→["p2","p3"]。
+4) S3 额度 0 死路：GameView 增加 bankUnavailable = blockedBank !== null || bankLimit === "0"；
+   askBank 的“是，输入金额”与 bankAmount 的“确认借款”都禁用并给原因；Q1 候选 limit === "0" 时禁用并标注“ · 暂无可借额度”；
+   提交按钮在 chosenLender 为 null 时也禁用（N6）。
+5) S4 withinLimit 非规范串：先 /^(0|[1-9]\d*)$/ 校验，非法写法（1e4、0x1389、+5001、5001.0）交回表单校验，不判超限。
+6) 文案统一（N4）：bankLimitText 先判 blocked（原因 + “（可借 0 分）”），缺字段回退 BANK_LOAN_LIMIT_HINT，
+   额度为 0 时返回“可借 0 分（当前金币不足以产生贷款额度）”。
+7) 3.2 新增约束：任何“额度为 0”的入口都必须禁用，不允许进入后无路可走。

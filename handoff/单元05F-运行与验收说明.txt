@@ -1,0 +1,52 @@
+单元 05F 运行与验收说明：借款额度提示
+日期：2026-11-05
+
+一、环境
+- Windows，Node v24.18.0，pnpm 11.7.0。
+- 仓库：D:\Lianjunjie\biancheng\RichMan（在仓库根目录执行下列命令）。
+
+二、命令与期望输出
+1) 安装/依赖
+   pnpm install
+   期望：无 ERR_PNPM_IGNORED_BUILDS；若出现，执行 pnpm approve-builds --all。
+
+2) 全量测试
+   pnpm test
+   期望：Test Files 29 passed (29)，Tests 443 passed (443)，退出码 0。
+
+3) 类型检查
+   pnpm typecheck
+   期望：退出码 0（无输出即通过）。
+
+4) 生产构建
+   pnpm build
+   期望：退出码 0；apps/web/dist/assets/index-BOe5QERH.js（约 385 kB）、index-Z0VPCPB8.css（9.32 kB）。
+
+5) 本地联机冒烟（可选，需先起服务）
+   pnpm smoke:lan
+   期望：PASS。
+
+三、手工验收（浏览器）
+1) 起服务：pnpm start（8000 端口）。需要外网时另起 cloudflared：
+   D:\Lianjunjie\tools\cloudflared.exe tunnel --url http://127.0.0.1:8000 --no-autoupdate
+   （本机已用计划任务 RichManServer / RichManTunnel 托管，可 schtasks /run /tn RichManServer 启动。）
+2) 两台客户端建房开局（或一台 + 手机），进入自己的“用户操作阶段”。
+3) Q1：点“是，查看可借玩家”→ 候选行应显示“ · 最多可借 X 分”，X 等于该玩家金币与“MAX-本人金币”的较小值。
+   选中后金额页提示“最多可借 X 分（受对方可用资金与你余额上限限制）”；输入 X+1 出现红字并禁用“提交借款请求”。
+4) Q2：点“跳过”进入银行问题，提示“当前金币 Y 分；最多可借 Z 分（当前金币的 50%，向下取整）”，
+   Z = floor(Y/2)（近 MAX 时取 MAX-Y）。输入 Z+1 出现红字并禁用“确认借款”。
+5) 借到银行贷款后，本阶段内再看自身“可借额度”：应为“你有一笔未结清的银行贷款，不能再次借款（可借 0 分）”一类文案，
+   且 Q2 的“是，输入金额”为禁用态。
+6) 金币为 1 分、无贷款时：Q2 提示“可借 0 分（当前金币不足以产生贷款额度）”，“是，输入金额”禁用。
+7) 手机 360px 宽：Q1/Q2 文案换行正常，无横向滚动；顶部提示仍吸顶（05E 行为）。
+
+四、回归检查
+- 旧快照（无 bankBorrowLimitCents / lenderLimits）仍能玩：自身面板与 Q2 回退“普通贷款上限为当前金币的 50%，
+  最终以服务端为准”，Q1 回退“金额上限以服务端为准”。
+- 05E 提示语义未被改回：结果/错误横幅仍在 .game-sticky，同一时刻只有一条；通知架仍 role=log。
+- 金额校验回归：输入 0、负数、小数、1e4 等非规范串时，仍由原有表单校验报错，不会被判为“超限”。
+
+五、复现“近 MAX”场景（仅测试环境）
+不要在生产房间改余额。用单元测试即可复现：
+packages/game-core/tests/views.test.ts “余额接近上限时额度取剩余空间”；
+packages/game-core/tests/engine-round.test.ts “额度恰好等于剩余空间时可借成功，多 1 分被拒”。
