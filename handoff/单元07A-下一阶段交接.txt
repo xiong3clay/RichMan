@@ -1,0 +1,22 @@
+RichMan 单元 07A → 07B 交接
+日期：2026-11-05
+
+【当前状态】
+HEAD 含 07A 实现与文档提交；测试 39 文件 / 548 条全绿；typecheck/build 0；
+线上隧道 https://alt-gravity-cloudy-directors.trycloudflare.com（房间为空）。
+
+【07A 已就位的结构】
+- apps/web/src/game/DebtCenter.tsx：纯展示，props={view,onClose}；所有数字来自 view.finance / publicPlayers；
+  金额统一 formatCents；无协议调用、无前端重算。
+- GameView：self-panel 与 GAME_OVER 卡各有入口；debtOpen 状态；Esc 由 window keydown 关闭；
+  原内联“我的私人合同/我的银行贷款”表格已删除，改由债务中心呈现。
+- styles.css：.debt-drawer / .debt-row / .debt-request / .debt-close / 560px 媒体查询。
+
+【07B 建议范围（赌博、到期、自救与结算界面）】
+- 复用 05C 引导步骤，重点补：下注阶段的风险摘要与杠杆影响文案、开奖结算卡（含他人可见部分）、
+  银行到期窗口的完整信息、危险自救阶段的应收/应付速览（可直接复用 DebtCenter 摘要片段）。
+- 仍不改 steps.ts 的顺序语义；若需新协议字段先写规格并说明隐私边界。
+- 旧 548 条不得削弱。
+
+【并行约束】
+同一仓库同时只让一个 AI 改代码；Qoder 只读复核需写清基线提交。

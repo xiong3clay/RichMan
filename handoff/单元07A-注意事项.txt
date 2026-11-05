@@ -1,0 +1,22 @@
+RichMan 单元 07A 注意事项（下次改债务中心前先读）
+日期：2026-11-05
+
+【不得回退的点】
+- DebtCenter 只读：不得在里面加“还款/催收/同意/拒绝”的提交按钮，经济操作只能走引导步骤，避免双入口与状态分叉。
+- 金额一律 formatCents（apps/web/src/net/wire.ts:273）；禁止在前端自造元/金币换算或重算总负债、可借额度。
+  可借额度用 steps.ts 的 bankBorrowLimitOf(view)（05F 的唯一口径）。
+- 私人合同分组固定三组（进行中=ACTIVE、已结清=REPAID、冻结或坏账=FROZEN|BAD_DEBT），
+  组内按 issuedRound 升序；新增状态必须先改分组函数与测试，不能落到“未分组”黑箱。
+- 逾期判定：status==="ACTIVE" && view.round > loan.dueRound；不要用前端时间或 lastInterestRound 推断。
+- 等待秒数只用 view.serverNow 与 request.deadlineMs；≤0 一律“已超时，等待服务端关闭”，不得显示负数倒计时。
+- 风险提示只看请求自带的快照字段（borrowerCredit、borrowerDefaultedBankDebtCents），
+  不要去读对方当前金币或当前信用替代历史快照（D5 要求的是“创建时”风险）。
+- 他人区只允许 座位/昵称/状态/信用/公开失信欠款；不得出现对方金币、私人合同、下注。
+- Esc 关闭依赖 GameView 的 window keydown 监听；DebtCenter 自身的 onKeyDown 在非聚焦 div 上不会触发，别指望它。
+- styles-07a.test.ts 是 CSS 契约：改 .debt-drawer/.debt-row/.debt-close/player-row 列宽必须同步改契约。
+- 360px 目前只有契约测试，没有真机截图；对外只能说“代码与结构验证通过，真机视觉待 05B/08 补”。
+
+【已知小缺口】
+- incomingRequests 为空时只有 pending 空态文案，没有“没有收到请求”的独立提示。
+- 债务中心与他人抽屉的公开玩家表内容重复（有意保留，两个入口各自独立）。
+- 债务中心不做他人历史/战绩（需要新协议与隐私决策，留 09）。

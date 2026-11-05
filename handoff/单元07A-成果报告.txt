@@ -1,0 +1,45 @@
+RichMan 单元 07A 成果报告：债务中心与借贷明细
+日期：2026-11-05　实现：Trae CN　验收：Lead（DSH）
+规格：handoff/单元07A-债务中心.txt
+
+【结论】
+07A 完成并验收通过。债务中心从 GameView 底部两块简陋表格升级为只读抽屉：
+银行贷款逐条明细、私人合同按状态分组、待答复请求与失信风险、他人公开信息、空态与 360px 可读性。
+未新增经济命令，未改 steps.ts 引导顺序，未改协议/core/server。
+
+【交付文件】
+新增：
+- apps/web/src/game/DebtCenter.tsx（271 行，纯展示组件，props={view,onClose}）
+- apps/web/tests/debt-center.test.ts（9 条）
+- apps/web/tests/styles-07a.test.ts（4 条 CSS 契约）
+修改：
+- apps/web/src/GameView.tsx（+68/−41）：self-panel 增“债务中心（不消耗行动）”入口与 debtOpen 状态、
+  GAME_OVER 卡增“债务中心（只读）”、window keydown 监听 Esc 关闭、渲染 <DebtCenter>；
+  删除原“我的私人合同/我的银行贷款”两块内联表格（内容并入债务中心）。
+- apps/web/src/styles.css（+158）：.self-actions、.debt-drawer 系列、560px 媒体查询列宽收窄。
+
+【功能对照规格】
+D1 摘要：金币/总负债(银行·私人)/失信银行欠款/应收/冻结/坏账/可借额度，全部读 finance 字段。
+D2 银行贷款：来源(普通/透支)、本金、剩余、利率、发放轮、到期轮、计息到第几轮、状态；
+   ACTIVE 且 round>dueRound 时红字“已逾期，将在到期阶段处理”。
+D3 私人合同：双角色方向（我欠 X / X 欠我）、本金/剩余/利率/发起轮/计息轮/状态；
+   分“进行中/已结清/冻结或坏账”三组，组内按 issuedRound 升序，空组显示“无”。
+D4 请求区：pendingRequest 显示对手、金额、利率、等待秒数（≤0 显示“已超时，等待服务端关闭”）、
+   “同一借款人同时只能有一个等待中请求”；incomingRequests 显示创建时信用与失信欠款，
+   失信时红字风险行；按规格只展示不放同意/拒绝按钮（操作仍走引导步骤）。
+D5 他人公开信息：座位/昵称/状态/信用/公开失信欠款；不含他人金币、私人合同、下注。
+D6 空态与可读性：无贷款/无合同时空态且不渲染 .loan-row；抽屉 width min(620px,100%)、min-width:0、
+   overflow-x:hidden、overflow-wrap:anywhere；560px 下摘要单列、他人表列宽收窄、失信列换行。
+
+【测试与构建（Lead 亲自执行）】
+pnpm test      39 文件 / 548 条全过（535 → 548，新增 9 + 4），TEST_EXIT=0
+pnpm typecheck TSC=0
+pnpm build     BUILD=0（index-BlLj75gb.js 393.00kB、index-Ca0dxNVV.css 11.14kB；原 386.47kB/9.32kB）
+线上隧道 https://alt-gravity-cloudy-directors.trycloudflare.com/ 已返回新构建资源（200）。
+旧 535 条一条未删、未跳过、未放宽。
+
+【没有做的事（不隐瞒）】
+- 没有重拍 360px 真机截图：jsdom 无布局引擎，CSS 只能契约测试兜底；真机视觉并入 05B/08。
+- 债务中心是只读账本，不提供还款/催收/答复的第二个提交入口（规格明确不做，防双入口）。
+- 没有做他人合同历史/战绩查询（需要新协议与隐私决策，留 09）。
+- 借款请求区在没有 incomingRequests 时不额外显示“没有收到请求”（只有 pending 空态文案）。

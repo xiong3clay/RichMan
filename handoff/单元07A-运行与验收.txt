@@ -1,0 +1,30 @@
+RichMan 单元 07A 运行与验收记录
+日期：2026-11-05　执行：Lead
+
+【环境】
+仓库 D:\Lianjunjie\biancheng\RichMan，Node 24.18.0 / pnpm 11.7.0，基线 66a5b02。
+未新增依赖、未改 lockfile。
+
+【验收命令与真实结果】
+1) pnpm test
+   Test Files 39 passed (39)
+   Tests 548 passed (548)
+   TEST_EXIT=0
+2) pnpm -s typecheck → TSC=0
+3) pnpm -s build
+   vite v8.3.5，130 modules，apps/web/dist/assets/index-BlLj75gb.js 393.00kB（gzip 116.12kB）、
+   index-Ca0dxNVV.css 11.14kB（gzip 2.90kB），built in 285ms，BUILD=0
+4) 线上静态资源核对
+   GET https://alt-gravity-cloudy-directors.trycloudflare.com/ → 200，
+   HTML 引用 /assets/index-BlLj75gb.js 与 /assets/index-Ca0dxNVV.css，与新构建一致。
+   服务端无需重启（计划任务 RichManServer 用 tsx 直接跑源码，静态目录指向 apps/web/dist）。
+
+【验收方式】
+- 逐条核对规格 D1–D6 的渲染实现与测试断言，不只看测试通过。
+- 检查 GameView diff：只加入口/debtOpen/Esc 监听/渲染，并删除两块旧表格；steps.ts 零改动，协议零改动。
+- 检查新测试：9 条行为断言 + 4 条 CSS 契约，均对真实组件渲染或真实 styles.css 断言，
+  不是“改实现迁就测试”。
+
+【尚未覆盖】
+- 真机 360px 视觉验收（仅 CSS 契约 + 结构断言）。
+- 真人对局中“有贷款时打开债务中心”的实际观感（并入 05B 试玩清单）。
