@@ -1,5 +1,5 @@
 RichMan 项目当前状态
-更新日期：2026-11-05
+更新日期：2026-11-06
 更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复；07A/07B 由 Trae 实现，Lead 验收）
 
 【版本】
@@ -10,7 +10,8 @@ RichMan 项目当前状态
 
 【进度与范围】
 已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B。
-当前子任务：05B 真人/真机试玩（第一轮提示看不见→05E，第二轮额度看不到→05F，均待真机复测）。
+当前子任务：07C（全部还款/全部催收/返回上一步/房主销毁房间），规格 handoff/单元07C-全还全收返回与销毁房间.txt，交 Trae 实现中。
+05B 真人/真机试玩第一轮已在隧道上开始（用户提出 07C 三项需求），复测仍未完成。
 下一入口：08 教程/手机适配/音频（规格待写）；09 加固/跨网/验证/一键发布包。05B 建议在 08 前用真机玩一局（下注风险、开奖、到期、自救现在都有解释）。
 05D：BETTING 猜点步可直接“放弃本轮下注”（SUBMIT_BET 0 注）+ GAME_OVER 后房主再来一局（rematch）。
 05E：顶部 .game-sticky = header + 单条反馈横幅 + 事件通知架，.stage 只放当前步骤卡；
@@ -19,6 +20,9 @@ RichMan 项目当前状态
      Q1/Q2/自身面板显示具体数字；额度 0 的入口一律禁用并给原因；非规范金额串不判超限。
 07A：债务中心只读抽屉（DebtCenter.tsx），银行贷款/私人合同逐条明细与三组分类、请求与失信风险、
      他人公开信息；入口在 self-panel 与 GAME_OVER 卡，Esc 可关；不改 steps.ts/协议/core。
+07C（进行中）：Q3/危险收集两处「全部还款/全部催收」只填金额不自动提交，余额不足禁用并给原因；
+      Q2/Q4/空 Q3 与六种确认卡补「返回」，取消 steps.ts 空 Q3 自动跳过；
+      协议新增 destroy_room / room_destroyed，房主可销毁当前房间并删除 rooms/<code>/，其他连接收通知后回首页。
 07B：下注风险块（赢/输/输后余额/透支转贷款/失信 1 倍）、等待卡只显示本人下注与 x/y 人数、
      结算卡补开奖点与透支行且 GAME_OVER 不再吞卡、bankDue 后果与倒计时、danger 原因与三路后果、
      终局名单与本人破产说明；只改 apps/web，BET_SETTLED 只取本人条目。
@@ -72,11 +76,12 @@ pnpm smoke:lan PASS（05D 验收时）
 【运行环境】
 服务器与隧道由 Windows 计划任务托管（RichManServer / RichManTunnel，需 -AllowStartIfOnBatteries
 -DontStopIfGoingOnBatteries）。当前隧道地址：
-https://alt-gravity-cloudy-directors.trycloudflare.com（2026-11-05 22:51 重启用；域名每次重启会变）
+https://diagnostic-opportunity-goal-sheffield.trycloudflare.com（2026-11-06 09:48 重启用；域名每次重启会变）
 校园网 sdu_net 有客户端隔离，手机必须走隧道，不能直连 10.25.241.x:8000；
 换域名后 sessionStorage token 失效，用「房间码 + 恢复码」恢复。
 
 【待办】
+0) 07C 实现与验收：规格已提交 0c9a0ca；Trae 完成后 Lead 跑 pnpm test/typecheck/build、核对删除范围与协议 strict、再提交。
 1) 05B 真机复测：按 handoff/单元05B-试玩清单.txt 记录等待/卡点，重点看 05E 提示可见性与 05F 额度数字/禁用态。
 2) 05F 复核已处理（handoff/复核-单元05F.txt）：1 must-fix + 4 should-fix 已修复并全量验证；
    未重拍 360px 截图、“借到贷款后额度 0”只做了单测，并入 05B。
