@@ -6,6 +6,9 @@ import { createRoomDestroyedHandler, requestRoomDestroy } from "./app-handlers";
 import type { ClientHandlers, ConnectionStatus, StoredSession } from "./net/client";
 import type { JoinedInfo, WireCommandResult, WireGameEvent, WireRoom, WireSnapshotView } from "./net/wire";
 import { isSessionError, lobbyErrorText, serverErrorText } from "./net/wire";
+import { TutorialOverlay } from "./tutorial/TutorialOverlay";
+import { RulesSheet } from "./tutorial/RulesSheet";
+import { markTutorialSeen, safeLocalStorage, tutorialSeen } from "./tutorial/storage";
 
 interface ServerError {
   code: string;
@@ -36,6 +39,15 @@ export default function App() {
   const [serverError, setServerError] = useState<ServerError | null>(null);
   const [replaced, setReplaced] = useState(false);
   const [busy, setBusy] = useState(false);
+  /**
+   * 首次进入自动打开教程。storage 完全不可用（对象都不存在）时不自动弹，
+   * 因为无法记录已读；玩家仍可从入口页手动打开，避免每次进入都被挡住。
+   */
+  const [tutorialOpen, setTutorialOpen] = useState(() => {
+    const storage = safeLocalStorage();
+    return storage !== null && !tutorialSeen(storage);
+  });
+  const [rulesOpen, setRulesOpen] = useState(false);
 
   const clientRef = useRef<RichmanClient | null>(null);
   /** 主动退出/换房间期间忽略旧连接上的迟到错误。 */
@@ -165,6 +177,11 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  function finishTutorial(): void {
+    markTutorialSeen(safeLocalStorage());
+    setTutorialOpen(false);
+  }
+
   async function handleCreate(): Promise<void> {
     const nick = nickname.trim();
     if (nick === "") {
@@ -271,10 +288,14 @@ export default function App() {
           error={serverError}
           events={events}
           onDestroyRoom={() => requestRoomDestroy(clientRef.current)}
+          onOpenTutorial={() => setTutorialOpen(true)}
+          onOpenRules={() => setRulesOpen(true)}
         />
       ) : roomCode !== null && room !== null ? (
         <LobbyView room={room} joined={joined} error={lobbyError} onReady={handleReady} onStart={handleStart}
-          onDestroyRoom={() => requestRoomDestroy(clientRef.current)} />
+          onDestroyRoom={() => requestRoomDestroy(clientRef.current)}
+          onOpenTutorial={() => setTutorialOpen(true)}
+          onOpenRules={() => setRulesOpen(true)} />
       ) : roomCode !== null ? (
         <section className="panel">
           <h1>正在进入房间 {roomCode}</h1>
@@ -320,6 +341,10 @@ export default function App() {
               加入
             </button>
           </div>
+          <div className="row entry-links">
+            <button type="button" className="link" onClick={() => setTutorialOpen(true)}>新手教程</button>
+            <button type="button" className="link" onClick={() => setRulesOpen(true)}>规则说明</button>
+          </div>
           {entryError !== null ? <p className="reason">{entryError}</p> : null}
           {lobbyError !== null ? <p className="reason">{lobbyError}</p> : null}
         </section>
@@ -334,6 +359,9 @@ export default function App() {
           </button>
         ) : null}
       </footer>
+
+      {tutorialOpen ? <TutorialOverlay onFinish={finishTutorial} /> : null}
+      {rulesOpen ? <RulesSheet onClose={() => setRulesOpen(false)} /> : null}
     </div>
   );
 }

@@ -9,6 +9,9 @@ export interface LobbyViewProps {
   onStart: () => void;
   /** 07C：仅房主可见；由 App 转发 client.destroyRoom；false 表示本地发送失败。 */
   onDestroyRoom?: () => boolean;
+  /** 08A：新手教程/规则说明入口；旧调用方不传时保持原样。 */
+  onOpenTutorial?: () => void;
+  onOpenRules?: () => void;
 }
 
 const ROOM_STATE_LABELS: Record<WireRoom["state"], string> = {
@@ -19,7 +22,7 @@ const ROOM_STATE_LABELS: Record<WireRoom["state"], string> = {
   ENDED: "已结束",
 };
 
-export function LobbyView({ room, joined, error, onReady, onStart, onDestroyRoom }: LobbyViewProps) {
+export function LobbyView({ room, joined, error, onReady, onStart, onDestroyRoom, onOpenTutorial, onOpenRules }: LobbyViewProps) {
   const [confirmDestroy, setConfirmDestroy] = useState(false);
   const [destroyError, setDestroyError] = useState<string | null>(null);
   const me = joined === null ? undefined : room.players.find((player) => player.playerId === joined.playerId);
@@ -82,6 +85,16 @@ export function LobbyView({ room, joined, error, onReady, onStart, onDestroyRoom
           开始游戏
         </button>
       </div>
+      {onOpenTutorial !== undefined || onOpenRules !== undefined ? (
+        <div className="row lobby-links">
+          {onOpenTutorial !== undefined ? (
+            <button type="button" className="link" onClick={onOpenTutorial}>新手教程</button>
+          ) : null}
+          {onOpenRules !== undefined ? (
+            <button type="button" className="link" onClick={onOpenRules}>规则说明</button>
+          ) : null}
+        </div>
+      ) : null}
       {startReason !== null ? <p className="reason">{startReason}</p> : null}
       {isHost ? (
         confirmDestroy ? (

@@ -978,6 +978,220 @@ p {
   color: #9fb0c3;
 }
 
+/* 08A 教程与规则页：固定覆盖层，z-index 高于 .game-sticky(6)，内部滚动。 */
+.entry-links,
+.lobby-links {
+  justify-content: flex-start;
+}
+
+.entry-links .link,
+.lobby-links .link {
+  display: inline-grid;
+  place-items: center;
+  min-height: 44px;
+}
+
+.tutorial-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(5, 10, 16, 0.78);
+}
+
+.tutorial-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(640px, 100%);
+  min-width: 0;
+  max-width: 100%;
+  max-height: 100dvh;
+  overflow: hidden;
+  background: #16222e;
+  border: 1px solid #3d7fae;
+  border-radius: 16px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+}
+
+.tutorial-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px 10px;
+  border-bottom: 1px solid #24374a;
+}
+
+.tutorial-head h2 {
+  font-size: 20px;
+  color: #f2f8ff;
+}
+
+.tutorial-head .eyebrow {
+  margin-top: 4px;
+}
+
+.tutorial-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tutorial-head-btn {
+  display: inline-grid;
+  place-items: center;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 8px;
+}
+
+.tutorial-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: 16px 20px;
+  font-size: 16px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.tutorial-title {
+  font-size: 18px;
+  color: #8fd0ff;
+  margin-bottom: 10px;
+}
+
+.tutorial-paragraph {
+  margin-top: 8px;
+  color: #dbe6f2;
+}
+
+.tutorial-checklist {
+  margin: 12px 0 0;
+  padding-left: 20px;
+  color: #b9c7d6;
+}
+
+.tutorial-checklist li {
+  margin-top: 6px;
+}
+
+.tutorial-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 12px 20px 16px;
+  border-top: 1px solid #24374a;
+}
+
+.tutorial-actions button {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.rules-sheet {
+  width: min(680px, 100%);
+  min-width: 0;
+  max-width: 100%;
+  max-height: 100dvh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  background: #16222e;
+  border: 1px solid #3d7fae;
+  border-radius: 16px;
+  padding: 18px 20px 20px;
+  font-size: 15px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.rules-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.rules-head h2 {
+  font-size: 20px;
+  color: #f2f8ff;
+}
+
+.rules-close {
+  display: grid;
+  place-items: center;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 8px;
+}
+
+.rules-section {
+  margin-top: 16px;
+  min-width: 0;
+}
+
+.rules-section h3 {
+  font-size: 16px;
+  color: #8fd0ff;
+  margin-bottom: 6px;
+}
+
+.rules-paragraph {
+  margin-top: 6px;
+  color: #dbe6f2;
+}
+
+.rules-bullets {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  color: #b9c7d6;
+}
+
+.rules-bullets li {
+  margin-top: 4px;
+}
+
+@media (max-width: 560px) {
+  .tutorial-overlay {
+    padding: 0;
+    align-items: stretch;
+  }
+
+  .tutorial-panel,
+  .rules-sheet {
+    width: 100%;
+    max-height: 100dvh;
+    border-left: 0;
+    border-right: 0;
+    border-radius: 0;
+  }
+
+  .tutorial-head,
+  .tutorial-body,
+  .tutorial-actions {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .tutorial-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .tutorial-actions button {
+    width: 100%;
+  }
+}
+
 /* 他人公开信息沿用 .player-table 语义，但列宽必须受抽屉宽度约束，360px 不得横向滚动。 */
 .debt-drawer .player-row {
   grid-template-columns: 40px minmax(0, 1fr) 56px 56px minmax(0, 96px);

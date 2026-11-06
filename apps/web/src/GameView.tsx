@@ -66,6 +66,9 @@ export interface GameViewProps {
   events: WireGameEvent[];
   /** 07C：房主销毁房间入口；非房主不显示。返回 false 表示本地未发送成功。 */
   onDestroyRoom?: () => boolean;
+  /** 08A：教程/规则入口；只影响阅读，不发命令、不消耗行动。 */
+  onOpenTutorial?: () => void;
+  onOpenRules?: () => void;
 }
 
 const CONN_LABELS: Record<ConnectionStatus, string> = {
@@ -149,7 +152,7 @@ export function GameView(props: GameViewProps) {
   return <GameSessionView key={props.view.gameId} {...props} />;
 }
 
-function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, client, status, statusDetail, result, error, events, onDestroyRoom }: GameViewProps) {
+function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, client, status, statusDetail, result, error, events, onDestroyRoom, onOpenTutorial, onOpenRules }: GameViewProps) {
   const [ui, setUi] = useState<UiState>(INITIAL_UI_STATE);
   const [amount, setAmount] = useState("");
   const [rateText, setRateText] = useState("1000");
@@ -1014,14 +1017,11 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
                 <span>{formatCents(finance.receivableCents)}</span>
               </div>
               <div className="loan-row">
-                <span>可借银行</span>
-                <span>{bankLimit === null ? BANK_LOAN_LIMIT_HINT : formatCents(bankLimit)}</span>
-              </div>
-              <div className="loan-row">
                 <span>可向他人借</span>
                 <span>{String(borrowableLenders)} 人</span>
               </div>
             </div>
+            <p className="step-hint">自救期间不能新借银行贷款。</p>
             <p className="step-hint">
               向他人借款/催收应收：成功后余额转正即解除危险。
             </p>
@@ -1649,6 +1649,12 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
             </button>
             <button type="button" className="topbar-btn" onClick={() => setDebtOpen(true)}>
               债务中心（不消耗行动）
+            </button>
+            <button type="button" className="topbar-btn" onClick={() => onOpenTutorial?.()}>
+              教程与规则
+            </button>
+            <button type="button" className="topbar-btn" onClick={() => onOpenRules?.()}>
+              规则说明
             </button>
           </div>
         </div>
