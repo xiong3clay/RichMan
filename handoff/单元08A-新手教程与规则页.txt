@@ -1,0 +1,153 @@
+单元 08A：新手教程与规则页（唯一施工规格）
+版本：2026-11-06 Lead 编写；08 拆为 08A 教程/规则页 → 08B 手机适配 → 08C 音频，本文件只覆盖 08A。
+依赖基线：HEAD 5da3952（07C 已完成，54 文件 / 646 测试、typecheck 0、build 0）。
+
+一、目标
+1. 首次进入的玩家在 60 秒内知道“这局怎么走、钱怎么借、失信会怎样”，并能自己找到债务中心。
+2. 教程最多 5 页，每页可跳过，看完/跳过后可随时重看；规则页常驻，随时可查细节。
+3. 教程与规则只影响阅读，不消耗行动、不发命令、不改变服务器状态、不参与身份恢复。
+
+二、范围与硬约束
+- 只改 apps/web/**：可新增 apps/web/src/tutorial/** 与 apps/web/tests/**，可改 App.tsx、LobbyView.tsx、GameView.tsx、styles.css。
+- 不改 packages/**、apps/server/**、net/wire.ts、net/client.ts 协议、game/steps.ts 语义、confirmations、依赖。
+- 不新增依赖（不引入 markdown/教程库/动画库），不 commit，PROTOCOL_VERSION 保持 1。
+- 旧 646 条测试不得删除、跳过或放宽；LobbyView/GameView 新增 props 必须可选，旧测试调用方式不变。
+- 教程/规则文案里的数字与规则必须与实现一致，依据 handoff/规则决策表.txt 与 packages/shared/src/rules.ts。
+
+三、文件清单
+1) 新建 apps/web/src/tutorial/pages.ts
+   export interface TutorialPage { id: string; title: string; paragraphs: string[]; checklist?: string[] }
+   export const TUTORIAL_PAGES: readonly TutorialPage[]
+   恰好 5 页，id 唯一（如 basics/bank/private/gamble/debt）。
+2) 新建 apps/web/src/tutorial/rules.ts
+   export interface RuleSection { id: string; title: string; paragraphs: string[]; bullets: string[] }
+   export const RULE_SECTIONS: readonly RuleSection[]  // 8 节，顺序固定见第五节
+3) 新建 apps/web/src/tutorial/storage.ts
+   export const TUTORIAL_SEEN_KEY = "richman.tutorial.seen.v1"
+   export interface TutorialStorage { getItem(key: string): string | null; setItem(key: string, value: string): void }
+   export function tutorialSeen(storage: TutorialStorage | null | undefined): boolean
+     - storage 为空返回 false；getItem 返回值只要不为 null 即视为已读；getItem 抛异常吞掉并返回 false。
+   export function markTutorialSeen(storage: TutorialStorage | null | undefined): void
+     - setItem(TUTORIAL_SEEN_KEY, "1")；storage 为空或抛异常时静默返回，不得让 UI 崩。
+   export function safeLocalStorage(): TutorialStorage | null
+     - try { return globalThis.localStorage } catch { return null }；不得抛。
+   禁止把 token/房间码/昵称等任何身份数据写进这个 key。
+4) 新建 apps/web/src/tutorial/TutorialOverlay.tsx
+   props: { pages?: readonly TutorialPage[]; onFinish: () => void }
+   - 默认 TUTORIAL_PAGES；内部 state 记录当前页 index。
+   - 顶部：标题“新手教程”、页码“第 X / 5 页”、“跳过教程”按钮（每页都在）。
+   - 正文：当前页 title、paragraphs、checklist（有则渲染成列表）。
+   - 底部按钮：上一步（第 1 页 disabled）、下一步（非末页）、我知道了（末页）。
+   - 跳过教程 / 我知道了 / 关闭：都只调用 onFinish，由上层负责写 seen；组件本身不读写存储、不发网络请求。
+   - role="dialog" aria-modal="true" aria-label="新手教程"，遮罩点击不关闭（防误触）。
+5) 新建 apps/web/src/tutorial/RulesSheet.tsx
+   props: { sections?: readonly RuleSection[]; onClose: () => void }
+   - role="dialog" aria-modal="true" aria-label="规则说明"；单个可滚动面板，按 RULE_SECTIONS 顺序渲染标题/段落/列表。
+   - 顶部“规则说明”、底部/顶部“关闭规则”按钮 → onClose。
+6) 修改 apps/web/src/App.tsx
+   - 状态：const [tutorialOpen, setTutorialOpen] = useState(() => !tutorialSeen(safeLocalStorage()));
+     const [rulesOpen, setRulesOpen] = useState(false);
+   - finishTutorial(): markTutorialSeen(safeLocalStorage()); setTutorialOpen(false)。
+   - 根节点（footer 之后、最外层 .app 内）渲染：
+       {tutorialOpen ? <TutorialOverlay onFinish={finishTutorial} /> : null}
+       {rulesOpen ? <RulesSheet onClose={() => setRulesOpen(false)} /> : null}
+   - 入口页（大厅未进房）在“加入”按钮下方加：
+       <button type="button" className="link" onClick={() => setTutorialOpen(true)}>新手教程</button>
+       <button type="button" className="link" onClick={() => setRulesOpen(true)}>规则说明</button>
+   - 把 onOpenTutorial={() => setTutorialOpen(true)}、onOpenRules={() => setRulesOpen(true)} 传给 LobbyView 与 GameView。
+7) 修改 apps/web/src/LobbyView.tsx
+   - props 增加可选 onOpenTutorial?: () => void; onOpenRules?: () => void。
+   - 两者存在时，在 lobby-actions 下方渲染两个 .link 按钮：“新手教程”“规则说明”。
+8) 修改 apps/web/src/GameView.tsx
+   - props 增加可选 onOpenTutorial?: () => void; onOpenRules?: () => void。
+   - self-actions 内在“查看其他玩家”“债务中心”之后增加一个 .topbar-btn 按钮“教程与规则”，点击打开教程；
+     另在同一区域提供“规则”链接（或点击后先教程、规则按钮在教程内也可，但验收要求至少一个对局内可直达规则页）。
+   - 两个入口都不得调用 client.send/sendLobby、不得消耗行动、不得改任何 ui state 的步骤。
+9) 修改 apps/web/src/styles.css
+   - .tutorial-overlay / .tutorial-panel / .tutorial-head / .tutorial-body / .tutorial-actions / .rules-sheet / .rules-section；
+   - 覆盖全屏、fixed、z-index 高于 .game-sticky(6)，内部滚动，max-height:100dvh；按钮 min-height:44px；
+     正文 15–16px、行高 1.6、overflow-wrap:anywhere；360px 不横向溢出。
+10) 新测试（apps/web/tests/）：
+   tutorial-pages.test.ts、tutorial-storage.test.ts、tutorial-overlay.test.ts、rules-sheet.test.ts、tutorial-entry.test.ts、styles-tutorial.test.ts（名称可微调，但六类覆盖都要有）。
+
+四、教程 5 页必须覆盖的事实（措辞可润色，规则不得改）
+P1 一局怎么玩
+   - 2～10 人同房，每人开局 100 金币；最后没破产的人获胜。
+   - 每轮顺序：利息 → 银行到期 → 行动 → 全员下注 →（第 3/6/9…轮）税收 → 本轮结算。
+   - 超时会替你推进：行动超时=结束行动；下注超时按 0 注；银行到期/自救超时按对应默认处理。
+P2 银行借钱与失信
+   - 普通贷款最多借“当前金币的 50%”，每轮利息 10%，借出后第 3 轮计息完到期（发放轮 N → N+3 轮）。
+   - 到期余额够：可以还，也可以选择不还；余额不足：直接失信，没有选择窗口。
+   - 拒绝或超时 = 永久失信：这笔银行贷款永久不能再还、也不再计息；不能再新增银行贷款；下注只能 1 倍；但不会被淘汰。
+   - 私人负债不影响银行贷款资格。
+P3 玩家之间借钱
+   - 借款人自己填金额和利率（0～10000 基点，即 0%～100%），出借人 45 秒内（快速模式 20 秒）答复。
+   - 同一个借款人同时最多 1 个待答复请求；同一出借人可以同时收到多人的请求。
+   - 同意后立刻转账；每轮按约定利率计息；出借人可随时催收（上限=对方当前金币），借款人可随时还。
+   - 借款人破产 → 这笔应收记坏账；出借人破产 → 合同冻结，不能再还/催收。
+   - 失信者也能借，但出借人一定会看到“失信风险 + 失信欠款”。
+P4 下注、纳税与自救
+   - 每轮全员下注：猜 0 或 1、金额 0～当前金币、杠杆 1 或 2 倍。
+   - 提交即锁定，不能改；全员提交后立即开奖，不必等倒计时；开奖前看不到别人的金额/猜测/杠杆。
+   - 赢 = +注额×杠杆，输 = -注额×杠杆；2 倍输且余额不够时，差额自动转“赌博透支贷款”，按银行规则计息。
+   - 失信玩家只能 1 倍；0 注 = 放弃本轮下注。
+   - 每 3 轮每人交 20 金币税；余额不够进入“危险自救”（标准 60 秒），只能向玩家借款、催收、或放弃；放弃/超时 = 破产（私人债务转坏账、出借人应收冻结）。
+P5 查账与隐私
+   - 顶部固定轮次、阶段、倒计时；自身面板看金币、银行/透支/失信欠款、私人负债、可借额度、信用。
+   - “债务中心”随时可开、不消耗行动：银行贷款逐条、私人合同按可还/可催收/冻结坏账分类。
+   - 只能看到别人的昵称/座位/存活/信用/失信欠款，看不到别人的贷款与赌注明细。
+   - 看教程、查债务都不消耗行动；教程状态不影响座位与恢复码。
+
+五、规则页 8 节（标题固定，内容按实现写细节）
+R1 目标与流程：人数、初始金币、每轮阶段顺序、超时默认、胜利条件。
+R2 银行普通贷款：50% 上限、10%/轮、N+3 到期、余额不足直接失信、拒绝/超时永久失信、失信后不能新增银行贷款。
+R3 赌博透支贷款：2 倍输的差额、按银行规则计息、失信欠款不可偿还、与普通贷款分开展示。
+R4 私人借贷：利率 0～10000 基点、45 秒答复、单借款人 1 个待答复、同意即转账、每轮计息、催收上限、坏账/冻结。
+R5 下注：0～当前金币、猜 0/1、1/2 倍、提交锁定、全员提交立即开奖、超时 0 注、失信 1 倍、开奖前隐私。
+R6 税收与危险自救：每 3 轮 20 金币、余额不足进自救、自救可用手段（私人借款/催收/放弃）、破产结算与超时。
+R7 信用与失信：永久失信、不淘汰、只能 1 倍、仍可借私人钱但显示风险、失信欠款金额。
+R8 隐私与查询：自己可见字段、他人可见字段、债务中心入口与“不消耗行动”。
+
+六、交互规格
+- 首次自动打开：App 首次挂载时 tutorialSeen=false → tutorialOpen=true；已读 → 不打开。
+- 关闭路径：跳过教程、末页“我知道了”、关闭按钮，三者都写 seen 后关闭；写失败也关闭（不阻断）。
+- 重看：入口页/大厅/对局内的“新手教程”“规则说明”随时可开；教程从第 1 页开始。
+- 打开教程/规则期间，底层页面的倒计时照常由服务端推进，但 UI 不得因此发命令；关闭后按最新快照重建。
+- 键盘：Esc 关闭（可选实现，不强制测试）；遮罩点击不关闭。
+- 焦点：打开时焦点进入面板（focus 首个按钮），关闭后尽量回到触发按钮；dom-harness 不支持则只做不报错的 best-effort。
+
+七、必须顺带修掉的既有文案错误
+GameView 危险自救 ask 卡目前有一行“可借银行”+额度，但引擎在 TAX 阶段拒绝 BORROW_BANK（自救只能私人借款/催收/放弃）。
+- 改为“自救期间不能新借银行贷款”，或删除该行；不得继续显示可借银行额度。
+- 补测试：danger 卡文本不含“可借银行”，且包含“自救期间不能新借银行贷款”。
+- 只改文案与测试，不改引擎/协议/规则。
+
+八、测试清单（至少 15 条）
+T1 TUTORIAL_PAGES 页数 1～5、id 唯一、每页 title 与 paragraphs 非空、全部正文总字数 ≤1200。
+T2 全部正文必须出现关键词：失信、50%、10%、45 秒、透支、0 注、债务中心、冻结、坏账。
+T3 tutorialSeen：null → false；getItem 返回 "1" → true；getItem 抛错 → false 且不抛。
+T4 markTutorialSeen：写入 KEY="1"；setItem 抛错不抛。
+T5 TutorialOverlay 第 1 页：标题、第 1 / 5 页、上一步 disabled。
+T6 点“下一步”到第 2 页；到末页按钮变“我知道了”。
+T7 点“跳过教程”/“我知道了”调用 onFinish 恰好一次。
+T8 RulesSheet 渲染 R1～R8 标题；点“关闭规则”调用 onClose。
+T9 LobbyView 传入口 props 时出现“新手教程”“规则说明”，点击各调用一次；不传时不渲染（旧测试不变）。
+T10 GameView 对局内入口存在，点击调用 onOpenTutorial/onOpenRules，且 client 发送方法 0 次。
+T11 首次进入 gate：未读自动打开；已读不打开；跳过后用同一 storage 重新挂载不再自动打开。
+     （可做 TutorialGate 小组件，或用源码契约 + storage 单测；二选一，但交接必须写明覆盖方式。）
+T12 关闭教程后 storage 写入 seen；再次挂载不打开。
+T13 storage 不可用（getItem/setItem 抛）时仍能打开/关闭，不崩。
+T14 CSS 契约：.tutorial-overlay position:fixed、z-index > 6、.tutorial-actions 按钮 min-height:44px、正文 overflow-wrap、@media 360 不横向滚动。
+T15 危险自救卡不含“可借银行”，含“自救期间不能新借银行贷款”。
+
+九、验收与交付
+- pnpm test：总条数 ≥660（旧 646 不减少），贴真实尾部输出；pnpm typecheck、pnpm build 贴真实 exit code 与体积。
+- 用 Edge/Chrome 360×640 或 380×700 实际截图：教程第 1 页、最后一页、规则页，确认无横向滚动、按钮可点。
+- 四份 handoff：单元08A-成果报告.txt、单元08A-运行与验收.txt、单元08A-下一阶段交接.txt、单元08A-注意事项.txt；
+  写清文件清单、测试数字、入口位置、存储 key、未做的部分（08B 手机适配、08C 音频）。
+- 不 commit；冲突先报告，不擅自改引擎/协议/旧断言。
+
+十、禁止事项
+- 不得写“失信可以还款”“私人负债会降低银行贷款额度”“锁定后还能改注”“破产可以复活”等与实现相反的文案。
+- 不得把教程做成必须读完才能玩；不得用教程状态控制座位/恢复/权限。
+- 不得在 tutorial 组件里直接访问 localStorage 之外的身份数据或发网络请求。

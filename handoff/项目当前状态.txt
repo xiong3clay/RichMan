@@ -10,9 +10,10 @@ RichMan 项目当前状态
 
 【进度与范围】
 已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C。
-当前子任务：07C 已完成（全部还款/全部催收/返回上一步/房主销毁房间），Qoder 三轮复核后 Lead 验收提交。
-05B 真人/真机试玩第一轮已在隧道上开始（用户提出 07C 三项需求），复测仍未完成。
-下一入口：08 教程/手机适配/音频（规格待写）；09 加固/跨网/验证/一键发布包。05B 建议在 08 前用真机玩一局（下注风险、开奖、到期、自救现在都有解释）。
+当前子任务：08A 新手教程与规则页（规格 handoff/单元08A-新手教程与规则页.txt 已写，待 Trae 实现）；07C 已完成并验收。
+05B 真人试玩：2026-11-06 用户在 07C 后完整玩过一局并确认“不错”，判为真人试玩通过；清单中的等待时长与 360px 截图未逐项记录，并入 08 记录。
+下一入口：08 拆为 08A 教程与规则页（规格已写，待 Trae）→ 08B 手机适配 → 08C 音频；09 加固/跨网/验证/一键发布包。
+08C 音频要求：轻松幽默的配乐；只用自制或明确授权素材，记录来源/许可证，加载失败不阻塞。
 05D：BETTING 猜点步可直接“放弃本轮下注”（SUBMIT_BET 0 注）+ GAME_OVER 后房主再来一局（rematch）。
 05E：顶部 .game-sticky = header + 单条反馈横幅 + 事件通知架，.stage 只放当前步骤卡；
      反馈优先级 本地提示 > 服务端 error > 命令回执；失败横幅 role=alert、通知架 role=log。
@@ -24,6 +25,8 @@ RichMan 项目当前状态
       Q2/Q4/空 Q3 与六种确认卡补「返回」，取消 steps.ts 空 Q3 自动跳过；
       协议新增 destroy_room / room_destroyed，房主可销毁当前房间并删除 rooms/<code>/，其他连接收通知后回首页；
       Qoder 三轮复核：M1/S1/S2/S4/S5 → M2/S-D/S-E/S-N/S-F → S-A/S-B 全部处理，详见 07C 不得回退点。
+08A：新手教程 5 页（流程/银行失信/私人借贷/下注纳税自救/查账隐私）+ 规则页 8 节，可跳过、可重看，
+     localStorage 记已读；只改 apps/web，不改协议/引擎；顺带修危险自救卡“可借银行”误导文案。
 07B：下注风险块（赢/输/输后余额/透支转贷款/失信 1 倍）、等待卡只显示本人下注与 x/y 人数、
      结算卡补开奖点与透支行且 GAME_OVER 不再吞卡、bankDue 后果与倒计时、danger 原因与三路后果、
      终局名单与本人破产说明；只改 apps/web，BET_SETTLED 只取本人条目。
@@ -93,12 +96,13 @@ pnpm smoke:lan PASS（05D 验收时）
 【运行环境】
 服务器与隧道由 Windows 计划任务托管（RichManServer / RichManTunnel，需 -AllowStartIfOnBatteries
 -DontStopIfGoingOnBatteries）。当前隧道地址：
-https://diagnostic-opportunity-goal-sheffield.trycloudflare.com（2026-11-06 09:48 重启用；域名每次重启会变）
+https://diego-rotary-inclusive-hughes.trycloudflare.com（2026-11-06 21:5x 重启后；域名每次重启会变）
 校园网 sdu_net 有客户端隔离，手机必须走隧道，不能直连 10.25.241.x:8000；
 换域名后 sessionStorage token 失效，用「房间码 + 恢复码」恢复。
 
 【待办】
-0) 07C 已完成并验收（54 文件/646 条、typecheck/build 0）：全部还款/全部催收、返回上一步、房主销毁房间；
+0) 08A 进行中：规格 handoff/单元08A-新手教程与规则页.txt；待 Trae 实现，验收后提交并写四份 handoff。
+   07C 已完成并验收（54 文件/646 条、typecheck/build 0）：全部还款/全部催收、返回上一步、房主销毁房间；
    Qoder 三轮复核意见与修复记录在 handoff/复核-单元07C*.txt 与 单元07C-复核修复记录.txt；
    遗留：360px 真机截图未采集、销毁仅单进程验证、S-B 毫秒竞态无端到端用例（有判定单测 + peer 兜底）。
 1) 05B 真机复测：按 handoff/单元05B-试玩清单.txt 记录等待/卡点，重点看 05E 提示可见性与 05F 额度数字/禁用态。
