@@ -102,7 +102,7 @@ https://diego-rotary-inclusive-hughes.trycloudflare.com（2026-11-06 21:5x 重�
 换域名后 sessionStorage token 失效，用「房间码 + 恢复码」恢复。
 
 【待办】
-0) 08A 已完成 Qoder 复核修复（61 文件/684 条、typecheck/build 0）：教程 5 页 + 规则页 8 节 +
+0) 08A 已提交（实现 4832b27 / 文档 46e72f7；61 文件/684 条、typecheck/build 0）：教程 5 页 + 规则页 8 节 +
    可选入口 + localStorage 已读；顺带修危险自救卡“可借银行”文案；四份 handoff 已写。
    M1 催收改为“剩余应收与对方当前金币的较小值/借出当轮不能催/行动或自救窗口”；
    M2 改为“同一时间只处理一个待答复请求”；M3 自救统一为紧急借款/催收/放弃；
@@ -111,6 +111,8 @@ https://diego-rotary-inclusive-hughes.trycloudflare.com（2026-11-06 21:5x 重�
    截图在 apps/web/artifacts/（tutorial-private-*、rules-*、rules-tax-rescue-*）；
    App 自动打开条件为“storage 对象存在且未读”，storage 完全不存在时不自动弹
    （已记录边界，不等于规格第 48 行字面；见 08A 注意事项）。
+0b) 08B 手机适配进行中：规格 handoff/单元08B-手机适配.txt（安全区/100dvh/16px 输入/44px 触控/
+   横屏矮视口/窄屏收边距/长数字换行/教程覆盖层安全区），只改 apps/web，旧 684 条不得削弱。
    07C 已完成并验收（54 文件/646 条）：全部还款/全部催收、返回上一步、房主销毁房间；
    遗留：360px 真机截图未采集、销毁仅单进程验证、S-B 毫秒竞态无端到端用例（有判定单测 + peer 兜底）。
 1) 05B 真机复测：按 handoff/单元05B-试玩清单.txt 记录等待/卡点，重点看 05E 提示可见性与 05F 额度数字/禁用态。

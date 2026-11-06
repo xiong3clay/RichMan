@@ -1,0 +1,123 @@
+RichMan 单元 08B 规格：手机适配（竖屏/横屏、安全区、软键盘、触控）
+================================================================
+依据：docs/plans/Richman分阶段联机开发方案_V1.3精简施工版.txt 第 08 节（手机适配部分）
+基线：HEAD 46e72f7（08A 已提交，61 文件 / 684 条）；本单元只改 apps/web/**，不 commit。
+上游约束：05E 的 .game-sticky/.notice-shelf 契约、07C 的暂停/销毁、08A 的教程/规则覆盖层都不得回退。
+
+一、目标与验收口径
+1. 真实手机竖屏 360×640、390×844、430×932 与横屏 640×360 下：
+   - 页面无横向滚动（documentElement.scrollWidth <= clientWidth）；
+   - 主要操作按钮 ≥44×44 CSS px，且单击不触发双击缩放；
+   - 关键操作卡（.wizard）、确认卡、结算卡不被吸顶区或软键盘完全遮住；
+   - 刘海/圆角/底部手势条不压住文字与按钮（viewport-fit=cover 已存在，必须用 env() 安全区）。
+2. 只能靠 CSS 契约 + 截图证明的部分，必须在 handoff 里写明“无头浏览器 ≠ 真机”，真机清单见第七节。
+3. 禁止为了“看起来不溢出”而设 overflow-x:hidden 掩盖问题；必须修根因（min-width:0、换行、列宽）。
+4. 禁止改 viewport 为 user-scalable=no / maximum-scale=1（会禁用缩放，无障碍不合格）。
+
+二、允许改动
+- apps/web/index.html（viewport/theme-color meta）
+- apps/web/src/styles.css
+- 可新增 apps/web/src/mobile/ 下的纯常量或纯函数（只有在确实需要 JS 时才加，默认不加）
+- apps/web/tests/ 新增测试；apps/web/artifacts/ 新增截图
+- handoff/单元08B-*.txt 四份（成果报告/运行与验收/下一阶段交接/注意事项）
+
+禁止：
+- packages/**、apps/server/**、apps/web/src/net/**、steps.ts 语义、协议、依赖（package.json/pnpm-lock.yaml）
+- 修改任何既有测试文件；旧 684 条不得删除/跳过/放宽
+- 新增 scrollTo / scrollIntoView / visualViewport 相关脚本（05E R4 明确禁止，软键盘交给浏览器）
+
+三、CSS 改动清单（逐条落地，命名与数值按此）
+S1 安全区变量（:root）
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-left: env(safe-area-inset-left, 0px);
+    所有 env() 必须带 0px 兜底（旧浏览器/桌面）。禁止直接写 env() 无 fallback。
+S2 .app 与页面高度
+    .app 左右内边距改为 max(16px, var(--safe-left/right))；底部改为 calc(80px + var(--safe-bottom))。
+    body 增加 min-height: 100dvh（保留原 100vh 行作为兜底，两行并存，dvh 在后）。
+S3 .game-sticky 顶部安全区
+    在原规则里把 padding 改为 padding: calc(8px + var(--safe-top)) 0 4px;
+    保留 position:sticky / top:0 / max-height:45vh / overflow-y:auto 四个声明逐字不变（05E 契约测试会读最后一块）。
+S4 iOS 输入框缩放
+    @media (max-width: 560px) 内：.input、select、textarea { font-size: 16px; }
+    （.amount-input 已是 18px，不动；不要改 .input 的桌面 15px）
+S5 触控目标与双击缩放
+    @media (pointer: coarse) {
+      button, .link, .choice, .topbar-btn { min-height: 44px; }
+      button, .link, .choice { touch-action: manipulation; }
+      .link { min-width: 44px; }
+    }
+    不得改动 .banner .link 已有的 44×44（05E 契约）。
+S6 横屏矮视口
+    @media (max-height: 480px) and (orientation: landscape) {
+      .game-sticky.game-sticky { max-height: 56vh; }        ← 必须用复合选择器
+      .app { padding-top: 12px; padding-bottom: calc(40px + var(--safe-bottom)); }
+      .tutorial-panel, .rules-sheet { width: 100%; max-height: 100dvh; border-radius: 0; }
+      .tutorial-actions { display: grid; grid-template-columns: 1fr 1fr; }
+    }
+    注意：绝不能再新增一条选择器恰为 “.game-sticky { … }” 的独立规则块——styles-05e.test.ts 的
+    lastBlock() 会取最后一块并断言四个声明，写成普通块会直接让旧测试变红。需要覆盖时统一用
+    “.game-sticky.game-sticky”。同理 .notice-shelf 用 “.notice-shelf.notice-shelf”。
+S7 窄屏收边距（≤400px）
+    @media (max-width: 400px) {
+      .app { padding-left: max(12px, var(--safe-left)); padding-right: max(12px, var(--safe-right)); }
+      .panel, .wizard { padding-left: 12px; padding-right: 12px; }
+      .question { font-size: 18px; }
+    }
+    360px 下列表/金额不得横向滚动：.player-row 已用 minmax(0,1fr)，不得改成固定 px。
+S8 长金额与提示换行
+    .stat-value, .top-line, .game-meta, .settle-row, .debt-row { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    金额最大 10^10 金币（13 位数字），任何一行都不得把容器撑宽。
+S9 教程/规则覆盖层安全区
+    .tutorial-head { padding-top: calc(16px + var(--safe-top)); }
+    .tutorial-actions, .rules-sheet { padding-bottom: calc(16px + var(--safe-bottom)); }
+    覆盖层仍为 fixed + z-index 40，不得降到 .game-sticky 的 6 以下（08A 契约）。
+
+四、index.html
+- viewport 改为：
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+  说明：interactive-widget 让 Chromium 安卓在软键盘弹出时缩小布局视口，吸顶区不被顶出屏幕；
+  iOS Safari 会忽略该键，行为不变。
+- 新增 <meta name="theme-color" content="#0f1720" />（手机浏览器地址栏与背景一致）。
+
+五、测试（apps/web/tests/ 新增 mobile-08b.test.ts，≥13 条；纯契约测试，读源码字符串）
+T1 viewport 含 width=device-width、initial-scale=1、viewport-fit=cover、interactive-widget=resizes-content，且不含 user-scalable=no / maximum-scale。
+T2 theme-color = #0f1720。
+T3 :root 的四个安全区变量都存在且都带 “, 0px)” 兜底。
+T4 .game-sticky 的 padding 使用 var(--safe-top)，且 position:sticky/top:0/max-height:45vh/overflow-y:auto 四声明仍在。
+T5 @media (max-width:560px) 内 .input 的 font-size 为 16px。
+T6 @media (pointer:coarse) 内同时出现 min-height:44px 与 touch-action:manipulation。
+T7 body 同时有 min-height:100vh 与 min-height:100dvh，且 dvh 在后。
+T8 长数字选择器组含 overflow-wrap:anywhere 与 tabular-nums。
+T9 横屏媒体查询存在，且限高声明位于 “.game-sticky.game-sticky” 复合选择器（正则断言不得匹配到普通 “.game-sticky {”）。
+T10 ≤400px 断点存在且 .app 左右用 max(12px, var(--safe-left/right))。
+T11 教程头/操作栏使用 safe-top / safe-bottom。
+T12 源码中不出现 scrollIntoView / window.scrollTo / visualViewport（grep apps/web/src）。
+T13 旧契约仍在：styles-05e.test.ts 的四声明与 styles-tutorial.test.ts 的关键断言未被修改（读这两个测试文件断言其内容）。
+T14 package.json 的 dependencies/devDependencies 相对 HEAD 无新增。
+
+六、截图（apps/web/artifacts/，无头 Edge，移动视口）
+- mobile-entry-360x640.png（入口页）
+- mobile-tutorial-360x640.png（教程第 1 页）
+- mobile-game-q1-360x640.png（对局 Q1 操作卡 + 自身面板）
+- mobile-game-q3-390x844.png（还款/催收金额步 + 吸顶区）
+- mobile-landscape-640x360.png（横屏对局或规则页）
+- mobile-rules-430x932.png（规则页）
+截图必须来自 pnpm build 后的真实产物（静态服务 dist），不得用 Storybook/拼接图；尺寸用 System.Drawing/PIL 实测并写进 handoff。
+
+七、真机验收清单（写进 handoff/单元08B-运行与验收.txt，由用户执行，不计入自动化）
+1. iPhone Safari：刘海与底部手势条不遮按钮；地址栏收起/展开不跳动；金额输入框聚焦后键盘不遮输入框与“确认”按钮。
+2. Android Chrome：软键盘弹出时吸顶区仍可见；返回键不误触退出。
+3. 竖屏 360、横屏 640×360：无横向滚动；横屏下操作卡仍可点。
+4. 系统字体放大到 200%：按钮文字不裁切、不溢出。
+5. 长局（金币 ≥ 8 位）金额不换行错位。
+
+八、验收命令与交付
+- pnpm -s test（预期 684 + 新增，全绿）、pnpm typecheck、pnpm -s build 贴真实输出
+- 四份 handoff/单元08B-*.txt
+- 不 commit；不新增依赖；旧测试不改
+- 已知边界写进注意事项：无头截图非真机、iOS 15 以下 100dvh 退化为 100vh、interactive-widget 仅 Chromium 生效、未做软键盘像素级测量。
+
+九、实现期修订记录
+（本轮暂无；若实现中发现规格与旧契约冲突，先停下报告，不得削弱旧测试）
