@@ -1,0 +1,80 @@
+单元 07C 第二轮复核修复工单
+日期：2026-11-06
+基线：HEAD 217e15f + 07C 未提交实现（630 条）
+复核报告：handoff/复核-单元07C-修复验证.txt（Qoder，308 行）
+
+结论：需再修。M1 原问题已修，但顺序修复引入新的 must-fix M2；S5 实现正确但测试只覆盖 helper。
+
+======================================================================
+一、M2（must-fix）paused 时旧确认卡仍能发送经济命令
+======================================================================
+现象：
+- apps/web/src/GameView.tsx:1683-1691 现在把 currentConfirmation 放在 paused 之前；
+- apps/web/src/GameView.tsx:342-355 的 send 只检查 status/open 与 client.hasJoined，不检查 paused；
+- confirmations.ts 的 confirmationIsCurrent 只看服务端待办，不看房间暂停标志；
+- 于是：先打开 bankRepay/giveUp/abandonBet/acceptLoan 任一确认卡，再收到 paused=true，
+  确认卡仍显示，点确认会真的发出命令（服务端会用 ERROR_PAUSED 拒绝，但 UI 已越权发送）。
+
+修复要求（两条都做，双保险）：
+1) 渲染顺序：只有 destroyRoom 确认卡在 paused/gameOver/!canSubmit 下保留优先权；
+   其他确认卡在 paused 时必须让位给“等待继续对局”暂停卡。建议形式：
+   currentConfirmation !== null && !(paused && currentConfirmation.kind !== "destroyRoom")
+   ? renderConfirm(...) : paused ? 暂停卡 : gameOver ? ... : !canSubmit ? ... : renderStep(...)
+2) send() 增加 paused 守卫：paused 时 setNotice("房间已暂停，继续后才能提交；本次未发送") 并 return null。
+   destroyRoom 走 onDestroyRoom，不经 send，因此暂停时仍能销毁（M1 的用例必须继续通过）。
+
+必测（apps/web/tests/gameview-07c.test.ts）：
+- M2-bankRepay：BANK_DUE 打开“确认还款？”后 rerender paused=true → 显示“等待继续对局”，
+  不显示“确认还款”，client.decideBankDue 调用次数为 0。
+- M2-giveUp（危险自救放弃）、M2-abandonBet（放弃下注）、M2-acceptLoan（同意借款请求）
+  各一条：确认卡打开后 paused=true → 确认卡消失/暂停卡出现，对应 client 方法 0 次。
+  可用表驱动，但每条必须真实点击并断言行为，不允许只断言“不抛错”。
+- M2-destroy-paused：paused 下 destroyRoom 确认卡仍可打开、返回不发送（保留 M1 覆盖）。
+- M2-send-guard：paused 下调用任一确认按钮不会发出命令且出现已暂停提示（若走 send 守卫）。
+
+======================================================================
+二、S-D（should-fix）S5 缺真实 ws.destroy_room 集成测试
+======================================================================
+现状：apps/server/tests/ws-destroy-peers.test.ts 只测导出的 helper；若 ws.ts 改回 inline
+current 过滤、不再调用 helper，这些测试仍绿。
+
+要求：增加真实 WebSocket 集成用例，至少覆盖：
+1) 同一房间两个真实连接，房主 destroy_room：双方都收到 room_destroyed，随后 close code 4002。
+2) non-current 但 OPEN 的连接也必须收到：用恢复码换新 token 后保留旧 socket（06 的恢复流程），
+   旧 socket 处于 non-current 但未断开，房主销毁后旧 socket 也应收到通知/被关闭。
+3) 若真实“send 抛错”无法构造，允许保留 helper 单测覆盖，但必须在报告里写明边界，不许静默跳过。
+若确实无法构造 non-current 连接，写清卡在哪一步（协议/测试工具），并给出替代断言，不许直接删需求。
+
+======================================================================
+三、S-E（should-fix）App 层未测试
+======================================================================
+现状：gameview-07c/lobby-07c 传的是 mock onDestroyRoom，不经过 App.tsx:276/280；
+client-07c 只到 client 层，App.tsx:105-127 的文案/回首页没测。
+
+要求（二选一，推荐 1）：
+1) 把 App 的 client handlers 工厂抽成可导出纯函数（如 apps/web/src/app-handlers.ts），
+   App 调用它；新测试直接测该工厂：onDestroyRoom 返回 false 时能被上层拿到、
+   onRoomDestroyed(byPlayerId="") 与 byPlayerId=xxx 分别产生正确 entryError 并清 roomCode/snapshot。
+2) 保留 App 内联，但加 App 级 mount 测试（fake WebSocket + 真实 App），断言上述两条。
+抽函数只允许动 apps/web/**，不得改变现有 UI 行为。
+
+======================================================================
+四、S-N（nit）collectLimits 非数组
+======================================================================
+steps-07c 增加断言：collectLimits 为 "x"、{}、null、undefined 时 collectLimitOf 返回 null 且不抛。
+（当前 Array.isArray 已正确，补测试防回退。）
+
+======================================================================
+五、S-F（should-fix）GAME_OVER 卡第二入口未测
+======================================================================
+gameview-07c 增加：GAME_OVER 下点 GAME_OVER 卡里的“销毁房间及数据”（GameView.tsx:664-671），
+确认卡出现；返回后消失且 onDestroyRoom 未调用。（顶部入口已有，两个入口要都覆盖。）
+
+======================================================================
+六、硬约束
+======================================================================
+- 只改 apps/web/**、apps/server/tests/**；不改 packages/**、engine 规则、协议版本、依赖。
+- 不 commit；旧 630 条不得删除/跳过/放宽；唯一允许保留的旧断言改动仍只有 steps.test.ts 空 Q3 那一条。
+- 完成后更新 handoff/单元07C-复核修复记录.txt（追加“第二轮 M2/S-D/S-E/S-N/S-F”）。
+- 实跑 pnpm test / pnpm typecheck / pnpm build，贴真实退出码与测试数。
+- 冲突或无法实现项先报告，不许静默降级。
