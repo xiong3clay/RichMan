@@ -1,0 +1,193 @@
+RichMan 单元 07C 规格：全部还款 / 全部催收 / 返回上一步 / 房主销毁房间
+（唯一规格，实现前完整读一遍；与本文冲突时先报告，不自行改规则）
+
+====================================================================
+0. 基线、范围与硬约束
+====================================================================
+- 仓库：D:\Lianjunjie\biancheng\RichMan，基线 HEAD 509ee78（07B 已提交，工作区干净）。
+- 现状：pnpm test 42 文件 / 581 条全过；typecheck、build 均为 0。
+- 本单元来源：用户真机试玩后提出三项需求（m02159 原文）：
+  「加入"全部还款""全部催收选项"（自己或者对方金额不足时为灰色不可选），提示框里应该有"返回"选项回到上一步。房主应该有"销毁房间及数据"选项。如果这三个里面涉及到后续计划内的东西，继续开发，把计划外的东西补上就行」
+- 允许改：
+  packages/shared/src/protocol.ts
+  packages/game-core/src/views.ts 及其测试
+  apps/server/src/**（ws.ts、rooms/manager.ts、rooms/scheduler.ts、storage 只在必要时、server tests）
+  apps/web/src/**（GameView.tsx、LobbyView.tsx、App.tsx、net/client.ts、net/wire.ts、game/steps.ts、game/confirmations.ts、styles.css、web tests）
+- 禁止：新增依赖；改引擎规则（engine.ts/bank.ts/private-loans.ts/gamble.ts/tax.ts 的规则语义）；改冻结的协议版本号（新增消息类型属于向后兼容的加法）；删/跳过/放宽旧测试；git commit。
+- 旧 581 条必须全绿；新增测试只加不改。若确有一条旧断言与新需求直接冲突，先停下来把冲突写给 Lead，不要自行改断言。
+- 交付：可运行代码 + 测试 + 4 份 handoff 文档（成果报告 / 运行与验收 / 下一阶段交接 / 注意事项），文档里的测试数与 build 体积必须来自你真实跑出的输出。
+
+====================================================================
+1. 需求 A：全部还款 / 全部催收
+====================================================================
+1.1 语义
+- 「全部还款」= 把当前选中那一笔债务的剩余应还金额一次还清（不是“还清所有贷款”）。适用于 repayBank 与 repayPrivate。
+- 「全部催收」= 把当前选中那一笔私人合同的剩余应收金额一次收清。适用于 collectPrivate。
+- 两者都是“把金额输入框填成剩余全额”，不自动提交；玩家仍需点「确认还款 / 确认催收」。理由：一次点击就转走全部金币不可逆，保留一次确认。
+- 只有金额恰好等于剩余全额才算“全部”；填 968 以外的数字仍是部分还款，走原逻辑。
+
+1.2 可用性（灰色不可选）
+- 全部还款可用条件：本人当前金币 >= 该笔 remainingCents；否则按钮 disabled，并在按钮附近显示原因，例如
+  「金币 500 分不足 968 分，不能一次还清」。
+  金币为负（危险状态）时同样不可用。
+- 全部催收可用条件：对方当前可被收走的金额 >= 该笔 remainingCents；否则 disabled，提示
+  「对方当前仅有 300 分，无法一次收清」。
+- 金额比较全部用十进制整数字符串做，不转浮点；沿用 apps/web/src/net/wire.ts 的规范与 formatCents 展示。
+
+1.3 服务端必须提供“对方可收上限”
+- 现状：WireSnapshotView.finance.privateLoans 只有 remainingCents，前端看不到借款人当前金币，无法判断“对方不足”。
+- 在 packages/game-core/src/views.ts 的 PlayerFinanceView 增加：
+    collectLimits: { loanId: string; maxCents: Cents }[]
+  只包含：本人是出借人、合同 status === "ACTIVE" 的私人合同；
+  maxCents = max(0, min(loan.remainingCents, 借款人当前 cents))。
+  不含第三人的合同，不新增任何“对方金币”字段。
+- 隐私说明写进代码注释：出借人本来就有权知道“这笔最多能收回多少”；当 maxCents < remaining 时等价于暴露借款人余额不足，这是催收必需信息，已由用户确认接受。
+- apps/web/src/game/steps.ts 增加纯函数：
+    collectLimitOf(view, loanId): string | null   // 字段缺失/非法返回 null
+    canCollectAll(view, option): boolean | null   // null 表示旧快照无法判断，调用方回退“以服务端为准”并允许点击
+  以及还款侧 canRepayAll(view, option): boolean（纯字符串比较）。
+- apps/web/src/net/wire.ts 的 WireFinance 增加 collectLimits?: WireLenderLimit[]（沿用 {playerId, maxCents} 形状不合适，新增 {loanId, maxCents} 类型）。
+
+1.4 UI 落点（两处都要，不能只改行动阶段）
+- 行动 Q3 金额卡（GameView.tsx stage === "debtAmount"）：金额输入框下方、确认按钮上方，加一行快捷项按钮。
+  文案：还款 → 「全部还款（968 分）」；催收 → 「全部催收（968 分）」。
+  点击后 setAmount(remainingCents)，清掉旧 notice，不提交。
+- 危险自救阶段的 collectAmount 卡：同样加「全部催收（968 分）」。
+- 键盘/触屏：按钮至少 44px 高；金额输入框里的值被填充后玩家可继续改。
+- 不要新增步骤、不要改 deriveStep 的优先级。
+
+====================================================================
+2. 需求 B：提示框都有“返回”回到上一步
+====================================================================
+2.1 目标链路（行动阶段）
+  Q1 askPrivate →（跳过/取消）→ Q2 askBank →（不需要）→ Q3 askDebt → Q4 endAction
+  每一张“在问玩家问题”的卡片都必须有「返回」，回到上一个问题：
+  - Q2 askBank 增加「返回 Q1」→ setActionStage("askPrivate")。
+  - Q4 endAction：无论 debtOptions 是否为空，都显示「返回 Q3」→ setActionStage("askDebt")。
+    （现在 GameView.tsx:1368-1370 只在 debtOptions.length > 0 时显示，删除这个条件。）
+  - Q3 askDebt 在没有可操作债务时不能只显示一个空列表：显示说明
+    「当前没有可还款或催收的贷款/合同。」+「结束行动」→ endAction +「返回 Q2」→ askBank。
+  - 为让 Q4 → Q3 → Q2 链能走通，删除 game/steps.ts:245-246 的自动跳转
+    （ui.actionStage === "askDebt" && options.length === 0 ? "endAction"）。
+    代价是 Q2 点“不需要”后会先看到空 Q3 再结束行动，这是可接受的（多一次确认，换来可返回）。
+2.2 危险自救与确认卡
+  - 逐一检查 DangerStage 的 ask / privateLender / privateAmount / collect / collectAmount，每张问题卡都要有返回：金额→选择、选择→ask、ask 的“放弃自救”进入确认后确认卡本身有「返回」。
+  - renderConfirm 的 6 种 kind（abandonBet / giveUp / acceptLoan / bankRepay / bankRefuse / bankRefuse 与 bankRepay 同支）必须每种都能返回，且返回只关闭确认、不发命令、不丢当前输入。
+  - 房主销毁房间的确认框同样必须有「返回」。
+2.3 测试
+  - steps.test.ts：Q4 在有/无债务时都能从 endAction 返回 askDebt（不再被自动跳过）；Q3 空态返回 Q2。
+  - gameview 测试：渲染 Q4 时存在“返回”按钮；点击后出现 Q3 标题；Q2 有“返回 Q1”；危险 collectAmount 有“全部催收”。
+  - 六个 ConfirmAction 各一条“存在返回且点击后不产生命令”的断言（可通过现有 dom-harness 完成）。
+
+====================================================================
+3. 需求 C：房主销毁房间及数据
+====================================================================
+3.1 产品定义
+- 只有房主能发起；任何房间状态都可发起（大厅、对局中、暂停、结束），但必须二次确认：
+  第一次点「销毁房间」，显示确认卡：
+    「销毁房间及数据？」
+    「房间内所有玩家会被移出，服务器上的存档将删除，无法恢复。」
+    按钮：「确认销毁（不可恢复）」 + 「返回」。
+- 销毁成功后：服务端删除内存房间 + 磁盘 rooms/<code>/ 目录（含 snapshot/bak/events/corrupt），断开该房间所有连接，广播一条 room_destroyed；所有客户端清 sessionStorage、停止重连、回大厅首页并显示
+  「房主已销毁房间，所有数据已删除」。
+- 非房主点击不可用；若服务端返回 NOT_HOST，前端提示“只有房主可以销毁房间”。
+- 房间已不存在时返回 ROOM_NOT_FOUND，客户端照常回首页。
+
+3.2 协议（packages/shared/src/protocol.ts）
+- 新增客户端消息：{ type: "destroy_room" }（strict）。
+- 新增服务端消息：{ type: "room_destroyed", roomCode: RoomCodeSchema, byPlayerId: string }（strict）。
+- 加进 ClientLobbyMessageSchema / ServerLobbyMessageSchema；PROTOCOL_VERSION 不动。
+- 注意：ClientLobbyMessageSchema 与 ClientGameCommandSchema 都是 safeParse，destroy_room 不含 gameId，必须落在 lobby 分支。
+
+3.3 服务端
+- rooms/manager.ts 新增：
+    async destroyRoom(roomCode: string, playerId: string): Promise<void>
+  步骤：resolvePlayer 确认成员身份 → hostId !== playerId 抛 LobbyError('NOT_HOST') →
+  this.transact(roomCode, () => { this.rooms.delete(roomCode); })；
+  transact 在 candidate 为 null 时会调 store.deleteRoom(code) 并清空 sessions 索引（已有逻辑，直接复用）。
+  另外清 durablePending.delete(roomCode)。
+  不要手工 rm -rf 目录；只会走 store.deleteRoom（file-store 用 tomb 目录保证原子）。
+- rooms/scheduler.ts 增加 public cancelRoom(roomCode: string): void（内部就是现有 private cancel）；销毁后调用，防止残留 timer 再推进。
+- ws.ts 的 handleLobby 增加分支：
+    else if (message.type === "destroy_room") {
+      // 先收集 peers，销毁后 current() 会因 sessions 清空而全部为 false
+      const peers = [...connections.values()].filter(peer => current(peer) && peer.identity!.roomCode === identity.roomCode);
+      await manager.destroyRoom(identity.roomCode, identity.playerId);
+      scheduler.cancelRoom(identity.roomCode);
+      for (const peer of peers) {
+        send(peer, { type: "room_destroyed", roomCode, byPlayerId: identity.playerId });
+        detach(peer);
+        peer.ws.close(4002, "ROOM_DESTROYED");
+      }
+    }
+  注意顺序：先收集 peers 再 destroy；broadcast 不需要参与。
+  若 destroyRoom 抛错，handle 现有 catch 会把 LobbyError 转成 error 消息。
+- server 测试（新增）：
+  1) 房主 destroy → 空间删除（检查 data/rooms/<code> 不存在）、其他连接收到 room_destroyed、连接被关闭；
+  2) 非房主 → NOT_HOST，房间仍在，数据仍在；
+  3) destroy 后用原 roomCode join/resume → ROOM_NOT_FOUND；
+  4) 对局中（PLAYING）destroy 也能删除且不触发 scheduler 继续；
+  5) 重复 destroy → ROOM_NOT_FOUND（幂等失败，不崩）。
+  测试可用临时 RICHMAN_DATA_DIR 与 fake timers。
+
+3.4 Web
+- net/client.ts：
+  - ClientHandlers 增加 onRoomDestroyed(info: { roomCode: string; byPlayerId: string }): void。
+  - 新增 destroyRoom(): boolean（仅 joined 时可发）。
+  - handleRaw 增加 type === "room_destroyed"：停止重连（disposed = true）、clearSession()、joined=false，回 onRoomDestroyed。
+  - 不要把 room_destroyed 当作普通 error；不要触发 REPLACED 分支。
+- App.tsx：注册 onRoomDestroyed，重置 roomCode/room/joined/snapshot，设置入口横幅文案并清 session。
+- LobbyView.tsx：props 增加 onDestroyRoom?: () => void；仅房主渲染「销毁房间」按钮（ghost/danger 风格），点击展开内联确认（确认 + 返回），确认后调用。
+- GameView.tsx：GameViewProps 增加 onDestroyRoom?: () => void；房主可见入口：
+  - 顶部房间信息区或 GAME_OVER 卡里「销毁房间」；
+  - 点击后复用 renderConfirm 机制（新增 ConfirmAction kind: "destroyRoom"），确认卡含「返回」；
+  - 确认时调用 client.destroyRoom()，失败按普通 error 展示。
+  实现时优先复用现有 confirmAction 状态，不要新增全局模态框。
+- 服务端不广播 room 快照给已销毁房间；客户端不要在收到 room_destroyed 后自行重连。
+
+3.5 权限与隐私
+- room_destroyed 只发给该房间当前连接；不发玩家列表之外的信息。
+- 不删除其他房间目录；不清理无关历史。
+
+====================================================================
+4. 必测清单（≥20 条新增）
+====================================================================
+game-core/views：
+  V1 collectLimits 只含本人为出借人的 ACTIVE 合同；
+  V2 maxCents = min(remaining, 借款人金币)，借款人金币为负时取 0；
+  V3 第三人合同、REPAID/BAD_DEBT/FROZEN 不出现；
+  V4 旧快照（无 collectLimits）时前端回退文案不崩。
+web steps：
+  S1 canRepayAll：金币=remaining 可用、少 1 分不可用、负金币不可用；
+  S2 canCollectAll：collectLimit=remaining 可用、少 1 分不可用、缺失字段返回 null；
+  S3 空 debtOptions 不再自动跳过 askDebt。
+web UI：
+  U1 Q4 有返回，点击回 Q3；
+  U2 Q2 有返回 Q1；
+  U3 Q3 空态有“结束行动”和“返回 Q2”；
+  U4 行动 Q3「全部还款」可用/禁用文案正确；
+  U5 行动 Q3「全部催收」可用/禁用文案正确（构造 collectLimits）；
+  U6 危险 collectAmount「全部催收」点击后金额被填入剩余全额；
+  U7 六个确认卡各有返回，点击后无命令发送；
+  U8 销毁确认卡：非房主看不到入口；房主看到；返回关闭不发送。
+shared：
+  P1 destroy_room 通过 ClientLobbyMessageSchema；
+  P2 room_destroyed 通过 ServerLobbyMessageSchema；
+  P3 未知消息仍被拒。
+server：
+  D1–D5 见 3.3。
+
+====================================================================
+5. 验收命令与报告
+====================================================================
+在仓库根目录依次执行并贴真实输出（不要只写“通过”）：
+  pnpm test
+  pnpm typecheck
+  pnpm build
+要求：旧 581 条不得减少；总数为 581 + 新增；typecheck 与 build 退出码 0。
+最后按既有格式写四份 handoff：
+  handoff/单元07C-成果报告.txt
+  handoff/单元07C-运行与验收.txt
+  handoff/单元07C-下一阶段交接.txt
+  handoff/单元07C-注意事项.txt
+注意事项至少写清：全部=只针对当前选中合同；快捷项只填不提交；Q3 空态与自动跳转的变化；collectLimits 的隐私边界；destroy 的删除范围与不可恢复；未验证项（例如未做真机 360px 截图）要如实写。
