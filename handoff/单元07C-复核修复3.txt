@@ -1,0 +1,91 @@
+单元 07C 第三轮定点修复工单（S-A / S-B）
+================================================================
+基线：HEAD ec8a738（第二轮工单）+ 工作区未提交的 07C 实现
+复核来源：handoff/复核-单元07C-修复验证2.txt（Qoder 第三轮，只读）
+范围：只修下面两条 should-fix。其余代码、测试、协议、依赖一律不动；
+      不 commit；旧 642 条测试必须继续全绿，不得删除/跳过/放宽任何断言。
+
+一、S-A：send 的 paused 守卫没有直接测试
+----------------------------------------------------------------
+现状：apps/web/src/GameView.tsx:342-347 有
+      if (paused) { setNotice("房间已暂停，继续后才能提交；本次未发送"); return null; }
+      Qoder 反事实：删掉这个分支，642 条仍全绿。原因是四条 M2 测试在
+      rerender(paused=true) 后确认卡已按 showConfirmation 隐藏，没有可点的确认按钮。
+
+要求：
+1. 新增 apps/web/src/game/paused-guard.ts（不新增依赖）：
+     export const PAUSED_SUBMIT_NOTICE = "房间已暂停，继续后才能提交；本次未发送";
+     export function pausedSubmitNotice(paused: boolean): string | null {
+       return paused ? PAUSED_SUBMIT_NOTICE : null;
+     }
+2. GameView.tsx 的 send() 改为调用该函数（文案只保留一处，不得复制字符串）：
+     const notice = pausedSubmitNotice(paused);
+     if (notice) { setNotice(notice); return null; }
+   行为必须与现在完全一致：paused 时不发任何命令、提示原文、返回 null。
+3. 新增 apps/web/tests/paused-guard-07c.test.ts，至少 3 条：
+   a) pausedSubmitNotice(true) === PAUSED_SUBMIT_NOTICE（逐字中文）；
+   b) pausedSubmitNotice(false) === null；
+   c) 源码契约（参照 apps/web/tests/styles-05e.test.ts 的读文件断言写法）：
+      读 apps/web/src/GameView.tsx 原文，断言包含 "pausedSubmitNotice(" 与
+      "return null"，且包含 setNotice(notice)；删掉守卫调用或改成空实现时这条必须变红。
+4. 不要求伪造“paused 下还能点到确认按钮”的 UI 用例——按设计确认卡在 paused 时
+   由 showConfirmation 让位给暂停卡，UI 层不可达。请在
+   handoff/单元07C-注意事项.txt 末尾追加一小节“S-A 边界”，写明：
+   这是纵深防御；UI 由 showConfirmation 拦截，守卫由纯函数 + 源码契约锁住；
+   不要再声称“UI 级可直接复现”。
+
+二、S-B：resume 在 bind 前失败会留下 identity 在 + OPEN + non-current 的旧连接
+----------------------------------------------------------------
+现状：apps/server/src/ws.ts:239-259。resume/token resume 时 manager.transact 已把
+session 换成新 token/epoch；新连接在 joined 的 send 回调失败或已关闭时：
+- 239-246 分支：有 detach(previous) 但没有 close；且只 detach 不 close 仍留 TCP。
+- 256-258 分支：直接 sessions.disconnect(joined) 后 return，**完全没有处理 previous**。
+此时旧连接 identity 仍在、socket 可能 OPEN、sessions.isCurrent=false，正是
+“同房、OPEN、non-current”的连接。destroy_room 的 selectDestroyPeers 当前能兜底，
+但它不该依赖这层偶然性。
+
+要求：
+1. 抽出一个小函数（放在 ws.ts 内，导出以便单测）：
+     export function shouldReleaseSupersededOwner(previousExists: boolean, previousIsCurrent: boolean): boolean {
+       return previousExists && !previousIsCurrent;
+     }
+   并在 detach 附近新增内部函数：
+     const releaseSupersededOwner = (joined: SessionIdentity): void => {
+       const previous = owners.get(ownerKey(joined));
+       if (!shouldReleaseSupersededOwner(previous !== undefined, previous !== undefined && current(previous))) return;
+       detach(previous!);
+       if (previous!.ws.readyState === 1 /* OPEN */) previous!.ws.close(4001, "REPLACED");
+     };
+2. 在两处失败分支调用它（顺序：先 await sessions.disconnect(joined) 成功后再 release；
+   若 transact 抛错则不 release，保持现状）：
+   - 239-246 的 else 分支（resume 且连接在 transact 后已关闭）
+   - 256-258 的 if (conn.closed || !delivered) 分支
+   注意：不要 close 当前新连接 conn（它已经关闭或由调用方关闭），只 close previous。
+   不要把 4001 之外的 close code 用在别处。
+3. 测试：
+   a) 单测 shouldReleaseSupersededOwner 四种组合（true/true、true/false、false/true、false/false）；
+   b) 修 apps/server/tests/destroy-room.test.ts:165-185 的说明文字：把
+      “不存在 OPEN 的 non-current 同房连接”改为准确表述：
+      “bind 正常完成时旧 socket 会被 4001 关闭；bind 前关闭的窗口由
+       ws.ts 的 releaseSupersededOwner 分支 detach 并 4001 关闭，因此
+       destroy 时不应再有同房 non-current OPEN 连接；selectDestroyPeers
+       仍按 identity+OPEN 选择作为兜底”。断言不动。
+   c) 不要写依赖毫秒级竞态的真实 WS 用例（会 flaky）；若你能用假 conn 直接
+      调用导出的 helper 验证 detach+close 行为，可加一条，否则留单测即可。
+4. 在 handoff/单元07C-注意事项.txt 末尾追加“S-B 边界”：说明该窗口存在过、
+   现在由 releaseSupersededOwner 闭合；真实毫秒竞态未做端到端测试，
+   selectDestroyPeers 仍是兜底。
+
+三、验收
+----------------------------------------------------------------
+1. pnpm -s test：必须 ≥645 条全绿（642 + 新增），贴文件数/条数/耗时；
+2. corepack pnpm typecheck：exit 0；
+3. pnpm -s build：exit 0，贴 CSS/JS 体积；
+4. git status --short 贴出，确认只动了本工单允许的文件；
+5. 不 commit，改完把以上真实输出贴回来。
+
+四、明确不做
+----------------------------------------------------------------
+- 不动 engine/bank/private-loans/gamble/tax、协议版本、依赖、package.json。
+- 不改 destroy_room 的协议与行为、不改 showConfirmation 的现有优先级。
+- 不改任何旧断言（例外：上面 S-B 第 3b 条只改测试说明文字，不改断言）。
