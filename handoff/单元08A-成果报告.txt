@@ -1,0 +1,93 @@
+单元 08A 成果报告（新手教程与规则页 + 复核修复）
+================================================================
+日期：2026-11-06
+状态：复核修复完成，自动化验证通过；截图用本机 Edge 无头模式采集。
+基线：08A 初版 61 文件 / 678 条；修复后 61 文件 / 684 条。
+未 commit。
+
+一、本轮复核修复（M1/M2/M3/S1/S2）
+1. M1 催收/还款口径：
+   - pages.ts:48 改为“出借人最多可收 = 剩余应收与对方当前金币的较小值；
+     借出当轮不能催收，之后可在自己的行动窗口或自救阶段催收。
+     借款人在自己的行动窗口或自救阶段可以还款。”
+   - rules.ts:62 同步为同一口径。
+   - 删除“上限=对方当前金币”“上限为对方当前金币”“随时催收”“随时还”。
+2. M2 请求口径：
+   - pages.ts:47 / rules.ts:61 改为“同一时间只处理一个待答复请求（由当前行动者发起）；
+     同一个借款人同时最多 1 个待答复请求。”
+   - 删除“同一出借人可以同时收到多人的请求”；D6 未实现，不在文案承诺。
+3. M3 自救操作集合：
+   - pages.ts:57：只能向玩家借款、催收或放弃；自救期间不能新借银行贷款。
+   - rules.ts:87：界面上提供紧急借款、催收、放弃；自救期间不能新借银行贷款。
+   - rules.ts:91：可发起紧急借款、催收、放弃；若有人正等你答复借款请求，
+     仍可同意、拒绝或取消；不能新借银行贷款。
+   - 删除“还款与放弃”“引擎只接受……还款……”等与界面不符表述。
+4. S1 文档：storage 完全不存在时不自动打开教程，正式写为“已记录边界”，
+   不再宣称满足规格第 48 行字面；下一阶段交接记录严格字面需单独工单。
+5. S2 语义测试：在 tutorial-pages.test.ts 新增 6 条，断言规则口径而非只测关键词；
+   反向探针用旧文案证明谓词会变红。
+6. 未动：教程/规则入口、5 页与 8 节结构、storage key、CSS 层级、
+   危险自救卡“自救期间不能新借银行贷款”。
+
+二、改动文件（只 apps/web/** 与 handoff）
+修改：
+- apps/web/src/tutorial/pages.ts
+- apps/web/src/tutorial/rules.ts
+- apps/web/tests/tutorial-pages.test.ts
+- handoff/单元08A-成果报告.txt
+- handoff/单元08A-运行与验收.txt
+- handoff/单元08A-下一阶段交接.txt
+- handoff/单元08A-注意事项.txt
+- handoff/项目当前状态.txt
+截图（apps/web/artifacts/）：
+- tutorial-private-360x640.png（新增，教程第 3 页）
+- tutorial-private-380x700.png（新增，教程第 3 页）
+- rules-360x640.png（覆盖，私人借贷节新文案）
+- rules-380x700.png（覆盖，私人借贷节新文案）
+- rules-tax-rescue-360x640.png（新增，税收与危险自救节）
+- rules-tax-rescue-380x700.png（新增，税收与危险自救节）
+- tutorial-first-* / tutorial-last-*（08A 初版保留，页面 1/5 文案未变）
+未改 packages/**、apps/server/**、net、协议、steps.ts 语义、依赖。
+
+三、测试与真实结果
+命令：pnpm -s test
+结果：
+  Test Files  61 passed (61)
+       Tests  684 passed (684)
+    Duration  6.45s
+新增 6 条（678 + 6 = 684）；旧 646 未删除、未跳过、未放宽；
+08A 初版 32 条未删除。
+命令：pnpm typecheck
+结果：tsc --noEmit -p tsconfig.json，exit 0。
+命令：pnpm -s build
+结果：exit 0，138 modules；CSS index-D263Ed7h.css 14.79 kB（gzip 3.50 kB），
+JS index-HFP1Drkx.js 417.72 kB（gzip 122.44 kB），463ms。
+
+四、S2 测试清单与反向探针
+- S2-M1 催收上限：剩余应收与对方当前金币的较小值，不是对方金币。
+- S2-M1 借出当轮不能催收，之后才可在行动窗口或自救阶段催收。
+- S2-M1 借款人在自己的行动窗口或自救阶段可以还款。
+- S2-M2 同一时间只处理一个待答复请求，不承诺出借人多请求。
+- S2-M3 自救操作集合与界面一致：紧急借款、催收、放弃。
+- S2 反向探针：旧版私人借贷/自救文案会让上述谓词变 false。
+若把 pages.ts:48 / rules.ts:62 改回旧文案，S2-M1 三条会红；
+若把 pages.ts:47 / rules.ts:61 改回旧文案，S2-M2 会红；
+若把 rules.ts:91 改回“还款与放弃”，S2-M3 会红。
+
+五、截图验收
+用本机 Edge 无头模式 + CDP，移动视口 360×640 / 380×700；实测：
+- 360×640：innerWidth/innerHeight=360/640，scrollWidth=clientWidth=360；
+- 380×700：innerWidth/innerHeight=380/700，scrollWidth=clientWidth=380。
+PNG 尺寸经 System.Drawing 核对均为对应视口尺寸。
+规则页截图分别滚动到“私人借贷”和“税收与危险自救”节；规则页是单面板滚动，
+其余节需继续滚动查看。截图不是实体手机采集。
+
+六、已知问题/边界
+- App 自动打开条件为“storage 对象存在且未读”；storage 完全不存在时不自动弹，
+  这是为兼容旧 App 测试保留的“已记录边界”，不等于规格第 48 行字面已实现。
+- D6“出借人可同时收多个请求”未实现（engine 全局单 pendingRequestId），
+  教程/规则按当前行为写；后续需单独引擎单元。
+- 引擎 TAX 仍容忍 REPAY_PRIVATE，但界面无入口，规则页不写“还款”；
+  这是引擎宽松点，记录在注意事项。
+- 未做 08B 手机适配与 08C 音频；实体手机 100dvh/安全区/软键盘未验证。
+- 未 commit。

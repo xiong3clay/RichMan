@@ -1,0 +1,279 @@
+============================================================
+RichMan 单元 08A 独立复核报告
+============================================================
+复核员：Qoder（独立复核，只读）
+复核时间：2026-11-06
+工作区：D:\Lianjunjie\biancheng\RichMan
+基线：HEAD 33e7ac1（08A 规格已提交）；实现全部为工作区未提交改动
+复核范围：handoff/单元08A-*、项目当前状态、git diff、tutorial/**、相关测试、
+          App/Lobby/GameView/styles、规则真值（shared/rules、game-core/bank、
+          private-loans、engine、gamble、tax、views）。
+复核方式：真实 test/typecheck/build；源码与规则逐条对照；截图尺寸实测；
+只读 DOM/规则探针；未改源码、未 commit。
+
+结论：不可提交。
+  入口、教程/规则组件、storage、首次 gate（有 storage 时）、危险自救文案、
+  CSS 层级与截图基本通过；但教程/规则文案有三处与引擎真值不一致（催收上限、
+  同一出借人同时多请求、自救可用操作），其中一处规则页还自相矛盾。
+  这三处必须先由 Lead 决定“改文案对齐引擎”还是“改引擎对齐 D6/R08”，
+  并补语义测试后才能提交。
+
+------------------------------------------------------------
+一、实跑结果（真实输出）
+------------------------------------------------------------
+$ pnpm -s test
+ Test Files  61 passed (61)
+      Tests  678 passed (678)
+   Start at  23:36:18
+   Duration  8.95s (tests 45%, import 38%, transform 16%, worker 1%)
+test exit=0
+
+$ corepack pnpm typecheck
+$ tsc --noEmit -p tsconfig.json
+typecheck exit=0
+
+$ pnpm -s build
+✓ 138 modules transformed.
+apps/web/dist/index.html                   0.41 kB │ gzip:   0.27 kB
+apps/web/dist/assets/index-D263Ed7h.css   14.79 kB │ gzip:   3.50 kB
+apps/web/dist/assets/index-CRyoayN4.js   417.27 kB │ gzip: 122.38 kB
+✓ built in 199ms
+build exit=0
+
+与成果报告核对：
+- 61 文件 / 678 条、138 modules、CSS 14.79 kB、JS 417.27 kB、两个产物名
+  index-D263Ed7h.css / index-CRyoayN4.js 均一致；
+- 报告里的 6.09s / 327ms 是另一次运行，本次为 8.95s / 199ms，不影响结论。
+
+截图尺寸（System.Drawing 实测）：
+rules-360x640.png: 360x640
+rules-380x700.png: 380x700
+tutorial-first-360x640.png: 360x640
+tutorial-first-380x700.png: 380x700
+tutorial-last-360x640.png: 360x640
+tutorial-last-380x700.png: 380x700
+第一张 360x640 已目视确认：标题/第1页/跳过/关闭/上一步 disabled/下一步都在，
+无横向裁切。
+
+旧测试：git diff 中没有任何旧测试文件；646 基线未删、未跳过、未放宽。
+61 文件 = 原 54 + 7 个新测试文件；678 = 646 + 32 新增。没有新增依赖、
+没有改 engine/bank/private-loans/gamble/tax、没有改协议版本（PROTOCOL_VERSION=1）。
+
+------------------------------------------------------------
+二、must-fix（规则文案与引擎真值不一致）
+------------------------------------------------------------
+
+M1. 催收文案同时写错“上限”和“随时”：实际可收上限是
+    min(剩余应收, 对方当前金币)，且借出当轮不能催收。
+
+位置 1：apps/web/src/tutorial/pages.ts:48
+代码原文：
+  "出借人可随时催收（上限=对方当前金币），借款人可随时还。..."
+
+位置 2：apps/web/src/tutorial/rules.ts:62
+代码原文：
+  "同意后立刻转账；每轮按约定利率计息；出借人可随时催收，上限为对方当前金币；借款人可随时还。"
+
+引擎真值：
+- packages/game-core/src/private-loans.ts:421
+    const collectibleCents = Math.min(loan.remainingCents, Math.max(0, borrowerCents));
+  packages/game-core/src/engine.ts:1190 同样使用
+    const limitCents = Math.min(loan.remainingCents, Math.max(0, borrower.cents));
+  所以剩余应收 500、借款人 1000 时最多只能收 500，不是“对方当前金币 1000”。
+- packages/game-core/src/private-loans.ts:410-412
+    if (currentRound < loan.issuedRound + 1) throw INVALID_ROUND("借出当轮不能催收");
+  所以“随时催收”也不成立：至少下一轮起，且仍受利息是否计入/行动窗口约束。
+- handoff/规则决策表.txt:51 明确写：
+  “催收上限 = min(剩余本息, max(0, 借款人金币))；借出当轮不能催。”
+
+可执行探针（不改文件）：
+1) 构造 loan.remainingCents=500、borrower.cents=1000，调用
+   engine 的 COLLECT_PRIVATE cents=1000 → INVALID_AMOUNT/AMOUNT_EXCEEDS_COLLECTIBLE；
+   调用 cents=500 才成功；
+2) currentRound=issuedRound 时调用 collectPrivateDebt → INVALID_ROUND。
+修复建议：
+- 教程 P3 与规则 R4 改为“最多可收=剩余应收与对方当前金币的较小值；借出当轮不能催，
+  之后在自己的行动/自救窗口内催收”；“借款人可随时还”建议改为“在自己的行动/
+  自救窗口内可还”，避免“随时”与回合限制冲突。
+- 补一条文案/规则测试，断言出现“min/较小值”“借出当轮不能催”，防止回退。
+
+M2. “同一出借人可以同时收到多人的请求”与引擎不一致：当前引擎全局同时只允许
+    一个 PENDING 请求。
+
+位置 1：apps/web/src/tutorial/pages.ts:47
+代码原文：
+  "同一个借款人同时最多 1 个待答复请求；同一出借人可以同时收到多人的请求。..."
+位置 2：apps/web/src/tutorial/rules.ts:61
+  "同一借款人同时最多 1 个待答复请求；同一出借人可以同时收到多人的请求。"
+
+引擎真值：
+- engine.ts:986 创建请求时设置唯一的 s.pendingRequestId = request.requestId；
+- engine.ts:360-377（ACTION）和 413-430（TAX）只要 pendingRequestId 非空就等待，
+  不会让第二个借款人创建新请求；
+- private-loans.ts:204-210 只限制“同一借款人最多一个 PENDING”，但没有让引擎支持
+  多个并发 PENDING；pendingRequestId 是全局单值。
+- 决策表 D6（规则决策表.txt:14）写的是“最多一个待处理请求只限制借款人；出借人可同时
+  收多个请求（用户确认）”，这正好说明当前引擎与 D6 冲突。
+可执行探针：
+- 创建第一个 REQUEST_PRIVATE_LOAN 后（pendingRequestId 非空），第二个不同借款人
+  再请求：引擎等待/拒绝，不会同时出现两个 PENDING；incomingRequests 也只有当前请求。
+修复建议（需 Lead 决策，08A 不能自行改 engine）：
+- 若 D6 是产品真值：需要后续修改 engine/command 队列，让不同借款人的 PENDING 可并存，
+  并补引擎测试；08A 不能只写文案说支持。
+- 若当前引擎是近期真值：把教程/规则改为“同一时间只有一个待答复请求；同一借款人也
+  最多一个”，并在决策表/下一阶段交接中记录 D6 未实现，待后续修复。
+- 不能继续保留“出借人可同时收到多人”这一未实现承诺。
+
+M3. 自救可用操作三处不一致：P4/R6 段落说只能借款/催收/放弃，R6 要点又说包含
+    “还款”，引擎 handleTaxCommand 也确实接受 REPAY_PRIVATE。
+
+位置 1：apps/web/src/tutorial/pages.ts:57
+  "……自救……只能向玩家借款、催收或放弃；放弃/超时=破产……"
+位置 2：apps/web/src/tutorial/rules.ts:87
+  "余额不够进入“危险自救”……只能向玩家借款、催收或放弃；自救期间不能新借银行贷款。"
+位置 3：apps/web/src/tutorial/rules.ts:91
+  "自救期间引擎只接受私人借款、催收、还款与放弃操作。"
+
+引擎真值：
+- engine.ts:886-894（TAX 且无 pending 请求）
+    case "REQUEST_PRIVATE_LOAN": ...
+    case "COLLECT_PRIVATE": ...
+    case "REPAY_PRIVATE": ...     // 允许还私人债
+    case "RESCUE_GIVE_UP": ...
+  所以 P4/R6 段落的“只能借款/催收/放弃”与引擎不符；R6 要点虽然列了还款，
+  但与同节段落直接矛盾。
+- GameView 危险自救 ask 卡目前只渲染紧急借款/催收/放弃，没有“还私人债”按钮
+  （GameView.tsx:1032-1049）；所以 UI、段落、要点、引擎四者不一致。
+- 决策表 R08（规则决策表.txt:63）写“可紧急借款、催收、放弃”，也没有私人还款；
+  这进一步说明需要 Lead 决定是补引擎/UI，还是从规则页去掉“还款”。
+修复建议：
+- 若 R08/UI 是产品真值：规则页要点删除“还款”，并让 engine 在 TAX 拒绝
+  REPAY_PRIVATE（08A 不能改引擎，需后续工单）；教程 P4/规则 R6 段落保持三操作。
+- 若当前引擎是产品真值：把 P4/R6 段落补成“借款、催收、还私人债、放弃”，
+  并决定 GameView 是否暴露“还私人债”入口；否则玩家只能从规则页看到一项 UI 没有的操作。
+- 无论选哪边，不能保留同页“只能三操作”和“接受还款”并存。
+- 补一条规则页文本测试，至少断言 P4/R6 与 R6 要点一致，并与 engine 的 TAX
+  switch 对齐（或明确记录为待修差异）。
+
+------------------------------------------------------------
+三、should-fix / nit
+------------------------------------------------------------
+
+S1. D 项（首次自动打开）与规格字面不同，且测试固化了偏差。
+- App.tsx:46-49：
+    const storage = safeLocalStorage();
+    return storage !== null && !tutorialSeen(storage);
+- 规格 单元08A.txt:48 / 第112行：
+    useState(() => !tutorialSeen(safeLocalStorage()))
+  按规格，storage=null 时 tutorialSeen(null)=false，所以应自动打开；当前实现
+  storage=null（Node/隐私模式/localStorage getter 抛错）时不自动打开。
+- apps/web/tests/tutorial-app.test.ts:76-87（T13 getter 抛异常）甚至断言不自动弹，
+  这是对偏差的固化；tutorial-storage.test 也验证 null→false，但 App 没有 null 自动用例。
+- 注意事项已说明原因：旧 rematch-client.test.ts 在无 localStorage 的 Node 环境挂载 App，
+  自动打开会让“跳过教程”与 Q1“跳过”冲突，并让“永久失信/教程文案”文本断言互相干扰。
+判定：这是“已记录边界”，不是“已满足规格”。在不动旧 646 的前提下没有一个干净的
+  字面改法（任何 App 内自动覆盖层都会进入旧测试容器；portal 到 body 会偏离规格
+  的根节点位置并需要重写新 T11/T12 查询）。建议 Lead 在规格中正式写明
+  “storage 完全不存在时不自动弹”的例外，或另立测试适配工单；不要继续宣称
+  “首次挂载 tutorialSeen=false 即自动打开”。
+- 若 Lead 要求严格字面：需要修改旧 App 测试/测试环境（例如 portal + 重写 T11/T12），
+  这不是 08A 当前实现能“顺手”做到的；不能靠改测试期望解决。
+
+S2. 规则语义没有测试，只有关键词/数字测试。
+- tutorial-pages.test.ts:25-29 只断言关键词出现；:31-41 只断言从 RULES/TIMERS
+  取的数字；rules-sheet.test.ts 只渲染标题/关闭。
+- M1/M2/M3 目前都不会让测试变红；任何一条错误文案可继续通过。
+建议在 tutorial-pages/rules 测试加：
+  - “催收上限”必须提到“较小值/剩余应收/借出当轮不能催”；
+  - 同一出借人条款必须与当前 engine 的真实 pending 语义一致；
+  - P4/R6 段落与 R6 要点必须使用同一操作集合，并和 engine TAX switch 对齐。
+  这类测试可先从 `RULES/TIMERS` 取词，再断言关键短语，不复制数字。
+
+S3. “借款人可随时还 / 出借人可随时催收”忽略回合限制。
+- 引擎 REPAY_PRIVATE/COLLECT_PRIVATE 都在 `assertTurn`（ACTION 当前行动者）
+  或 TAX 危险玩家路径；其它阶段不可操作。M1 已要求改催收的“随时”，
+  建议“借款人可随时还”也改成“在自己的行动/自救窗口内还”，避免玩家误解为
+  任意时刻（包括别人行动、下注、银行到期）都能还。
+
+S4. R6 要点“引擎只接受私人借款、催收、还款与放弃”仍不完整。
+- 在 pending 请求期间，TAX 还允许 ACCEPT/REFUSE/CANCEL_PRIVATE_LOAN
+  （engine.ts:866-879），这不是“还款”二字能覆盖的；若保留“只接受”措辞，
+  应写成“私人借款请求/同意/拒绝/取消、催收、还私人债、放弃（按当前引擎）”，
+  或改成“主要操作”避免绝对化。
+
+N1. T15 通过：GameView.tsx:1024 已改为“自救期间不能新借银行贷款”，
+    :1014-1023 已无“可借银行”行；tutorial-entry.test.ts:105-122 断言
+    不含“可借银行”且包含新文案。引擎 TAX 的 switch（engine.ts:886-897）确实
+    不接受 BORROW_BANK。自身面板仍有“可借额度”字段（GameView.tsx:1397-1404
+    一类位置），但 DANGER/负金币时显示 blocked reason/0，不是正向银行额度；
+    若 Lead 把“任何位置的银行额度字段”都算违规，需要额外隐藏该 stat；当前
+    规格第 7 节只要求危险自救 ask 卡，按 ask 卡算通过。
+N2. 截图与文档：六张 PNG 尺寸实测正确；build 产物名/体积/测试数一致；
+    Edge 无头模式的 scrollWidth 指标是自述，PNG 本身不能证明 scrollWidth；
+    实体手机 100dvh/安全区/软键盘未验证，注意事已如实写明，留 08B。
+N3. CSS 层级：.game-sticky z-index=6（styles.css:483），.overlay z-index=30
+    （:754），.tutorial-overlay z-index=40（:997），教程/规则在结算/债务抽屉
+    之上且自身有关闭按钮，没有互相遮死；560px 媒体查询、100dvh、44px 按钮、
+    overflow-wrap 均有 CSS；360/380 截图无横向裁切。T14 只验证 CSS，真实
+    浏览器滚动指标仍需人工/无头指标复测。
+N4. TutorialOverlay 焦点进入“跳过教程”首按钮、RulesSheet 焦点进入“关闭规则”；
+    Esc 可选实现；遮罩无点击关闭；符合规格。焦点关闭后回到触发按钮为
+    best-effort，未做，可留 08B。
+
+------------------------------------------------------------
+四、D 项明确结论（首次自动打开偏差）
+------------------------------------------------------------
+不满足规格字面，已记录边界，不能宣称“已满足规格”。
+- 规格要求：`!tutorialSeen(safeLocalStorage())`；
+- 实现：`storage !== null && !tutorialSeen(storage)`；
+- 差异：storage=null（无 localStorage/隐私模式/getter 抛）时不自动弹；
+  storage 存在但 getItem 抛异常时仍自动弹；storage 存在且已读不弹。
+- 测试：T11/T12 只覆盖 storage 存在；T13 getter 抛异常断言“不自动弹”，
+  把偏差写成了期望。
+- 在不动旧 646 的前提下，当前边界是合理的工程折中（旧 App 测试无 localStorage，
+  自动覆盖层会与 click("跳过")/文本断言冲突）；没有一个既严格字面又不改旧测试的
+  干净改法。建议 Lead 把该例外写进规格，或单开工单调整旧 App 测试/使用 portal，
+  再谈“满足规格”。若维持现状，交接应写“已记录边界”，不能写“已实现规格第48行”。
+
+------------------------------------------------------------
+五、入口/测试/截图结论
+------------------------------------------------------------
+- T9/T10 入口通过：LobbyView 传 props 才渲染两个链接，不传不渲染；GameView
+  self-actions 有“教程与规则”“规则说明”；T10 断言 client.sendLobby/submitBet/
+  endAction/borrowBank 均 0 次，且步骤仍为 Q1 文本；没有命令或行动消耗。
+- T15 通过：危险 ask 卡无“可借银行”，有新文案；引擎 TAX 拒绝 BORROW_BANK。
+- T11 首次 gate（storage 存在）通过：未读自动打开、跳过写 seen、重新挂载不打开；
+  T12 末页“我知道了”写 seen；T13 异常 storage 仍可手动打开/关闭。
+- T1/T2/T5-T8 通过：5 页、8 节、关键词、翻页、跳过/末页、关闭规则。
+- T14 CSS 通过；六张截图尺寸实测正确；build 产物名/测试数一致。
+- 旧测试：git diff 无旧测试文件；646 未减少；无 skip/todo；无依赖/engine/协议变化。
+- 测试有效性：
+  * T15：若把“可借银行”行加回或删掉新文案，tutorial-entry:105-122 会红。
+  * T11：若删掉 App 自动 gate，tutorial-app:29-44 的 overlayCount/首挂载会红；
+    但不能证明 storage=null 的规格字面（T13 反而固化偏差）。
+  * T9/T10：若删掉 Lobby/GameView 入口或让回调不触发，T9/T10 会红；
+    T10 还断言 client 发送方法 0 次、步骤文本不变，能抓“点教程发命令”回归。
+  * M1/M2/M3 目前没有测试能红；这是内容级 must-fix 的测试缺口。
+
+------------------------------------------------------------
+六、结论与提交前必须关闭项
+------------------------------------------------------------
+不可提交。自动化 678 全绿只能证明现有断言，不证明教程/规则文案与引擎一致。
+提交前必须关闭：
+1. M1：P3/R4 的催收上限与“随时”改成引擎真值（min(剩余应收,对方金币)，
+   借出当轮不能催，自己的行动/自救窗口内可催）。
+2. M2：Lead 决定 D6 与引擎全局单 PENDING 的冲突；不能保留“同一出借人可同时
+   收到多人请求”的未实现承诺。若保持引擎，改文案并记录 D6 待修；若保持 D6，
+   另立 engine 工单，08A 不能只改文案。
+3. M3：统一自救操作集合（P4/R6 段落、R6 要点、GameView danger 卡、engine
+   TAX switch 四者），决定是否允许 REPAY_PRIVATE；当前四者不一致。
+4. 补 M1/M2/M3 的规则语义测试（不是只测关键词），否则同类文案错误会再次通过。
+5. D 项：保留 storage=null 例外就正式写进规格/交接，明确“已记录边界”；
+   不要写成已满足规格第 48 行。T11/T12/T13 已覆盖可记录的行为，但没有 null 自动。
+可以留到 08B/09：
+- 实体手机 360/380、100dvh、安全区、软键盘；当前 PNG 尺寸与 CSS 通过。
+- scrollWidth 的无头浏览器指标复测（文档自述，PNG 不能证明）。
+- TutorialOverlay 关闭后焦点回触发按钮的 best-effort。
+- D6/engine 多 PENDING 的完整实现（若 Lead 选择 D6 真值）。
+
+复核基线 33e7ac1（08A 规格；实现为工作区未提交改动）

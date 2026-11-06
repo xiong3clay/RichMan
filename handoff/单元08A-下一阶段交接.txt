@@ -1,0 +1,85 @@
+单元 08A 下一阶段交接（含复核修复）
+================================================================
+一、架构与入口
+- apps/web/src/tutorial/pages.ts：TUTORIAL_PAGES（5 页，TutorialPage）。
+- apps/web/src/tutorial/rules.ts：RULE_SECTIONS（8 节，RuleSection，顺序固定）。
+- apps/web/src/tutorial/storage.ts：TUTORIAL_SEEN_KEY、tutorialSeen、
+  markTutorialSeen、safeLocalStorage；纯函数，无 React/网络依赖。
+- apps/web/src/tutorial/TutorialOverlay.tsx：props { pages?, onFinish }；
+  默认 TUTORIAL_PAGES；内部 index；跳过/关闭/我知道了统一 onFinish。
+- apps/web/src/tutorial/RulesSheet.tsx：props { sections?, onClose }；
+  默认 RULE_SECTIONS；单个可滚动面板。
+- App.tsx：tutorialOpen/rulesOpen state；finishTutorial 写 seen 并关闭；
+  入口页链接；向 LobbyView/GameView 传 onOpenTutorial/onOpenRules；
+  根节点 footer 之后渲染两个覆盖层。
+- LobbyView.tsx：新增可选 onOpenTutorial/onOpenRules；仅在传入时渲染入口。
+- GameView.tsx：新增可选 onOpenTutorial/onOpenRules；self-actions 增加
+  “教程与规则”“规则说明”；危险自救 ask 卡删除“可借银行”行。
+- styles.css：.tutorial-overlay/.tutorial-panel/.tutorial-head/.tutorial-body/
+  .tutorial-actions/.rules-sheet/.rules-head/.rules-section 等；z-index 40；
+  560px 媒体查询下面板占满宽度、操作区单列。
+
+二、教程/规则当前口径（复核后必须保持）
+- 私人借贷催收：出借人最多可收 = 剩余应收与对方当前金币的较小值；
+  借出当轮不能催收，之后可在自己的行动窗口或自救阶段催收；
+  借款人在自己的行动窗口或自救阶段可以还款。
+- 请求：同一时间只处理一个待答复请求（由当前行动者发起）；
+  同一个借款人同时最多 1 个待答复请求。不要写“出借人可同时收多人请求”，
+  因为 D6 未实现。
+- 危险自救界面操作：紧急借款、催收、放弃；若有人正等你答复借款请求，
+  仍可同意、拒绝或取消；自救期间不能新借银行贷款。
+- 引擎 TAX 还容忍 REPAY_PRIVATE，但界面没有入口；规则页不写“还款”，
+  把它记为引擎宽松点，不要据此改成“四操作”文案。
+
+三、数据流
+- 教程/规则打开和关闭只改 App 的本地 React state；
+  不调用 client.send/sendLobby，不经过服务端，不消耗行动，不改 steps.ts。
+- 已读状态只写 localStorage 的 richman.tutorial.seen.v1；不进入 session、
+  恢复码、房间快照或任何协议消息。
+- 对局中打开覆盖层期间，倒计时仍由服务端推进；关闭后按最新 snapshot 重建，
+  不会补发教程期间错过的命令。
+
+四、协议/存档变化
+- 无。PROTOCOL_VERSION 保持 1；packages/**、apps/server/**、net/** 均未改。
+- 新增 UI 可选 props，旧调用方不传时行为不变。
+
+五、S1 已记录边界（首次自动打开）
+- 规格字面：useState(() => !tutorialSeen(safeLocalStorage()))；
+  实现：storage !== null && !tutorialSeen(storage)。
+- storage 完全不存在（Node 测试/隐私模式/getter 抛错）时不自动打开教程；
+  这是为兼容旧 App 测试保留的“已记录边界”，不等于规格第 48 行字面已实现。
+- storage 存在但 getItem/setItem 抛异常时仍自动打开，关闭时静默写失败。
+- 若后续要严格字面：需单独工单（portal 改造 + 改旧 App 测试），08A 本轮不做。
+
+六、D6 未实现缺口（后续单独立项）
+- D6“出借人可同时收多个请求”当前未实现：engine.ts:986 全局单
+  pendingRequestId；engine.ts:360-377 / 413-430 有未决请求就整阶段等待。
+- private-loans.ts:204-210 只限制“同一借款人最多一个 PENDING”，
+  没有让引擎支持多个并发 PENDING。
+- 08A 教程/规则按当前真实行为描述；要恢复 D6，必须单独改 engine/视图/测试，
+  然后再同步教程与规则页文案。不要把 D6 写成“已实现”。
+
+七、下一单元入口
+- 08B 手机适配：
+  1) 现有 .tutorial-overlay/.tutorial-panel/.rules-sheet 已覆盖 360/380 基础布局；
+     真机需要继续核对 100dvh、safe-area-inset、软键盘、横屏。
+  2) 不要移动覆盖层到 .game-sticky 内；它必须 fixed 并高于 z-index 6。
+  3) 入口按钮已 ≥44px：.tutorial-head-btn/.tutorial-actions button/.rules-close。
+- 08C 音频：与教程无耦合；不要给 TutorialOverlay/RulesSheet 增加网络请求。
+- 09 加固：教程/规则不需要服务端改动；若将来要跨设备同步已读，需另立协议。
+
+八、不可破坏的不变量
+- 教程/规则组件不得直接访问 localStorage 之外的身份数据，不得发网络请求。
+- 教程状态不得影响座位、恢复码、权限、行动次数或服务端状态。
+- GameView/LobbyView 的新 props 必须保持可选；旧测试不传时仍可渲染。
+- 危险自救卡不得恢复“可借银行”或银行额度显示；
+  引擎在 TAX 阶段拒绝 BORROW_BANK，文案必须是“自救期间不能新借银行贷款”。
+- 规则页标题顺序固定；教程数字必须继续从 RULES/TIMERS 派生。
+- 私人借贷/自救文案口径由 tutorial-pages.test.ts 的 S2 测试锁住，不要回退。
+- App 首次自动打开条件见第五节；不要为了“更贴规格”改回 storage=null 时也打开，
+  否则旧 App 用例的 click("跳过") 会与“跳过教程”冲突。
+
+九、回退方式
+- 删除 apps/web/src/tutorial/**、tutorial-*.test.ts、styles-tutorial.test.ts、
+  rules-sheet.test.ts，撤销 App/LobbyView/GameView/styles.css 的相关新增即可。
+- localStorage key 可保留，不影响任何旧逻辑。

@@ -1,0 +1,270 @@
+============================================================
+RichMan 单元 08A 复核修复验证报告
+============================================================
+复核员：Qoder（独立复核，只读）
+复核时间：2026-11-07
+工作区：D:\Lianjunjie\biancheng\RichMan
+基线：HEAD fbe52e0（08A 复核修复工单与规格修订）；08A 实现仍为工作区未提交改动
+复核范围：上一轮 M1/M2/M3/S1/S2 是否闭合；回归；10 张截图
+复核方式：真实 test/typecheck/build；逐字与引擎对照；仓库外临时副本做反向探针；
+          只读源码；未改源码、未 commit；本轮只新增本报告。
+
+结论：可提交。
+  M1/M2/M3/S1/S2 全部通过；未发现新的 must-fix 或 should-fix。
+  仍有 3 条不阻塞的 nit 和 08B 的真机验证边界，见第五节。
+
+------------------------------------------------------------
+一、实跑结果（真实输出）
+------------------------------------------------------------
+$ pnpm -s test
+  Test Files  61 passed (61)
+       Tests  684 passed (684)
+    Start at  00:36:29
+    Duration  7.76s (import 44%, tests 43%, transform 12%, worker 1%)
+TEST_EXIT=0
+
+$ pnpm typecheck
+$ tsc --noEmit -p tsconfig.json
+EXIT=0
+
+$ pnpm -s build
+vite v8.3.5 building client environment for production...
+✓ 138 modules transformed.
+apps/web/dist/index.html                   0.41 kB │ gzip:   0.27 kB
+apps/web/dist/assets/index-D263Ed7h.css   14.79 kB │ gzip:   3.50 kB
+apps/web/dist/assets/index-HFP1Drkx.js   417.72 kB │ gzip: 122.44 kB
+✓ built in 217ms
+EXIT=0
+
+说明：typecheck 第一次尝试时本机 tsc 进程挂起、无输出；终止后同一命令重跑
+exit 0，未出现任何类型错误。test/build 均为本轮新鲜输出。
+
+------------------------------------------------------------
+二、M1：催收/还款口径（通过）
+------------------------------------------------------------
+指定文案已逐字落实，旧错误短语已从 apps/web/src 消失。
+
+1) apps/web/src/tutorial/pages.ts:48
+   “出借人最多可收 = 剩余应收与对方当前金币的较小值；借出当轮不能催收，
+   之后可在自己的行动窗口或自救阶段催收。借款人在自己的行动窗口或自救阶段
+   可以还款。”
+2) apps/web/src/tutorial/rules.ts:62
+   “同意后立刻转账；每轮按约定利率计息；出借人最多可收 = 剩余应收与对方
+   当前金币的较小值；借出当轮不能催收，之后可在自己的行动窗口或自救阶段
+   催收；借款人在自己的行动窗口或自救阶段可以还款。”
+3) 旧短语检查：
+   grep -RIn “上限=对方当前金币|上限为对方当前金币|随时催收|随时还” apps/web/src
+   -> 无匹配。仅 pages.ts:65 / rules.ts:112 的“债务中心随时可开”保留，
+      该“随时”指打开只读抽屉，不是催收/还款，正确。
+
+引擎对照：
+- packages/game-core/src/private-loans.ts:410-412
+  currentRound < loan.issuedRound + 1 时抛 INVALID_ROUND“借出当轮不能催收”。
+- packages/game-core/src/private-loans.ts:421
+  collectibleCents = Math.min(loan.remainingCents, Math.max(0, borrowerCents))。
+- packages/game-core/src/engine.ts:1190
+  limitCents = Math.min(loan.remainingCents, Math.max(0, borrower.cents))。
+- packages/game-core/src/engine.ts:1127-1174
+  REPAY_PRIVATE / COLLECT_PRIVATE 在 ACTION 走 assertTurn；在 TAX 走
+  assertDangerTurn；assertTurn/assertDangerTurn 见 :1288-1311，前者要求
+  currentSeatId 为本人，后者要求 dangerSeatId 为本人。
+因此“较小值”“借出当轮不能催”“自己的行动窗口或自救阶段”均与实现一致。
+
+备注（nit，不阻塞）：引擎在借款人负余额时还取 max(0, ...)，文案未显式写
+“不低于 0”；“最多可收”本身不会为负，不构成反义，故不判 must-fix。
+
+------------------------------------------------------------
+三、M2：单请求口径（通过）
+------------------------------------------------------------
+1) apps/web/src/tutorial/pages.ts:47
+   “同一时间只处理一个待答复请求（由当前行动者发起）；同一个借款人同时
+   最多 1 个待答复请求。同意后立刻转账；每轮按约定利率计息。”
+2) apps/web/src/tutorial/rules.ts:61
+   “同一时间只处理一个待答复请求（由当前行动者发起）；同一个借款人同时
+   最多 1 个待答复请求。”
+3) 旧短语检查：
+   grep -RIn “同一出借人可以同时收到多人的请求|同时收到多人的请求”
+   apps/web/src -> 无匹配；只在测试的旧文案常量中出现。
+   全文件也不存在“出借人可同时收多人请求”的肯定承诺。
+
+引擎对照：
+- packages/game-core/src/engine.ts:986
+  创建请求时 s.pendingRequestId = request.requestId（全局单值）。
+- packages/game-core/src/engine.ts:360-377（ACTION）
+  有 pendingRequestId 时整阶段等待/超时或结算，不创建第二个请求。
+- packages/game-core/src/engine.ts:413-430（TAX）
+  同样只处理当前 pending 请求。
+- packages/game-core/src/private-loans.ts:204-210
+  只限制同一借款人最多一个 PENDING；没有实现出借人并发多请求。
+因此“同一时间只处理一个”准确；D6 的“出借人可同时收多个请求”未实现。
+
+D6 记录检查：
+- handoff/规则决策表.txt:14-16 写明 D6 用户确认、实现状态“未实现（截至 08A）”。
+- handoff/单元08A-下一阶段交接.txt:54-60 专列“D6 未实现缺口”，要求后续单独
+  改 engine/视图/测试后再同步文案。
+- handoff/单元08A-注意事项.txt:57-61 同样记录 engine.ts:986 全局单 pending。
+- handoff/项目当前状态.txt:110 记录 D6 未实现。
+- 全文件搜索“已实现”没有把 D6 写成已实现；只在“不要把 D6 写成已实现”这类
+  禁止性表述中出现。
+
+------------------------------------------------------------
+四、M3：自救操作集合（通过）
+------------------------------------------------------------
+1) apps/web/src/tutorial/pages.ts:57
+   “……余额不够进入“危险自救”（标准 60 秒），只能向玩家借款、催收或放弃；
+   自救期间不能新借银行贷款；放弃/超时=破产（私人债务转坏账、出借人应收
+   冻结）。”
+2) apps/web/src/tutorial/rules.ts:87
+   “余额不够进入“危险自救”（标准 60 秒），界面上提供紧急借款、催收、放弃；
+   自救期间不能新借银行贷款。”
+3) apps/web/src/tutorial/rules.ts:91
+   “自救期间可发起紧急借款、催收、放弃；若有人正等你答复借款请求，仍可
+   同意、拒绝或取消；不能新借银行贷款。”
+4) 全文件不存在“还款与放弃”“引擎只接受……还款……”这类旧表述；
+   P4/R6 段落和 R6 要点均不再写“还款”。
+
+界面/引擎对照：
+- apps/web/src/GameView.tsx:1032-1050 危险自救 ask 卡只有三个 Choice：
+  “紧急借款”“催收”（有可催收合同时才显示）“放弃自救”。
+- apps/web/src/GameView.tsx:1024 显示“自救期间不能新借银行贷款。”；
+  :1014-1023 已无“可借银行”行/额度。
+- apps/web/tests/tutorial-entry.test.ts:105-122（T15）断言危险卡包含
+  “自救期间不能新借银行贷款”且不含“可借银行”。
+- packages/game-core/src/engine.ts:886-894 的 TAX switch 确实额外容忍
+  REPAY_PRIVATE（:891-892）。这正是工单所说的“引擎宽松点”：
+  * handoff/单元08A-注意事项.txt:51-55 明确写“TAX 容忍 REPAY_PRIVATE，
+    界面无入口，不构成玩家可用功能；规则页按界面写三操作”；
+  * handoff/规则决策表.txt:63-66（R08）写“引擎 TAX 分支额外容忍
+    REPAY_PRIVATE（界面无入口，不作为玩家可用操作）；文案按三操作”。
+  没有把 REPAY_PRIVATE 写成玩家可用操作。
+
+备注（nit，不阻塞）：rules.ts:91 把“出借人同意/拒绝”和“借款人取消”合并在
+“若有人正等你答复……仍可同意、拒绝或取消”一句，角色主体略含糊：取消只属于
+借款人自己的请求（engine.ts:1091-1114）。该句是工单原文，engine TAX 也确实
+允许这两类角色操作，不构成反义。
+
+------------------------------------------------------------
+五、S1：storage=null 边界（通过）
+------------------------------------------------------------
+- App.tsx:46-49 仍为：
+    const storage = safeLocalStorage();
+    return storage !== null && !tutorialSeen(storage);
+  与“storage 完全不存在时不自动打开”的实现一致。
+- handoff/单元08A-注意事项.txt:3-14：
+  正式写成“S1 已记录边界：storage 完全不存在时不自动打开教程”，明确
+  “不等于规格第 48 行字面已实现”，并要求后续严格字面单独立项
+  （portal 改造 + 改旧 App 测试），08A 不做。
+- handoff/单元08A-下一阶段交接.txt:46-52：同样写成“已记录边界”，并给出
+  单独立项条件。
+- handoff/单元08A-成果报告.txt:86-87：写“已记录边界，不等于规格第 48 行
+  字面已实现”。
+- handoff/单元08A-运行与验收.txt:48-49、84：写“已记录边界”，并明确
+  “不再宣称满足规格第 48 行”。
+- handoff/项目当前状态.txt:112-113：写“storage 完全不存在时不自动弹
+  （已记录边界，不等于规格第 48 行字面）”。
+- 规格修订记录 handoff/单元08A-新手教程与规则页.txt:155-166 也已把该例外
+  写成正式修订，而不是宣称字面满足。
+- 全文件搜索“满足规格第 48 行”“已满足规格第 48 行”：只出现在
+  “不/不再/不得”否定句或修复工单的禁止条款中，没有肯定性宣称。
+- tutorial-app.test.ts:76-87 的 getter 抛异常用例断言“不自动弹”，
+  与上述边界一致；storage 存在但 getItem 抛异常时仍自动弹（T13 另一条），
+  文档也写明了这一区别。
+
+------------------------------------------------------------
+六、S2：6 条新语义测试与反向探针（通过）
+------------------------------------------------------------
+测试文件：apps/web/tests/tutorial-pages.test.ts，共 11 条；原 5 条保留，
+新增 6 条（:106-146 五条，:148-175 反向探针）：
+1. :106 S2-M1 催收上限：剩余应收与对方当前金币的较小值，不是对方金币。
+2. :114 S2-M1 借出当轮不能催收，之后才可在行动窗口或自救阶段催收。
+3. :123 S2-M1 借款人在自己的行动窗口或自救阶段可以还款。
+4. :129 S2-M2 同一时间只处理一个待答复请求，不承诺出借人多请求。
+5. :137 S2-M3 自救操作集合与界面一致：紧急借款、催收、放弃。
+6. :148 S2 反向探针：旧私人借贷/自救文案会让谓词变 false。
+
+断言方式：读取 pages.ts / rules.ts 导出的字符串数组，对具体规则句段做
+正反两向断言（包含正确口径 + 不包含旧口径），不是只查单个关键词；
+S2-M3 还分别约束 P4 段落、R6 段落、R6 要点三处。测试内 :148 的“反向探针”
+本身是谓词自检，真正的回退保护由前 5 条源码断言承担，下面用仓库外变异实测。
+
+仓库外临时副本实测（不修改仓库）：
+- 基线：临时副本 1 文件 / 11 条全部通过。
+- 把 pages.ts:48 的 M1 文案改回旧版 -> exit 1，S2-M1 三条全红，
+  S2 反向探针也红。
+- 把 rules.ts:62 的 M1 文案改回旧版 -> exit 1，S2-M1 三条全红，
+  S2 反向探针也红。
+- 把 pages.ts:47 的 M2 文案改回旧版 -> exit 1，S2-M2 红，
+  S2 反向探针也红。
+- 把 rules.ts:61 的 M2 文案改回旧版 -> exit 1，S2-M2 红，
+  S2 反向探针也红。
+- 把 rules.ts:87 的 M3 文案改回旧版 -> exit 1，S2-M3 红，
+  S2 反向探针也红。
+- 把 rules.ts:91 的 M3 文案改回旧版 -> exit 1，S2-M3 红，
+  S2 反向探针也红。
+探针目录在仓库外；结束后临时源文件已恢复，与仓库文件逐字节一致；
+仓库未因探针产生任何改动。
+
+------------------------------------------------------------
+七、回归与截图
+------------------------------------------------------------
+1) 测试总量：61 文件 / 684 条 = 旧 646 + 08A 初版 32 + 本轮 6。
+   - 旧测试文件：git diff --name-only HEAD -- '*test*' 为空；
+     没有任何旧测试被改、删除、跳过或放宽。
+   - 08A 初版 32 条保留：tutorial-pages 11 + tutorial-storage 6 +
+     tutorial-overlay 5 + rules-sheet 3 + tutorial-entry 4 +
+     tutorial-app 5 + styles-tutorial 4 = 38；38 - 6 = 32。
+   - 新增测试中没有 .skip/.todo/.only。
+2) 改动范围：git diff --name-only HEAD 仅 6 个已跟踪文件：
+   apps/web/src/App.tsx、GameView.tsx、LobbyView.tsx、styles.css、
+   handoff/规则决策表.txt、handoff/项目当前状态.txt；
+   其余 08A 文件、7 个测试、截图、四份 handoff 均为未跟踪新增。
+   git diff HEAD -- package.json pnpm-lock.yaml packages apps/server
+   apps/web/src/net 为空；git diff HEAD -- '**/steps.ts' 为空。
+   即：无新依赖，packages/**、apps/server/**、net/协议、steps.ts 语义零改动；
+   PROTOCOL_VERSION 保持 1。
+3) 截图（apps/web/artifacts/，10 张，System.Drawing 实测）：
+   - tutorial-first-360x640.png 360x640
+   - tutorial-first-380x700.png 380x700
+   - tutorial-last-360x640.png 360x640
+   - tutorial-last-380x700.png 380x700
+   - tutorial-private-360x640.png 360x640
+   - tutorial-private-380x700.png 380x700
+   - rules-360x640.png 360x640
+   - rules-380x700.png 380x700
+   - rules-tax-rescue-360x640.png 360x640
+   - rules-tax-rescue-380x700.png 380x700
+   已肉眼检查：
+   - tutorial-private-360x640.png 显示第 3/5 页，新增的 M1/M2 文案完整可见；
+   - rules-tax-rescue-360x640.png 显示“紧急借款、催收、放弃”“同意、拒绝或
+     取消”“不能新借银行贷款”，没有“还款”，无横向裁切；
+   - rules-360x640.png 的私人借贷节显示“较小值/借出当轮不能催/行动窗口”新文案。
+   边界：截图是无头 Edge 移动视口，不是实体手机；100dvh、刘海/底部安全区、
+   软键盘、横屏仍留 08B。文档自述的 scrollWidth=clientWidth 本次未重新用
+  浏览器指标复测，只确认了 PNG 尺寸和目视无横向裁切。
+
+------------------------------------------------------------
+八、新问题
+------------------------------------------------------------
+must-fix：无。
+should-fix：无。
+nit（均不阻塞提交）：
+1. handoff/单元08A-注意事项.txt:25 标题写“本轮改过的六处文案位置”，
+   实际列出 pages.ts:47/48/57、rules.ts:61/62/87/91 共 7 处；
+   内容完整，仅计数口径不一致，建议改为“七处”。
+2. rules.ts:91 的“若有人正等你答复借款请求，仍可同意、拒绝或取消”把
+   出借人应答和借款人取消合并在同一句，角色主体略含糊；engine 允许
+   两类操作，工单也指定了这句，不影响本轮闭合。
+3. M1 文案的“较小值”没有显式写出引擎的 max(0, 对方金币) 下限；
+   负余额时“最多可收”不会为负，实际不误导，若追求逐字映射可后续补。
+
+------------------------------------------------------------
+九、最终结论
+------------------------------------------------------------
+可提交。
+M1/M2/M3 的文案、界面、引擎宽松点记录一致；S1 已按“已记录边界”写入
+交接且不再宣称满足规格第 48 行；S2 六条新增语义测试为真实规则断言，
+仓库外变异探针 6 组全部能让对应测试变红。回归、无新依赖、无引擎/协议/
+steps 改动、10 张截图尺寸与重点截图目视检查均通过。
+提交前无需再改源码；上述 3 条 nit 与 08B 真机边界可留后续处理。
+
+复核基线 fbe52e0（08A 实现为工作区未提交改动；本轮未改源码、未 commit）

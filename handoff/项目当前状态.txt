@@ -9,10 +9,11 @@ RichMan 项目当前状态
 游戏版本：未发布，目标 V1.0
 
 【进度与范围】
-已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C。
-当前子任务：08A 新手教程与规则页（规格 handoff/单元08A-新手教程与规则页.txt 已写，待 Trae 实现）；07C 已完成并验收。
+已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A。
+当前子任务：08A 新手教程与规则页已完成 Qoder 复核修复（61 文件/684 条、typecheck/build 0、
+新一轮 360/380 截图，待 Lead 验收）；下一入口 08B 手机适配 → 08C 音频。
 05B 真人试玩：2026-11-06 用户在 07C 后完整玩过一局并确认“不错”，判为真人试玩通过；清单中的等待时长与 360px 截图未逐项记录，并入 08 记录。
-下一入口：08 拆为 08A 教程与规则页（规格已写，待 Trae）→ 08B 手机适配 → 08C 音频；09 加固/跨网/验证/一键发布包。
+下一入口：08B 手机适配 → 08C 音频；09 加固/跨网/验证/一键发布包。
 08C 音频要求：轻松幽默的配乐；只用自制或明确授权素材，记录来源/许可证，加载失败不阻塞。
 05D：BETTING 猜点步可直接“放弃本轮下注”（SUBMIT_BET 0 注）+ GAME_OVER 后房主再来一局（rematch）。
 05E：顶部 .game-sticky = header + 单条反馈横幅 + 事件通知架，.stage 只放当前步骤卡；
@@ -32,10 +33,10 @@ RichMan 项目当前状态
      终局名单与本人破产说明；只改 apps/web，BET_SETTLED 只取本人条目。
 06 起会话与命令去重已落盘（apps/server/data，RICHMAN_DATA_DIR 可覆盖），服务重启后房间恢复为暂停态，房主 resume_game 继续。
 
-【测试与构建（2026-11-06 单元07C 后实测，Lead 独立复跑）】
-pnpm -s test    54 文件 / 646 条（581 + 07C 新增 65），TEST_EXIT=0，7.02s
+【测试与构建（2026-11-06 单元08A 后实测）】
+pnpm -s test    61 文件 / 684 条（646 + 08A 初版 32 + 复核新增 6），TEST_EXIT=0，6.45s
 pnpm typecheck  TSC_EXIT=0
-pnpm -s build   BUILD_EXIT=0（index-CS8m3QZk.css 12.20kB、index-CkUaYwK_.js 405.43kB，132 modules，214ms）
+pnpm -s build   BUILD_EXIT=0（index-D263Ed7h.css 14.79kB、index-HFP1Drkx.js 417.72kB，138 modules，463ms）
 pnpm smoke:lan PASS（05D 验收时）
 旧 481 条中只有两条断言按 Lead 明确授权改正（都在 persistence.test.ts）：
   after_rename_identity_write：旧 token 连接必须 NOT_JOINED，只有恢复码换的新 token 能继续；
@@ -101,9 +102,16 @@ https://diego-rotary-inclusive-hughes.trycloudflare.com（2026-11-06 21:5x 重�
 换域名后 sessionStorage token 失效，用「房间码 + 恢复码」恢复。
 
 【待办】
-0) 08A 进行中：规格 handoff/单元08A-新手教程与规则页.txt；待 Trae 实现，验收后提交并写四份 handoff。
-   07C 已完成并验收（54 文件/646 条、typecheck/build 0）：全部还款/全部催收、返回上一步、房主销毁房间；
-   Qoder 三轮复核意见与修复记录在 handoff/复核-单元07C*.txt 与 单元07C-复核修复记录.txt；
+0) 08A 已完成 Qoder 复核修复（61 文件/684 条、typecheck/build 0）：教程 5 页 + 规则页 8 节 +
+   可选入口 + localStorage 已读；顺带修危险自救卡“可借银行”文案；四份 handoff 已写。
+   M1 催收改为“剩余应收与对方当前金币的较小值/借出当轮不能催/行动或自救窗口”；
+   M2 改为“同一时间只处理一个待答复请求”；M3 自救统一为紧急借款/催收/放弃；
+   S2 新增 6 条语义测试（tutorial-pages.test.ts 共 11 条）。
+   D6“出借人可同时收多请求”未实现（engine 全局单 pendingRequestId），已记录缺口。
+   截图在 apps/web/artifacts/（tutorial-private-*、rules-*、rules-tax-rescue-*）；
+   App 自动打开条件为“storage 对象存在且未读”，storage 完全不存在时不自动弹
+   （已记录边界，不等于规格第 48 行字面；见 08A 注意事项）。
+   07C 已完成并验收（54 文件/646 条）：全部还款/全部催收、返回上一步、房主销毁房间；
    遗留：360px 真机截图未采集、销毁仅单进程验证、S-B 毫秒竞态无端到端用例（有判定单测 + peer 兜底）。
 1) 05B 真机复测：按 handoff/单元05B-试玩清单.txt 记录等待/卡点，重点看 05E 提示可见性与 05F 额度数字/禁用态。
 2) 05F 复核已处理（handoff/复核-单元05F.txt）：1 must-fix + 4 should-fix 已修复并全量验证；
