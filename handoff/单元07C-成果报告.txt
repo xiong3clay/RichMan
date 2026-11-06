@@ -1,0 +1,114 @@
+单元 07C 成果报告（全部还款/全部催收 / 返回上一步 / 房主销毁房间）
+日期：2026-11-06
+基线：581 条测试（07B 后）
+状态：代码与自动化验证完成；已按 Qoder 三轮复核修复 M1/S1/S2/S4/S5/T1-T8/N1/N2/N4（第一轮）、
+     M2/S-D/S-E/S-N/S-F（第二轮）、S-A/S-B（第三轮，见第五节）；
+     360px 真机截图未采集（未验证项）。
+复核报告：handoff/复核-单元07C.txt、复核-单元07C-修复验证.txt、复核-单元07C-修复验证2.txt。
+
+一、改动文件
+新增测试
+  packages/game-core/tests/collect-limits.test.ts        V1-V4（4 条）
+  packages/shared/tests/protocol-07c.test.ts             P1-P3（3 条）
+  apps/web/tests/steps-07c.test.ts                       S1-S3（5 条）
+  apps/web/tests/gameview-07c.test.ts                    U1-U8（13 条）
+  apps/web/tests/client-07c.test.ts                      客户端 destroy（2 条）
+  apps/web/tests/lobby-07c.test.ts                       大厅销毁入口（2 条）
+  apps/web/tests/app-handlers.test.ts                    销毁回调工厂（4 条）
+  apps/web/tests/paused-guard-07c.test.ts                S-A 暂停守卫（3 条）
+  apps/server/tests/destroy-room.test.ts                 D1-D5 + manager（8 条）
+  apps/server/tests/ws-destroy-peers.test.ts             销毁广播 peer 选择（2 条）
+  apps/server/tests/collect-limits-wire.test.ts          真 WS 校验 collectLimits（1 条）
+  apps/server/tests/release-superseded.test.ts           S-B 判定四组合（1 条）
+修改
+  packages/game-core/src/views.ts    PlayerFinanceView 增加 collectLimits；只含本人为出借人的 ACTIVE 合同，
+                                     maxCents=max(0,min(remaining, 借款人 cents))；不新增对方金币字段。
+  packages/shared/src/protocol.ts    DestroyRoomSchema({type:"destroy_room"})、
+                                     RoomDestroyedMessageSchema({type:"room_destroyed",roomCode,byPlayerId})
+                                     加入 Client/ServerLobbyMessageSchema；PROTOCOL_VERSION 仍为 1。
+  apps/server/src/rooms/manager.ts   destroyRoom(roomCode, playerId)：房间不存在→ROOM_NOT_FOUND，
+                                     非房主→NOT_HOST，走 transact(null) 触发 store.deleteRoom 与 session 清理，
+                                     最后清 durablePending。
+  apps/server/src/rooms/scheduler.ts cancelRoom(public)，销毁后取消残留 timer。
+  apps/server/src/ws.ts              handleLobby 增加 destroy_room：先收集 peers，再 destroy，再逐个
+                                     send room_destroyed + detach + ws.close(4002,"ROOM_DESTROYED")；
+                                     S-B：resume 在 joined 发送失败时 releaseSupersededOwner 释放
+                                     旧 owner（detach + 4001），shouldReleaseSupersededOwner 可单测。
+  apps/web/src/net/wire.ts           WireFinance 增加可选 collectLimits?: {loanId,maxCents}[]。
+  apps/web/src/game/steps.ts         collectLimitOf / compareCentsText / canRepayAll / canCollectAll；
+                                     删除 askDebt+空 debtOptions 自动跳 endAction（07C 需求）。
+  apps/web/src/game/confirmations.ts ConfirmAction 增加 destroyRoom；该确认在任何房间状态有效。
+  apps/web/src/net/client.ts         onRoomDestroyed 回调、destroyRoom()；收到 room_destroyed 后
+                                     停止重连、清 session、joined=false，回上层。
+  apps/web/src/App.tsx               注册 onRoomDestroyed（回入口并提示“房主已销毁房间，所有数据已删除”）；
+                                     Game/Lobby 传入 onDestroyRoom。
+  apps/web/src/LobbyView.tsx         房主入口 + 内联二次确认（确认销毁/返回）。
+  apps/web/src/game/paused-guard.ts   S-A：PAUSED_SUBMIT_NOTICE 与 pausedSubmitNotice 唯一文案来源；
+                                     GameView.send() 只调用它，源码契约测试防止守卫被删。
+  apps/web/src/app-handlers.ts       requestRoomDestroy / createRoomDestroyedHandler / roomDestroyedReset，
+                                     App.tsx 真实复用，避免 UI 与测试各写一份销毁逻辑。
+  apps/web/src/GameView.tsx          Q2「返回 Q1」、Q3「返回 Q2」、空 Q3 说明+结束行动、Q4 无条件「返回 Q3」；
+                                     M2：showConfirmation 只让 destroyRoom 在 paused/gameOver/断线时优先，
+                                     send() 另有 paused 守卫；
+                                     Q3/危险催收「全部还款/全部催收」只 setAmount 不提交；余额不足禁用+原因；
+                                     顶部与 GAME_OVER 房主「销毁房间」入口 + destroyRoom 确认卡（含返回）。
+  apps/web/src/styles.css            .game-top-side / .destroy-room-entry(44px) / .destroy-confirm。
+  apps/web/tests/steps.test.ts       唯一一处旧断言按 07C 规格改为“空 Q3 停留 askDebt”，见注意事项。
+
+二、必测映射
+V1 collectLimits 只含本人为出借人的 ACTIVE → collect-limits “只包含本人为出借人的 ACTIVE 合同”
+V2 min(remaining, 借款人金币)，负数取 0 → “maxCents = min(...)”
+V3 第三人/REPAID/BAD_DEBT/FROZEN 不出现 → 对应两条用例
+V4 旧快照缺字段回退不崩 → steps-07c “collectLimitOf 对缺字段/非法值返回 null”
+S1 canRepayAll 三种边界 → “S1 canRepayAll…”
+S2 canCollectAll 三种边界 → “S2 canCollectAll…”
+S3 空 debtOptions 不再自动跳过 → “S3 无债务时 askDebt 停留原步骤”
+U1 Q4 返回 Q3 → “U1 Q4 无条件显示返回”
+U2 Q2 返回 Q1 → “U2 Q2 有返回 Q1”
+U3 空 Q3 结束行动+返回 Q2 → “U3 空 Q3 显示说明…”
+U4 全部还款 可用/禁用 → “U4 金币足够时全部还款…”
+U5 全部催收 可用/禁用 → “U5 全部催收可用时…”
+U6 危险 collectAmount 全部催收填全额 → “U6 危险自救催收金额卡…”
+U7 六个确认卡均有返回且不发命令 → 6 条确认卡用例 + destroy 用例
+U8 非房主无入口/房主可见/返回不发送 → “U8 非房主看不到入口…”
+P1-P3 → protocol-07c 三条
+D1 目录删除+广播+4002 → “D1 房主销毁…”
+D2 非房主 NOT_HOST → “D2 非房主销毁返回 NOT_HOST…”
+D3 销毁后 join ROOM_NOT_FOUND → “D3 销毁后用原房间码 join…”
+D4 PLAYING 销毁 → “D4 对局中（PLAYING）销毁…”
+D5 重复 destroy ROOM_NOT_FOUND → “D5 重复 destroy 返回 ROOM_NOT_FOUND…”
+
+三、真实命令输出
+$ pnpm -s test            # 第三轮修复后由 Lead 独立复跑
+ Test Files  54 passed (54)
+      Tests  646 passed (646)     # 旧 581 + 07C 新增 65
+   Duration  7.02s
+
+$ corepack pnpm typecheck
+tsc --noEmit -p tsconfig.json，退出码 0
+
+$ pnpm -s build
+✓ 132 modules transformed.
+apps/web/dist/assets/index-CS8m3QZk.css   12.20 kB │ gzip:   3.09 kB
+apps/web/dist/assets/index-CkUaYwK_.js   405.43 kB │ gzip: 119.06 kB
+✓ built in 214ms
+
+日志：artifacts/test-logs/unit07C-{test,typecheck,build}.log
+
+四、未验证 / 遗留
+- 未做 360px 真机截图；快捷按钮与销毁确认只有 DOM/CSS 断言。
+- 全部还款/全部催收只做前端可用性判断，服务端仍会最终裁决（未追加服务端新命令）。
+- destroy 只验证单进程内存+文件目录；未验证多进程并发/断电场景（沿用 06 的存储约束）。
+- 未 commit；git status 仅本单元允许的文件。
+
+五、Qoder 三轮复核收敛（第三轮后）
+- 第一轮：M1（GAME_OVER/暂停/断线时销毁确认不渲染）+ S1/S2/S4/S5 + 测试缺口，已修。
+- 第二轮：M2（showConfirmation 与 send 守卫）+ S-D/S-E/S-N/S-F，已修。
+- 第三轮定点验证：M2 通过；S-E/S-N/S-F 通过；新开 S-A（paused 守卫无直接测试）与
+  S-B（resume 在 bind 前失败时旧 owner 可能保持 identity+OPEN+non-current）。两条均已按工单处理：
+  * S-A：paused-guard.ts 纯函数 + GameView 源码契约测试；UI 层由 showConfirmation 拦截，
+    这是纵深防御，不再声称 UI 级可直接复现（详见注意事项）。
+  * S-B：ws.ts 的 releaseSupersededOwner 在 joined 发送失败分支 detach + close(4001)；
+    transact 前关闭的分支沿用 06 的 M1_M2 契约只 detach、不 close（否则推翻旧断言）；
+    selectDestroyPeers(identity+OPEN) 仍是兜底。真实毫秒竞态未做端到端测试。
+- 最终：54 文件 / 646 条、typecheck 0、build 0；无新增依赖、协议版本仍为 1、引擎规则未改。

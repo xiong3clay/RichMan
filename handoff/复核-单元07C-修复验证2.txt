@@ -1,0 +1,238 @@
+============================================================
+RichMan 单元 07C 第三轮定点验证报告
+============================================================
+复核员：Qoder（独立复核，只读）
+复核时间：2026-11-06
+工作区：D:\Lianjunjie\biancheng\RichMan
+基线：HEAD ec8a738（第二轮 M2/S-D/S-E/S-N/S-F 工单）+ 07C 未提交实现
+复核对象：GameView.tsx、app-handlers.ts、App.tsx、GameView/app-handlers/
+          destroy-room/ws-destroy-peers 测试、相关 diff；上一轮报告与第二轮修复记录。
+复核方式：真实 test/typecheck/build；只读源码与断言；只读 DOM/code path 推理。
+
+最终结论：M2 已真修好；S-D 的“真实链路构造不出来”不成立；S-E/S-N/S-F 通过。
+代码/功能层面**可提交**，但 S-D 测试/说明与 M2 send-guard 测试仍是 should-fix，
+不能把 S-D 记为“已验证”；建议补后再关闭。
+
+------------------------------------------------------------
+1. 实际命令与真实输出
+------------------------------------------------------------
+$ pnpm -s test
+ Test Files  52 passed (52)
+      Tests  642 passed (642)
+   Start at  21:24:00
+   Duration  8.14s (tests 44%, import 37%, transform 18%, worker 1%)
+test exit=0
+
+$ corepack pnpm typecheck
+$ tsc --noEmit -p tsconfig.json
+typecheck exit=0
+
+$ pnpm -s build
+✓ 132 modules transformed.
+apps/web/dist/index.html                   0.41 kB │ gzip:   0.27 kB
+apps/web/dist/assets/index-CS8m3QZk.css   12.20 kB │ gzip:   3.09 kB
+apps/web/dist/assets/index-m887ZW7L.js   405.37 kB │ gzip: 119.04 kB
+✓ built in 236ms
+build exit=0
+
+说明：修复记录声称 52 文件 / 642 条、JS 405.37 kB，与本次一致；
+记录里的 7.11s / 215ms 是另一次运行，本次真实为 8.14s / 236ms。
+上一轮 630 → 本轮 642（+12）。旧 581 基线仍只改了 steps.test.ts 空 Q3 一处，
+没有新增 skip/todo，没有依赖/engine/protocol 版本变化（见第 5 节）。
+
+------------------------------------------------------------
+2. M2 结论：通过（原 must-fix 已真修好）
+------------------------------------------------------------
+2.1 渲染优先级
+- apps/web/src/GameView.tsx:1511-1512
+    const showConfirmation = currentConfirmation !== null &&
+      (currentConfirmation.kind === "destroyRoom" ||
+        (!paused && step.kind !== "gameOver" && canSubmit));
+- apps/web/src/GameView.tsx:1693-1703
+    {showConfirmation ? renderConfirm(currentConfirmation!) : paused ? 暂停卡 :
+      step.kind === "gameOver" ? renderStep(step) : !canSubmit ? 连接占位 : ...}
+- 结论：只有 destroyRoom 在 paused/gameOver/!canSubmit 下保留；其他确认卡
+  （bankRepay/giveUp/abandonBet/acceptLoan）在 paused 时让位给暂停卡。
+
+2.2 send 守卫
+- apps/web/src/GameView.tsx:342-347
+    if (paused) {
+      setNotice("房间已暂停，继续后才能提交；本次未发送");
+      return null;
+    }
+- 结论：send 有 paused 守卫；destroyRoom 走 onDestroyRoom，不经过 send，
+  因此 M1 的暂停销毁仍然可用。
+
+2.3 四条 M2 测试是真正的行为断言
+- 测试：apps/web/tests/gameview-07c.test.ts:264-325
+  openThenPause 帮助函数（:264-281）：
+    mount → 点开确认卡 → 断言确认卡文本 →
+    rerender paused=true → 断言 pausedText 出现、confirmText 消失 → 返回 client。
+  四条：
+    M2-bankRepay（:283-292）：client.decideBankDue 未调用；
+    M2-giveUp（:294-303）：client.giveUpRescue 未调用；
+    M2-abandonBet（:305-313）：client.submitBet 未调用；
+    M2-acceptLoan（:315-324）：client.acceptPrivateLoan 未调用。
+- 反事实：若把 showConfirmation 改回 currentConfirmation 全量优先，rerender paused 后
+  暂停卡不出现、确认卡仍显示；`toContain(pausedText)` 与
+  `not.toContain(confirmText)` 失败。四条都会红，而不是只断言“函数被调用”。
+- M1 不回归：gameview-07c.test.ts:386-396（M1 paused 销毁）仍通过；
+  destroyRoom 确认在 paused 下可见、返回关闭、onDestroyRoom 未调用。
+- 缺口：四条测试都没有在 paused 后点击确认（因为确认卡已消失），所以 send 的
+  paused 守卫本身没有被直接执行；若未来把 showConfirmation 改宽而 send 守卫丢失，
+  这四条可能仍绿。这是 should-fix 测试缺口（见第 5 节 S-A），不影响 M2 当前行为结论。
+
+------------------------------------------------------------
+3. S-D 结论：“构造不出来”不成立（should-fix）
+------------------------------------------------------------
+3.1 修复记录/测试的声明
+- apps/server/tests/destroy-room.test.ts:165-185 声称：
+  “恢复码轮换后旧 socket 被 4001 关闭；不存在 OPEN 的 non-current 同房连接”，
+  理由是 bind 会把旧连接 replaced/identity=null 并 close(4001)。
+- bind 确实如此：apps/server/src/ws.ts:203-214
+    previous.replaced=true; previous.identity=null;
+    sendError(previous,"REPLACED"); previous.ws.close(4001,"REPLACED");
+
+3.2 真实存在的路径
+- 位置：apps/server/src/ws.ts:239-259（join/resume 成功后的发送与 bind）
+    if (conn.closed || conn.replaced) { ... }        // 239
+    const delivered = await new Promise<boolean>(... conn.ws.send(joined...) ...); // 248-250
+    ...
+    if (conn.closed || !delivered) {                 // 256
+      await manager.transact(roomCode, () => sessions.disconnect(joined));
+      return;                                        // 257
+    }
+    bind(conn, joined, epoch);                       // 260
+- 对 resume（freshJoin=false，包括 token resume / recoveryCode resume）：
+  1) manager.transact 把 session token/epoch 改成新值并提交；
+  2) 新连接发送 joined，并 await send 回调；
+  3) 如果新连接在 239 行检查之后、bind（260）之前/期间关闭，代码走 256 行
+     sessions.disconnect(joined) 后直接 return；
+  4) 256 行没有 detach(previous)，bind 也没有执行，所以旧连接：
+       - 仍保留旧 identity（含旧 tokenDigest/epoch）
+       - ws.readyState 仍可能是 OPEN（close 事件尚未完成/没有主动 close）
+       - sessions.isCurrent 为 false（记录已是新 token/epoch，旧 tokenDigest 不匹配）
+     即正是“identity 仍在 + OPEN + current=false”的同房连接。
+- 这不是只在 mock 中成立；它是 resume 的发送确认窗口。join 新玩家（freshJoin）
+  走 delivery/discardUndelivered，问题不同；但 resume/token resume 的上述分支存在。
+- 若新连接在 239 行之前就关闭，分支会走 previous 处理并 detach（旧 identity null）；
+  但 239 行之后的关闭没有被覆盖。
+
+3.3 新测试覆盖不足
+- “S-D 真实 ws.destroy_room：同房三条连接全部收到通知并 4002”
+  destroy-room.test.ts:151-163：三条都是 current；没有 non-current。
+- “S-D 恢复码轮换后旧 socket 被 4001 关闭”
+  :165-185：fresh 连接保持打开并完成 bind，所以旧 socket 被 4001；
+  它没有让 fresh 在 bind 前关闭，因此没有覆盖上面 256 行路径。
+- 结果：S5 的 selectDestroyPeers 实现仍能选中该旧连接（identity.roomCode + OPEN），
+  代码功能上会向它发 room_destroyed/4002；但“真实链路不存在”的声明是错的，
+  该场景也没有测试。
+- 建议（should-fix）：
+  * 把 resume/token resume 后 bind 前关闭新连接做成真实测试；确认旧 socket
+    在 host destroy 时收到 room_destroyed/4002，或修正代码在 256 分支 detach previous
+    （更干净）。
+  * 更新 S-D 说明：不是“不存在”，而是“存在一个 bind 前关闭窗口；当前由
+    selectDestroyPeers 的 OPEN+identity 选择兜底”。
+- 因 S5 实现已按“所有 OPEN + 同房 identity”选择，代码层面仍可提交；
+  但 S-D 不能标记为已验证。
+
+------------------------------------------------------------
+4. S-E / S-N / S-F 结论
+------------------------------------------------------------
+S-E：通过。
+- App 真实使用 apps/web/src/app-handlers.ts：
+  apps/web/src/App.tsx:106-124 使用 createRoomDestroyedHandler；
+  :273/:277 使用 requestRoomDestroy 传 onDestroyRoom；不再手写一份。
+- app-handlers.test.ts:22-57 覆盖：
+  requestRoomDestroy null/false/true；
+  byPlayerId=xxx → 房主销毁文案，roomCode/snapshot/joined/events 清空；
+  byPlayerId="" → ROOM_NOT_FOUND 兜底文案；
+  roomDestroyedReset 返回新对象/新 events。
+- 未发现测试另写一份 App 逻辑；关键路径使用真实工厂。
+- 边界：测试没有 mount App 去验证 setRoomCode/setSnapshot 等 React setter，
+  但工单推荐方案 1 是抽工厂，app-handlers 的 apply 断言已覆盖 reset 内容；
+  可留 nit。
+
+S-N：通过。
+- apps/web/src/game/steps.ts:64-80 的 Array.isArray + 类型谓词；
+- steps-07c.test.ts:61-70 覆盖 "x"、{}、null、undefined → null 不抛；
+- 数组内 null/42/缺 loanId/maxCents:null 仍由 :72-85 覆盖。
+- 非数组与畸形元素均有测试。
+
+S-F：通过。
+- gameview-07c.test.ts:356-369：
+  GAME_OVER 下用 click("销毁房间及数据") 点卡内第二入口；
+  断言确认卡出现、返回消失、onDestroyRoom 未调用。
+- 顶部入口 M1 测试 :371-384 仍覆盖；两个入口都覆盖。
+
+------------------------------------------------------------
+5. 新问题
+------------------------------------------------------------
+
+S-A（should-fix）：M2 的 send paused 守卫没有直接执行测试。
+- 位置：GameView.tsx:342-347；测试 gameview-07c.test.ts:264-325。
+- 现状：openThenPause 在 paused 后只断言确认卡消失，没有点击确认；如果
+  showConfirmation 仍正确而 send 守卫生效与否，测试无法区分。
+- 复现/反事实：临时删除 send 的 paused 分支，642 条仍会全绿；因此这层“双保险”
+  未被测试证明。
+- 建议：补充一个直接用例：保持旧确认卡（或测试专用方式）在 paused 下调用任一
+  confirm 按钮，断言 client 方法 0 次且出现“房间已暂停，继续后才能提交；本次未发送”；
+  或在 showConfirmation 隐藏前点击一次。工单 M2-send-guard 明确要求。
+
+S-B（should-fix）：S-D 的“真实链路没有 non-current OPEN 连接”不成立；补真实测试或
+在 256 分支 detach previous。
+- 位置：ws.ts:239-259；destroy-room.test.ts:151-185。
+- 复现：resume/recovery 新连接在 joined send 完成后、bind 前关闭；
+  旧连接 identity 保持、socket 可能 OPEN、current=false；host 随后 destroy 时
+  selectDestroyPeers 会选中它。
+- 代码 S5 当前能兜底（select 不要求 current），但这条路径没有测试；若未来把
+  select 改回 current，这条真实连接会被漏掉。
+- 建议：增加 fresh resume 关闭后 host destroy 的真实 WS 测试；或让 256 分支
+  detach previous，更新 S-D 说明。
+
+N-A（nit）：app-handlers.test 没有 App mount 验证 React setters；
+- 工单推荐工厂方案，app-handlers.apply 已断言 reset 内容；可接受。
+- 若要完全覆盖 App 真实 UI，可加一个 App 级轻量用例；不是阻塞。
+
+N-B（nit）：D4 仍以 spy cancelRoom + 20ms 代替实际 deadline；工单允许，
+但报告应保留“只证明调用/短时间不复活，不证明 60s 后”的边界（修复记录已有）。
+N-C（nit）：D5/D-extra 直接 manager.destroyRoom，不是 ws 协议重复；可接受，注明语义。
+N-D（nit）：360px 真机、真实断网仍未验证；修复记录已列，08/09 继续。
+
+------------------------------------------------------------
+6. 回归与测试有效性
+------------------------------------------------------------
+- 52 文件 / 642 条全绿；typecheck 0；build 0（132 modules，CSS 12.20 kB，
+  JS 405.37 kB，236ms）。
+- 旧测试：`git diff --name-only` 中唯一旧测试文件是 apps/web/tests/steps.test.ts；
+  diff 仍只有空 Q3 从自动跳 Q4 改为停留 askDebt 那一处。没有 skip/todo/xit；
+  没有删除/放宽其他旧断言。
+- 旧 630 全部通过；642 = 630 + 12（M2 四条、S-D 两条、S-E 四条、S-N/S-F 等）。
+- 没有新增依赖；package.json/pnpm-lock 无 diff；engine/bank/private-loans/gamble/tax
+  无 diff；PROTOCOL_VERSION 未变。
+- 测试有效性判断：
+  * M2 四条：若 showConfirmation 改回旧顺序，会红；send 守卫删除不会红（S-A）。
+  * S4：joined ROOM_NOT_FOUND 分支若删除，client 测试会红（上一轮已确认）。
+  * S5 helper：若 select/notify helper 改坏会红；但 ws 改回 inline current 时 helper
+    测试仍绿（S-D/S-B 的测试缺口）。
+  * S-E：app-handlers 工厂是 App 真实代码；测试通过即覆盖工厂；App setter 未 mount。
+  * S-N/S-F：直接覆盖非数组和 GAME_OVER 第二入口，改回旧行为会红。
+
+------------------------------------------------------------
+7. 最终结论
+------------------------------------------------------------
+可提交（代码/功能层面）：
+- M2 已真修：showConfirmation 只保留 destroyRoom 的暂停优先，send 有 paused 守卫；
+  四条 M2 行为测试和 M1 暂停销毁测试均通过。
+- S-E/S-N/S-F 通过；S1/S2/S4 的既有实现仍通过；642 全绿、typecheck/build 0。
+- S-D 代码 S5 仍能兜底 real stale OPEN 连接；没有新的 must-fix。
+
+但仍需补 should-fix 后才算“验证完成”：
+- S-B：S-D 的“不存在 non-current OPEN”声明不成立；补 resume 关闭窗口测试，
+  或修 256 分支 detach previous，并更新说明。
+- S-A：M2 send 守卫没有直接测试；补 paused 下点击确认的用例。
+- N-A/N-B/N-C/N-D：App setter/D4 实际 timer/360 真机等边界，按 08/09 处理。
+建议 Lead：代码可以进入提交流程；但不要把“S-D 已构造不出来”写进交接当已证实，
+先补 S-B/S-A 测试，或明确标注为已知边界。
+
+复核基线 ec8a738（第二轮修复工单；实现为工作区未提交改动）

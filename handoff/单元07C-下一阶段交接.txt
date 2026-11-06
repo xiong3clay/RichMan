@@ -1,0 +1,46 @@
+单元 07C 下一阶段交接
+
+一、协议（PROTOCOL_VERSION 仍为 1）
+- 客户端大厅消息：{ type: "destroy_room" }（strict）
+- 服务端大厅消息：{ type: "room_destroyed", roomCode, byPlayerId }（strict）
+- destroy_room 不含 gameId，必须走 ClientLobbyMessageSchema 分支。
+
+二、服务端入口
+- RoomManager.destroyRoom(roomCode, playerId)：房间不存在→ROOM_NOT_FOUND；非房主→NOT_HOST；
+  transact 候选为 null → store.deleteRoom（原子 tomb）+ sessions 清理；最后 durablePending.delete。
+- RoomScheduler.cancelRoom(roomCode)：销毁后取消残留 timer。
+- ws.ts handleLobby 的 destroy_room：先收集该房间 peers，再 destroy，再逐个
+  send room_destroyed → detach → close(4002, "ROOM_DESTROYED")。
+  顺序不可交换：destroy 后 current() 全 false。
+
+三、Web 入口
+- RichmanClient.destroyRoom(): boolean（仅 joined 可发）；
+  onRoomDestroyed?: ({roomCode,byPlayerId}) => void。
+- 收到 room_destroyed：disposed=true、joined=false、清 session、清 retry timer、关 socket，
+  不触发 REPLACED、不重连。
+- App 收到回调即回入口，提示“房主已销毁房间，所有数据已删除”。
+- LobbyView 与 GameView 只在 hostId===me.playerId 时渲染入口；GameView 用
+  ConfirmAction.kind="destroyRoom" 复用现有确认机制，确认后才调用 destroyRoom。
+
+四、全部还款/全部催收
+- collectLimits 只在本人为出借人的 ACTIVE 合同；maxCents=max(0,min(remaining,借款人 cents))。
+- steps.ts：collectLimitOf / compareCentsText / canRepayAll / canCollectAll。
+- 快捷项只 setAmount(remainingCents) + 清 notice，不提交；金额仍可继续改。
+- 旧快照缺 collectLimits → canCollectAll=null，按钮允许点击并提示“以服务端为准”。
+
+五、不可破坏
+- 不改引擎规则、协议版本、06 存档约束、05E 吸顶结构、05F 额度口径、07A/07B 只读展示。
+- destroy 只删当前房间目录，不得清理其他房间或历史。
+- Q3 空态现在停留在 askDebt（不再自动跳 endAction），Q4 永远可返回 Q3。
+
+六、第三轮 S-A / S-B（下一单元不要回退）
+- apps/web/src/game/paused-guard.ts 的 PAUSED_SUBMIT_NOTICE 是暂停提交文案的唯一来源；
+  GameView.send() 必须调用 pausedSubmitNotice()，paused-guard-07c.test.ts 会读源码断言
+  “pausedSubmitNotice( / setNotice(pausedNotice) / return null / 文案不复制”。
+  删除调用或把文案复制回 GameView 会让契约测试变红。
+- apps/server/src/ws.ts 的 shouldReleaseSupersededOwner(previousExists, previousIsCurrent)
+  只对“旧 owner 存在且不再 current”返回 true；releaseSupersededOwner 在
+  joined 发送失败（transact disconnect 成功后）detach 旧 owner 并对 OPEN socket close(4001)。
+  transact 完成前就关闭的分支沿用 06 的 M1_M2 契约：只 detach、不 close，
+  因为旧用例依赖该 socket 仍能收到 NOT_JOINED；不要为了“统一”补 close 而推翻 06 用例。
+- destroy_room 的 selectDestroyPeers(identity+OPEN) 是最后兜底，不要缩窄回“只选 current”。

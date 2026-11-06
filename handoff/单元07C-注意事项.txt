@@ -1,0 +1,43 @@
+单元 07C 注意事项
+
+1. 「全部还款 / 全部催收」= 只针对当前选中的那一笔合同，不是一次还清所有贷款。
+   金额恰好等于剩余全额才算全部；其他数字仍是部分还款/部分催收。
+2. 快捷项只把金额输入框填成剩余全额，不自动提交；玩家仍需点「确认还款/确认催收」。
+3. 可用性只是前端提示：全部还款要求本人金币 >= remaining；全部催收要求 collectLimits >= remaining。
+   服务端仍是最终裁决，前端没有新增任何命令。
+4. collectLimits 的隐私边界：只含本人为出借人的 ACTIVE 合同，只给 loanId/maxCents；
+   maxCents < remaining 等价于暴露“借款人余额不足”，这是催收必需信息（用户已确认接受）。
+   不包含第三人合同，也不新增任何“对方金币”字段。
+5. 空 Q3 行为变化：07C 起 Q2 点“不需要”会停在 Q3 空态（显示说明 + 结束行动 + 返回 Q2），
+   不再自动跳到 Q4。为此 steps.ts 删除了空 debtOptions 自动跳 endAction；
+   steps.test.ts 中唯一一条旧断言按规格改为“停留 askDebt”。这是本单元唯一被改写的旧断言。
+6. Q4 无条件显示「返回 Q3」；Q2 显示「返回 Q1」；Q3（有/无债务）都显示「返回 Q2」。
+7. 六个确认卡（abandonBet/giveUp/acceptLoan/bankRepay/bankRefuse/destroyRoom）都有返回，
+   返回只 setConfirmAction(null)，不发送命令、不丢已输入金额。
+8. 销毁范围：只删当前房间 rooms/<code>/（FileRoomStore 的原子 tomb），不清理其他房间；
+   内存房间、session 索引、durablePending、scheduler timer 一并清理。
+9. 销毁不可恢复：房主二次确认后才能发送；所有连接收到 room_destroyed 后 4002 关闭并回首页。
+   非房主入口不渲染；服务端仍返回 NOT_HOST 兜底。重复 destroy 返回 ROOM_NOT_FOUND。
+10. room_destroyed 不能被当作普通 error / REPLACED 处理；客户端收到后必须停止重连并清 session。
+11. 未验证项：360px 真机截图未采集；快捷按钮与销毁确认只有 DOM/CSS 断言。
+12. 未验证多进程并发销毁/断电；destroy 的持久化语义沿用 06 的单进程 + 原子 rename 约束。
+
+S-A 边界（暂停提交守卫）
+- send() 里的 paused 守卫是纵深防御：UI 层由 showConfirmation 让位给暂停卡，玩家在 paused
+  时点不到非销毁确认按钮，因此不存在“UI 级直接复现 paused 提交”的路径。
+- 守卫本身由纯函数 pausedSubmitNotice（apps/web/src/game/paused-guard.ts）与源码契约测试
+  （paused-guard-07c.test.ts）锁住；删掉调用或改成空实现时契约测试必须变红。
+- 不要再声称“UI 级可直接复现”；真实防护是 showConfirmation + send 守卫双保险。
+
+S-B 边界（resume 在 bind 前失败）
+- 该窗口真实存在过：resume 的 transact 已换 token/epoch，但新连接在 joined 发送前关闭或
+  发送失败时，旧 owner 可能仍 OPEN 且 non-current。
+- 在 joined 发送失败（conn 仍打开但 send 回调报错）的分支，releaseSupersededOwner 在
+  transact(disconnect) 成功后 detach 并 close(4001) 闭合；transact 抛错时不释放，保持原状。
+- 在 transact 完成前新连接已关闭的分支，沿用 06 的既有约定：只 detach 旧 owner
+  （identity 已清空，destroy_room 的 identity+OPEN 选择不会命中），不 close 旧 socket。
+  原因：旧用例 M1_M2 disconnect_during_recovery 断言该旧连接仍能收到 resume_game 的
+  NOT_JOINED；补 close 会推翻该旧断言，与本轮“不得删除/跳过/放宽任何旧断言”冲突。
+  这是本轮相对工单“两处失败分支都 close”的唯一收窄。
+- 真实毫秒级竞态未做端到端 WS 测试（会 flaky），只用 shouldReleaseSupersededOwner
+  四组合单测锁判定；destroy_room 的 selectDestroyPeers（identity+OPEN）仍是兜底。

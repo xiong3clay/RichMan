@@ -1,0 +1,308 @@
+============================================================
+RichMan 单元 07C 复核修复验证报告
+============================================================
+复核员：Qoder（独立复核，只读）
+复核时间：2026-11-06
+工作区：D:\Lianjunjie\biancheng\RichMan
+基线：HEAD 217e15f（M1/S1/S2/S4/S5 修复工单）+ 07C 未提交实现
+复核对象：handoff/单元07C-复核修复.txt、单元07C-复核修复记录.txt、全部工作区 diff、
+          原始规格 单元07C-全还全收返回与销毁房间.txt、新增测试与旧测试边界。
+复核方式：真实运行 test/typecheck/build；只读源码；只读 DOM 探针验证暂停回归。
+
+最终结论：需再修。
+  原 M1 目标（GAME_OVER/paused 销毁确认可达）已修；S1/S2/S4 代码与测试通过；
+  S5 实现通过但测试只覆盖 helper、没有真实 ws 集成；此外 M1 的顺序修复引入新的
+  must-fix M2：paused 时旧的 bankRepay/giveUp/abandonBet/acceptLoan 确认卡仍可发送命令，
+  绕过 06 的“暂停时经济操作只读”。修复 M2 + 补测试后方可提交。
+
+------------------------------------------------------------
+1. 实际运行的命令与真实输出
+------------------------------------------------------------
+$ pnpm -s test
+ Test Files  51 passed (51)
+      Tests  630 passed (630)
+   Start at  21:05:35
+   Duration  8.36s (tests 45%, import 36%, transform 18%, worker 1%)
+test exit=0
+
+$ corepack pnpm typecheck
+$ tsc --noEmit -p tsconfig.json
+typecheck exit=0
+
+$ pnpm -s build
+✓ 131 modules transformed.
+apps/web/dist/index.html                   0.41 kB │ gzip:   0.27 kB
+apps/web/dist/assets/index-CS8m3QZk.css   12.20 kB │ gzip:   3.09 kB
+apps/web/dist/assets/index-8gCdU9Qs.js   404.81 kB │ gzip: 118.78 kB
+✓ built in 199ms
+build exit=0
+
+说明：修复记录的测试数 630 与本次一致；记录里的 6.78s、245ms 是另一次运行，
+本次真实输出是 8.36s、199ms，不改变结论。旧基线 581；07C 初版 616；本次 630
+（+14 条修复/补强），51 个测试文件。
+
+------------------------------------------------------------
+2. M1 / S1 / S2 / S4 / S5 逐条结论
+------------------------------------------------------------
+
+M1（原 must-fix）：通过（原问题已修），但引入新的 must-fix M2。
+- 当前顺序：apps/web/src/GameView.tsx:1683-1691
+    {currentConfirmation !== null ? renderConfirm(currentConfirmation) : paused ? ... :
+      step.kind === "gameOver" ? renderStep(step) : !canSubmit ? ... : ...}
+  currentConfirmation 已在 paused/gameOver/!canSubmit 之前。
+- GAME_OVER/paused 入口仍对 host 渲染：
+  GameView.tsx:1579-1587（顶部）、:664-671（GAME_OVER 卡）；
+  确认卡 :449-470。
+- 新测试：apps/web/tests/gameview-07c.test.ts:293-330
+  “M1 GAME_OVER 下房主入口仍能打开确认卡，返回不发送”
+  “M1 paused 下房主入口仍能打开确认卡，返回不发送”
+  “T8 非房主在 GAME_OVER / paused 下都看不到入口”
+  两条都真断言确认卡出现 + 返回后消失 + onDestroyRoom 未调用。
+- 结论：原 M1 的现象已消除；但顺序修得过宽，见新 must-fix M2。
+
+S1（修复本地发送失败静默）：通过（实现与测试均通过；App 集成测试仍缺）。
+- GameViewProps.onDestroyRoom 改为 () => boolean：
+  apps/web/src/GameView.tsx:66-67。
+- 确认按钮处理 false：
+  GameView.tsx:461-465
+    const sent = onDestroyRoom !== undefined ? onDestroyRoom() : client.destroyRoom();
+    if (!sent) setNotice("连接未就绪，销毁请求未发送");
+- LobbyView 本地错误：
+  apps/web/src/LobbyView.tsx:10-11（签名）、:97-100（false → destroyError）、
+  :104-115（返回清空/错误展示）。
+- App 原样传 boolean：
+  apps/web/src/App.tsx:276、:280
+    onDestroyRoom={() => clientRef.current?.destroyRoom() ?? false}
+- 测试：gameview-07c.test.ts:332-350（false 显示提示、true 不显示）；
+  lobby-07c.test.ts:63-73（大厅 false 显示本地错误）。
+- 证据边界：这些测试传入的是测试自带 mock，不经过 App；如果 App 又丢掉返回值，
+  GameView/LobbyView 的 mock 测试仍会绿。App 转发没有测试（见新问题 S-E）。
+
+S2（collectLimits 畸形元素）：通过。
+- 实现：apps/web/src/game/steps.ts:64-80
+  find 使用类型谓词：
+    entry !== null && typeof entry === "object" &&
+    typeof (entry as {loanId?: unknown}).loanId === "string" && ... === loanId
+  找到但 maxCents 非字符串/非规范非负仍返回 null。
+- 测试：apps/web/tests/steps-07c.test.ts:61-74
+  [null]、[42]、[{loanId:1}]、[{loanId:"p2p-1",maxCents:null}]、
+  [null, 合法元素, 42] → null/合法值且不抛。
+- 边界：非数组（对象/字符串）没有单独断言；代码 `Array.isArray` 会返回 null，
+  见新问题 S-N。
+
+S4（joined 后 ROOM_NOT_FOUND 回首页）：通过。
+- 实现：apps/web/src/net/client.ts:402-418
+  if (code === "ROOM_NOT_FOUND" && this.joined) { 清理 disposed/joined/session/retry/socket;
+    onRoomDestroyed({roomCode:this.roomCode, byPlayerId:""}); return; }
+  不调用 onServerError。
+- 未 joined 仍走原路径：client.ts:426-430（isSessionError && !joined → abandonSession，
+  然后 onServerError）。
+- App 文案按 byPlayerId 区分：
+  apps/web/src/App.tsx:105-127（空 → “房间已不存在或已被销毁，已回到首页”；
+  非空 → “房主已销毁房间，所有数据已删除”）。
+- 测试：apps/web/tests/client-07c.test.ts:111-120（joined：destroyed 1、
+  serverError 0、hasJoined false、storage 清、socket close、无重连）；
+  :122-133（未 joined：destroyed 0、serverError 1）。
+- 结论：客户端行为通过；App 文案/回首页路径仍无 App 级测试（见新问题 S-E）。
+
+S5（ws 全连接 + 逐 peer try/finally）：实现通过；测试只覆盖 helper，集成覆盖部分成立。
+- 实现：apps/server/src/ws.ts:42-69
+  selectDestroyPeers：identity.roomCode === roomCode && ws.readyState === openState，
+  不要求 current；
+  notifyAndCloseDestroyedPeers：per peer try send / catch / finally detach + close(4002)，
+  detach/close 自身异常也被吞掉继续。
+- 使用：ws.ts:286-297 destroy_room 分支先 select，再 manager.destroyRoom，
+  scheduler.cancelRoom，再 notify。
+- 测试：apps/server/tests/ws-destroy-peers.test.ts:21-34（selection 含 non-current、
+  排除其他房/无 identity/closed）；
+  :36-58（a send 抛错，a/b 都 detach + close，顺序正确）。
+- 边界：测试直接调用导出的 helper，不经过 ws.destroy_room 的实际连接路径；如果
+  ws.ts 改回 inline current 过滤、不再调用 helper，这两条测试仍会绿。见新问题 S-D。
+
+------------------------------------------------------------
+3. 测试有效性抽查（关键实现改回旧行为是否会红）
+------------------------------------------------------------
+本条按“读断言 + 简单反事实”判断，不只因为 630 条通过。
+
+3.1 M1 测试：会红。
+- 测试：gameview-07c.test.ts:293-306（GAME_OVER）
+    await mounted.clickAt("销毁房间", 0);
+    expect(mounted.text()).toContain("销毁房间及数据？");
+    await mounted.click("返回");
+    expect(mounted.text()).not.toContain("销毁房间及数据？");
+    expect(onDestroyRoom).not.toHaveBeenCalled();
+  paused 版本 :308-318 同样。
+- 反事实：若把 GameView.tsx:1683-1691 的顺序改回 paused/gameOver/!canSubmit 优先，
+  GAME_OVER 与 paused 都进入阶段卡，`toContain("销毁房间及数据？")` 失败。
+- 断言不是“函数被调用”：它还断言确认卡出现/消失、onDestroyRoom 未调用。
+- 缺口：GAME_OVER 测试点的是顶部第一个入口，没有点 GAME_OVER 卡里的第二入口
+  （GameView.tsx:664-671）；两个入口目前同状态，不算错误，但“GAME_OVER 卡入口”
+  没有被直接覆盖。见 S-F。
+
+3.2 S4 测试：会红。
+- 测试：client-07c.test.ts:111-120
+    socket.receive({type:"error",code:"ROOM_NOT_FOUND",message:"房间不存在"});
+    expect(h.destroyed).toEqual([{roomCode:"0042",byPlayerId:""}]);
+    expect(serverErrorCalls(h)).toBe(0);
+    expect(client.hasJoined).toBe(false);
+    expect(storage.size).toBe(0);
+    expect(socket.closed).toBe(true);
+    expect(TestSocket.instances).toHaveLength(1);
+- 反事实：若 client.ts 去掉 joined+ROOM_NOT_FOUND 分支，destroyed=[]，
+  serverErrorCalls=1，多个断言失败。
+- 不是只断言 onRoomDestroyed 被调用；还断言 onServerError 未调用/清 session/无重连。
+- 未覆盖：App 的 onRoomDestroyed 文案和回入口；见 S-E。
+
+3.3 S5 测试：helper 改回会红；ws 集成改回不会红（部分成立）。
+- 测试：ws-destroy-peers.test.ts:22-34
+    peer("non-current-stale","0042") 被 selectDestroyPeers 选中；
+    other-room/null/closed 排除。
+  若 selectDestroyPeers 改回“要求 current”，这个纯函数没有 current 概念，测试会
+  需要改签名；在当前设计下仍能抓住 selection 逻辑回退。
+- 测试：:36-58 一个 send 抛错，a/b 都 detach + close；
+  若 notifyAndCloseDestroyedPeers 去掉 try/finally 或 catch，a/b 关闭断言失败。
+- **但**：这些测试不调用 ws.destroy_room；如果 ws.ts 不再使用 helper（改回 inline
+  `peers.filter(current)` 或去掉 try/finally），helper 测试仍绿，D1 也只测 current。
+  这是 S5 的集成测试缺口（见 S-D），所以 S5 判“实现通过、测试部分成立”。
+
+3.4 其他关键补强测试：基线满足。
+- D1 second room：destroy-room.test.ts:74-95（second 目录与 room 对象在 destroy 后仍在，
+  roomCount=1）；若实现删除全部房间，second 断言失败。
+- D4 scheduler：:123-149（spy cancelRoom + 20ms 后目录/房间不复活）；若 cancelRoom
+  调用被删，spy 断言失败。覆盖边界：20ms 不是原 deadline，真实 timer 下只说明未复活，
+  不能证明 60s 后行为（工作单允许 spy 方案）。
+- T3 无债务 Q4：gameview-07c.test.ts:97-105。
+- T4 repayPrivate：:167-179。
+- T5 旧快照 collectLimits：:181-192。
+- T6 wire：apps/server/tests/collect-limits-wire.test.ts:81-101（出借人 maxCents:"500"
+  string；借款人 []）。
+- T7 room_destroyed 不走 error：client-07c.test.ts:96-109。
+- T8 非房主 GAME_OVER/paused：gameview-07c.test.ts:320-330。
+
+3.5 旧测试
+- `git diff --name-only` 中唯一旧测试文件是 apps/web/tests/steps.test.ts；diff 只有
+  一处：Q3 空从“自动跳 Q4”改为“停留 askDebt”。这是原始规格要求。
+- 未发现 `.skip/.todo/xit/xdescribe`；无旧测试被删；无新增依赖；
+  engine.ts/bank.ts/private-loans.ts/gamble.ts/tax.ts 无 diff；PROTOCOL_VERSION 未改。
+- 581 基线 + 49 新增 = 630；与本次真实 630 一致。
+
+------------------------------------------------------------
+4. 新发现的问题
+------------------------------------------------------------
+
+M2（must-fix）：M1 把“所有确认卡”提前，paused 时旧的 bankRepay/giveUp/abandonBet/
+acceptLoan 确认卡仍可发送命令，绕过 06 的暂停只读门禁。
+
+证据：
+- GameView.tsx:1683-1691 现在先渲染 currentConfirmation，再渲染 paused。
+- GameView.tsx:342-355 的 send 只检查 `status !== "open" || !client.hasJoined`，
+  **不检查 paused**。
+- confirmations.ts:15-29 的非 destroy 确认在 view 不变时保持有效；paused 是
+  RoomRecord 标志，不在 view 中，所以 confirmationIsCurrent 仍为 true。
+- 各确认按钮都调用 send：abandonBet :479-490、giveUp :508-517、acceptLoan :547-556、
+  bankRepay/bankRefuse :583-597。
+
+只读 DOM 探针（/tmp/richman-probe-07c-paused-confirm.ts，未改仓库）：
+  confirm open true
+  paused confirm visible {"hasConfirm":true,"hasPause":false}
+  decide calls after paused confirm 1
+
+复现步骤：
+1) 打开 BANK_DUE，点“还款”使 bankRepay 确认卡出现；
+2) 用 props.paused=true 更新同一 GameView；
+3) 页面仍显示“确认还款？”而不是暂停卡；
+4) 点“确认还款”，client.decideBankDue 被调用（探针计数 1）。
+服务端会因 isPaused 返回 ERROR_PAUSED，但 UI 已经发出了经济命令，违反 06 的
+“暂停时经济操作只读”，也与 07C 工单“该顺序对现有确认也成立”的假设相反。
+修复建议（二选一或组合）：
+- 只对 `kind === "destroyRoom"` 的确认在 paused/gameOver/!canSubmit 下拥有优先权；
+  其他确认仍由 paused/!canSubmit 分支先挡住。
+- 或保留 confirm 显示，但在 paused 时禁用其确认按钮并给原因；同时 send 增加
+  `paused` 守卫（最稳，能防未来新增确认卡）。
+- 补测试：bankRepay confirm 打开后 paused=true，确认卡隐藏/按钮禁用且
+  client.decideBankDue 不调用；giveUp/abandonBet/acceptLoan 至少各一条或一个参数化。
+- 这是本轮修复引入的新 must-fix，修完 07C 才能提交。
+
+S-D（should-fix）：S5 测试只覆盖 helper，不覆盖 ws.destroy_room 实际路径。
+- 位置：apps/server/tests/ws-destroy-peers.test.ts:21-58；ws.ts:286-297 的实际调用
+  没有被测试。
+- 如果 ws.ts 改回 `[...connections.values()].filter(current && roomCode)` 或去掉 helper
+  调用，helper 测试仍绿；D1 只覆盖 current 连接，无法抓。
+- 建议：真实 server + 两个连接制造一个 non-current 但仍 open 的 peer（或 spy
+  ws 内部 select/notify 确实被 destroy 调用），destroy 后断言其收到 room_destroyed/
+  4002；再加一个真实 send 抛错的集成/注入用例。
+
+S-E（should-fix）：App 的 onDestroyRoom 返回 boolean、onRoomDestroyed 文案/回首页
+没有 App 级测试。
+- S1 测试（gameview-07c:332-350、lobby-07c:63-73）都传 mock onDestroyRoom，
+  不经过 App.tsx:276/280；若 App 又把 boolean 丢掉，测试仍绿。
+- S4 测试只到 client 层；App.tsx:105-127 的 byPlayerId 文案/roomCode 清空没有测试。
+- 建议：把 App 的 client handlers 工厂抽成可测函数，或加 App 级 mount 用例，断言
+  false 时 entry error、joined ROOM_NOT_FOUND 时回入口且文案为空 byPlayerId 版本。
+
+S-N（nit）：S2 有代码但缺“非数组”显式测试。
+- steps.ts:64-80 的 Array.isArray 逻辑正确；steps-07c:61-74 只测数组内畸形元素，
+  没有 collectLimits: "x"/{} 的断言。建议补两个断言，防止未来改成直接 `.find`。
+
+S-F（should-fix）：GAME_OVER 卡的第二个销毁入口没有测试。
+- M1 测试 gameview-07c:293-306 用 clickAt("销毁房间",0) 点顶部入口；
+  GameView.tsx:664-671 的卡片入口没有被点。
+- 两个入口目前都 setConfirmAction，功能应相同；但“GAME_OVER 卡入口”是规格 3.4
+  的明确落点，建议用 clickAt(...,1) 或按 label 选择“销毁房间及数据”再测一次。
+
+N-A（nit）：D4 的 scheduler 覆盖是 spy + 20ms，不是实际 deadline；工作单允许，
+但应把“只证明 cancelRoom 被调用/20ms 未复活，不证明 60s 后”写清（已有记录边界）。
+N-B（nit）：D5/D-extra 直接 manager.destroyRoom，不是 ws 协议重复 destroy；可接受，
+但报告里应注明这是 manager 语义。
+N-C（nit）：360px 真机、真实断线、真实 timer 没有验证；修复记录已列，仍需在 08/09
+真机验收中补。
+
+------------------------------------------------------------
+5. 规格符合性抽查（不看实现自述）
+------------------------------------------------------------
+- 全部还款/全部催收：
+  * 只填金额、不提交：GameView.tsx:1421-1455（Q3）、:1153-1171（危险 collectAmount）
+    都只 setAmount(remainingCents)+setNotice(null)；T4/T5/U4/U5/U6 断言 client 未调用。
+  * 金币不足：canRepayAll steps.ts:90-96；U4 disabled + “金币 500 分不足 1,000 分”。
+  * 对方可收上限不足：canCollectAll steps.ts:98-104；U5 disabled + “对方当前仅有 300 分”。
+  * 上限只来自服务端：collectLimitOf 只读 finance.collectLimits，没有从 publicPlayers/cents
+    推算；T6 只用服务端 wire 的 collectLimits；通过。
+  * 隐私：collect-limits.test.ts:65-69 断言键只有 loanId/maxCents；没有 borrower cents；
+    T6 借款人侧 collectLimits=[]；通过。
+- 返回：
+  * Q2 “返回 Q1”：GameView.tsx:1325；U2。
+  * Q4 无条件“返回 Q3”：GameView.tsx:1479；T3 空债务/有债务。
+  * 空 Q3：说明 + 结束行动 + 返回 Q2：GameView.tsx:1367-1379；U3。
+  * 危险自救：privateLender/privateAmount/collect/collectAmount 都有返回；
+    ask 为根问题，其“放弃自救”确认卡有返回（:516）；符合规格 2.2。
+  * 6 种 ConfirmAction：U7 五条 + M1/U8 destroy；返回只 setConfirmAction(null)，
+    不调用 client；通过（M2 是暂停门禁回归，不是返回逻辑）。
+- 销毁：
+  * 非房主看不到入口：GameView.tsx:1579-1587/664-671 的 hostId 条件；LobbyView.tsx:86；
+    U8/T8/Lobby 测试；服务端 D2 NOT_HOST；通过。
+  * 只删本房间：D1 second room 断言；通过。
+  * room_destroyed 广播+4002+清 session：D1、client-07c；通过。
+  * 协议 strict / PROTOCOL_VERSION：protocol.ts:85、:194-200；P1/P2/P3；通过。
+  * 任何房间状态：M1 已修 GAME_OVER/paused destroy；但 M2 暂停下其他确认卡会发命令，
+    不是销毁入口本身的问题；修复 M2 后通过。
+- 旧测试/范围：
+  * 唯一旧断言改动是 steps.test.ts 的空 Q3；无删除/跳过/放宽；无依赖/引擎/协议版本变化。
+
+------------------------------------------------------------
+6. 最终结论与给 Lead 的建议
+------------------------------------------------------------
+结论：需再修。
+
+必须修：
+- M2：paused 时旧的 bankRepay/giveUp/abandonBet/acceptLoan 确认仍能发送命令；
+  给 send 加 paused 守卫，或仅对 destroyRoom 允许确认卡优先于 paused，并补暂停回归测试。
+建议一并修：
+- S-D：S5 增加实际 ws.destroy_room 的 non-current peer/send 抛错集成测试。
+- S-E：App 的 onDestroyRoom boolean 与 onRoomDestroyed 文案/回首页补 App 级测试。
+- S-N/S-F：非数组 collectLimits、GAME_OVER 卡第二入口补断言。
+可留到 08/09：
+- 360px 真机、真实断网、真实 timer 的 D4 边界、D5 协议重复 destroy 的说明。
+- M1/S1/S2/S4 原目标已达成；S5 实现正确、测试补强即可。
+不要提交前把“630 全绿”当作完成：M2 是无测试覆盖的真实暂停回归。
+
+复核基线 217e15f（07C 修复工单；实现为工作区未提交改动）

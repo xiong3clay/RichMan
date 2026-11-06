@@ -1,0 +1,128 @@
+单元 07C 复核修复记录（Qoder 复核 → Trae 修复）
+日期：2026-11-06
+基线：HEAD 217e15f + 07C 未提交实现（616 条）
+结果：630 条 / 51 文件全绿；typecheck 0；build 0；未 commit。
+
+一、M1 GAME_OVER / paused / !canSubmit 下销毁确认卡
+修复：apps/web/src/GameView.tsx:1683-1691，stage 渲染顺序改为
+      currentConfirmation → paused → gameOver → !canSubmit → 其他。
+证据：apps/web/tests/gameview-07c.test.ts
+      “M1 GAME_OVER 下房主入口仍能打开确认卡，返回不发送”
+      “M1 paused 下房主入口仍能打开确认卡，返回不发送”
+      “T8 非房主在 GAME_OVER / paused 下都看不到入口”
+
+二、S1 onDestroyRoom 返回 boolean，失败不再静默
+修复：GameViewProps.onDestroyRoom?: () => boolean（GameView.tsx:66-67）；
+      GameView.tsx:461-465 关闭确认后判 false → setNotice("连接未就绪，销毁请求未发送")；
+      LobbyView.tsx:98-99 + 115 本地 destroyError；
+      App.tsx:276/280 改为 () => clientRef.current?.destroyRoom() ?? false。
+证据：gameview-07c “S1 本地发送失败时确认关闭并显示未发送提示；成功则无提示”
+      lobby-07c “S1 大厅确认发送失败时显示本地错误，不静默”
+
+三、S2 collectLimits 畸形元素抛错
+修复：apps/web/src/game/steps.ts:70-79，find 使用类型谓词，过滤 null/非对象/非字符串 loanId；
+      外层非数组、maxCents 非法仍返回 null。
+证据：steps-07c “S2 collectLimits 数组含 null/数字/缺字段元素时不抛错并返回 null”
+      （[null]、[42]、[{loanId:1}]、[{loanId:"p2p-1",maxCents:null}]、混合合法元素）
+
+四、S4 已 joined 收到 ROOM_NOT_FOUND 回首页
+修复：apps/web/src/net/client.ts:402-418，joined + ROOM_NOT_FOUND 走与 room_destroyed
+      相同的 disposed/joined/session/retry/socket 清理，onRoomDestroyed(byPlayerId="")，
+      不再 onServerError；未 joined 路径不变。
+      App.tsx:105-126 按 byPlayerId 区分文案：
+      空 → “房间已不存在或已被销毁，已回到首页”；非空 → 原销毁文案。
+证据：client-07c “S4 已加入后收到 ROOM_NOT_FOUND：按销毁路径回首页，不调 onServerError”
+      “S4 未加入时 ROOM_NOT_FOUND 仍走原 error 路径”
+
+五、S5 ws 只处理 current 连接 / 单个 send 抛错中断
+修复：apps/server/src/ws.ts:33-69 新增 selectDestroyPeers（identity.roomCode + OPEN，不要求 current）
+      与 notifyAndCloseDestroyedPeers（逐 peer try/finally，send 失败仍 detach + close 4002）；
+       ws.ts:286-297 destroy_room 使用两者。
+证据：apps/server/tests/ws-destroy-peers.test.ts 2 条：
+      “只按 identity.roomCode + OPEN 选择，不要求 current”
+      “一个 send 抛错不影响后续 peer 的 detach 与 4002 关闭”
+
+六、测试补强
+T1 第二房间不被删：destroy-room.test.ts D1（L76-78、L91-94），second 目录与 room 仍在。
+T2 scheduler：destroy-room.test.ts D4（L132-144）spy RoomScheduler.prototype.cancelRoom，
+   断言调用 + 销毁后 20ms 目录/房间不复活。覆盖边界：真实 timer 下只验证 cancel 被调用与不复活。
+T3 无债务 Q4 返回：gameview-07c “T3 无债务 Q4 仍显示返回 Q3，并能回到 Q3”。
+T4 repayPrivate：gameview-07c “T4 私人还款也能全部还款并填入全额，不提交”。
+T5 旧快照 UI 回退：gameview-07c “T5 旧快照缺 collectLimits 时回退文案，按钮可点且只填不提交”。
+T6 wire：apps/server/tests/collect-limits-wire.test.ts，真实 WS REQUEST→ACCEPT 后
+   出借人 snapshot.collectLimits = [{loanId, maxCents:"500"}]（string），借款人 []。
+T7 room_destroyed 不触发 onServerError：client-07c 增加断言 serverErrorCalls=0、
+   TestSocket.instances=1（无重连）。
+T8 非房主 GAME_OVER/paused 无入口：gameview-07c “T8…”。
+
+七、N1/N2/N4
+N1 steps.ts:173 注释改为“07C 起没有可操作项时停留 askDebt，可返回 Q2”。
+N2 GameView.tsx:1446 文案去掉多余空格 → “金币 500 分不足 1,000 分”；
+   gameview-07c:135 同步断言。
+N4 GameView.tsx:667 GAME_OVER 入口补 class="link destroy-room-entry"（44px，styles.css:509）。
+
+八、旧测试边界
+仅 steps.test.ts 的空 Q3 断言仍为 07C 规格要求的那一处改动（“自动跳 Q4”→“停留 askDebt”）；
+其它旧断言未删、未跳过、未放宽。616 → 630 新增 14 条，旧 616 全部通过。
+
+九、真实输出（第一轮）
+pnpm test：51 文件 / 630 条通过，exit 0，6.78s。
+pnpm typecheck：tsc --noEmit，exit 0。
+pnpm build：131 modules，CSS 12.20 kB，JS 404.81 kB，built 245ms，exit 0。
+
+======================================================================
+第二轮 M2 / S-D / S-E / S-N / S-F（2026-11-06）
+======================================================================
+
+M2（must-fix）paused 时旧确认卡仍能发经济命令
+修复（双保险）：
+1) GameView.tsx:1511-1512 新增 showConfirmation：只有 destroyRoom 确认在
+   paused/gameOver/!canSubmit 下保留优先；其他确认让位给暂停/结束/连接占位。
+   stage 渲染改为 showConfirmation ? renderConfirm : paused → gameOver → !canSubmit。
+2) GameView.tsx:342-347 send() 增加 paused 守卫：
+   setNotice("房间已暂停，继续后才能提交；本次未发送") + return null。
+   destroyRoom 走 onDestroyRoom 不经 send，M1 暂停销毁用例继续通过。
+测试（gameview-07c.test.ts）：
+- “M2-bankRepay：暂停后确认还款卡消失且不发命令”
+- “M2-giveUp：暂停后放弃自救确认卡消失且不发命令”
+- “M2-abandonBet：暂停后放弃下注确认卡消失且不发命令”
+- “M2-acceptLoan：暂停后同意借款确认卡消失且不发命令”
+每条都真实打开确认卡 → rerender paused=true → 断言暂停卡出现、确认卡消失、
+对应 client 方法 0 次；M1-paused 销毁用例保留并继续通过。
+边界说明：send 的 paused 守卫是防未来新增命令的纵深防线；由于非销毁确认卡在 paused
+下已被 showConfirmation 隐藏，UI 上不存在可点击路径，因此没有伪造“paused 下点击确认”
+的用例；M2 四条已覆盖“无法点击/不发送”。
+
+S-D（should-fix）真实 ws.destroy_room 集成
+新增（destroy-room.test.ts）：
+- “S-D 真实 ws.destroy_room：同房三条连接全部收到通知并 4002”
+- “S-D 恢复码轮换后旧 socket 被 4001 关闭；不存在 OPEN 的 non-current 同房连接”
+边界（必须说明）：ws.ts 的 bind 在恢复码轮换时会把旧连接标记 replaced、identity=null
+并 close(4001)。因此真实协议链路下不存在“identity 仍在 + OPEN 但 current=false”的同房
+连接；测试断言旧 socket 已被 4001 关闭且不会再收到 room_destroyed，新 socket 正常收到
+销毁通知。该选择逻辑由 ws-destroy-peers.test.ts 的 selectDestroyPeers 单测覆盖（含
+non-current 标签 peer）。真实“server send 抛错”无法从客户端注入，保留 helper 单测
+（notifyAndCloseDestroyedPeers）覆盖；未静默跳过。
+
+S-E（should-fix）App 层
+新增 apps/web/src/app-handlers.ts（App 真实调用）：
+- requestRoomDestroy(client) → boolean（App 的 onDestroyRoom 用它，不再丢返回值）
+- createRoomDestroyedHandler(deps) → App handlers.onRoomDestroyed 的真实实现
+- roomDestroyedReset(byPlayerId) → entryError 文案 + roomCode/room/snapshot/joined/events 清空
+App.tsx:105-123 改为 createRoomDestroyedHandler；:273/:277 改为 requestRoomDestroy。
+测试（apps/web/tests/app-handlers.test.ts 4 条）：
+- requestRoomDestroy null/false/true
+- byPlayerId=xxx → “房主已销毁房间，所有数据已删除”且 roomCode/snapshot 为 null
+- byPlayerId="" → “房间已不存在或已被销毁，已回到首页”
+- reset 纯函数不复用可变引用
+
+S-N collectLimits 非数组
+steps-07c 新增 “S-N collectLimits 非数组（字符串/对象/null/undefined）返回 null 且不抛”。
+
+S-F GAME_OVER 第二入口
+gameview-07c 新增 “S-F GAME_OVER 卡内第二入口也能打开确认卡，返回不发送”。
+
+第二轮真实输出
+pnpm test：52 文件 / 642 条通过（630 + 12），exit 0，7.11s。
+pnpm typecheck：tsc --noEmit，exit 0。
+pnpm build：132 modules，CSS 12.20 kB，JS 405.37 kB，built 215ms，exit 0。
