@@ -1,0 +1,108 @@
+单元 08B 复核修复规格（Qoder 复核 → 修复）
+================================================================
+基线：HEAD 7fe92f9（08B 规格提交）；08B 实现仍是工作区未提交改动。
+复核报告：handoff/复核-单元08B.txt（378 行，结论“需修复”）。
+本文件是唯一工单：只修 F1–F7，不做其他重构；不改 packages/**、apps/server/**、
+apps/web/src/net/**、steps.ts 语义、协议、依赖；旧 684 条测试不得削弱；不 commit。
+
+Lead 已逐条核实：Qoder 的 M1、M2、S1、S3（T5/T8 缺口）成立；S2 按“可用但需滚动”
+口径接受并补 scroll-margin；S4 补可复跑证据。Qoder 的 S3 中“T13/T14 自证”结论成立，
+但保留为 smoke，另外把权威证据写进交接文档。
+
+一、F1（M1）移动端金额输入必须保持 18px
+事实：apps/web/src/styles.css:711-717 `.amount-input{font-size:18px}`；
+:1276-1283 的 @media(max-width:560px) 里 `.input, select, textarea{font-size:16px}`
+特异性相同且更靠后，导致 360/390 金额框实为 16px（Qoder 用真实 build 的 computed
+style 复现）。交接文档还写成“18px 不动”，必须一起改正。
+修法（在 08B 段落末尾追加，特异性 0,2,0 稳定胜过 .input）：
+  .input.amount-input {
+    font-size: 18px;
+  }
+验收：360×640 与 390×844 下 getComputedStyle(.amount-input).fontSize === "18px"；
+桌面不变；.input 非金额仍 16px（≤560）。
+
+二、F2（M2）安全区补全：固定 footer、规则页顶部、覆盖层左右
+事实（Qoder 实测）：.footer（styles.css:435-449）fixed + padding:10px 18px，无
+safe-bottom/left/right；.rules-sheet（:1104-1119）只有 08B 追加的 padding-bottom，
+没有 safe-top；.tutorial-overlay（:999-1008，≤560 时 :1169-1172 padding:0）没有
+safe-left/right，横屏 640 宽时刘海可能压内容。
+修法（全部写在 08B 段落末尾，按此顺序）：
+  .footer {
+    padding: 10px max(18px, var(--safe-right)) calc(10px + var(--safe-bottom)) max(18px, var(--safe-left));
+  }
+
+  .rules-sheet {
+    padding-top: calc(18px + var(--safe-top));
+  }
+
+  .tutorial-overlay {
+    padding: max(16px, var(--safe-top)) max(16px, var(--safe-right))
+      max(16px, var(--safe-bottom)) max(16px, var(--safe-left));
+  }
+
+  @media (max-width: 560px) {
+    .tutorial-overlay {
+      padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+    }
+  }
+注意：最后这个 560 块必须放在上面 .tutorial-overlay 覆盖之后（文件顺序靠后），
+否则原 :1169 的 padding:0 会被提前覆盖、窄屏不再通栏。环境变量全部有 0px 兜底，
+无刘海时行为与现在一致（footer 18px、规则页 18px、覆盖层 16px/0）。
+
+三、F3（S1）100dvh 面板限高补 100vh 兜底
+位置（每处都在 max-height:100dvh 前插一行 max-height:100vh）：
+- styles.css:1016 .tutorial-panel
+- styles.css:1108 .rules-sheet
+- styles.css:1177 ≤560 的 .tutorial-panel/.rules-sheet
+- styles.css:1318 横屏的 .tutorial-panel/.rules-sheet
+说明：iOS 15.0–15.3 不支持 dvh，缺兜底会导致整条 max-height 失效、关闭按钮被裁。
+
+四、F4（S2）横屏 Q3 口径：接受“需滚动”，补 scroll-margin
+在 @media (max-height:480px) and (orientation:landscape) 内追加：
+  .wizard {
+    scroll-margin-top: calc(56vh + 8px);
+  }
+口径写进 08B-注意事项：横屏 640×360 下 Q3 题干/金额框可能不在首屏，需要页面滚动；
+“不被吸顶区完全遮住、按钮可点”为验收标准，不要求题干与确认同屏。
+
+五、F5（S3）测试补强（apps/web/tests/mobile-08b.test.ts 追加，编号接在 T14 后）
+T15 金额输入层叠：断言 `.input.amount-input` 规则存在且 font-size 为 18px，
+     且它在 560 媒体块之后；全文不得出现把 .amount-input 设为 16px 的规则。
+T16 安全区补全：.footer 规则包含 calc(10px + var(--safe-bottom)) 与
+     max(18px, var(--safe-right))；.rules-sheet 包含 padding-top: calc(18px + var(--safe-top))；
+     .tutorial-overlay 包含 max(16px, var(--safe-top))，且其后有一个 ≤560 块把
+     overlay 的 padding 写成四个 safe 变量。
+T17 dvh 兜底：CSS 中 `max-height: 100vh;\s*max-height: 100dvh;` 至少 4 处。
+T18 真实结算行：把 T8 的组合里死选择器 .settle-row 换成
+     .settle-lines/.settle-line/.settle-balance，并断言 GameView.tsx 里确实出现
+     这些类名（否则测试证明的是不存在的东西）。
+T19 横屏滚动余量：landscape 媒体块包含 .wizard 的 scroll-margin-top:
+     calc(56vh + 8px)。
+T13/T14 保留，但在测试文件顶部注释里标明它们是 smoke；权威证据用
+`git diff --name-only HEAD -- '*test*'` 为空 + 命令输出写进交接（不要伪造）。
+
+六、F6（S4）可复跑证据
+新增 apps/web/scripts/mobile-shots.mjs（本机 Edge + CDP，无新依赖；可用 node 内置
+WebSocket/fetch 或已有做法），做两件事：
+1) 对 6 个状态（entry/tutorial/game-q1/game-q3/landscape/rules）输出
+   viewport、documentElement.scrollWidth、clientWidth，写入
+   apps/web/artifacts/mobile-metrics.txt，每行形如
+   state=game-q3 viewport=390x844 scrollWidth=390 clientWidth=390 PASS
+2) 重新生成 6 张同名截图（覆盖现有文件），尺寸必须仍是 360x640、360x640、
+   360x640、390x844、640×360、430x932。
+Q1/Q3 用真实房间（两个 WS 玩家）复现，与上一轮相同；如某状态无法复现，在
+metrics 里写 SKIP 并在交接说明原因，不要写 PASS。
+验收：metrics 里 6 个状态 scrollWidth<=clientWidth 全 PASS（或 SKIP 有理由）。
+
+七、F7 文档校正
+- 基线改为 7fe92f9；删除任何“amount-input 18px 不动”的错误说法（修复后为真，
+  但要写明靠 .input.amount-input 特异性覆盖）。
+- 单元08B-成果报告/注意事项/运行与验收/下一阶段交接 补：
+  M1/M2 修了什么、F3 兜底、F4 横屏口径、测试 698→新数、metrics 路径、
+  T13/T14 是 smoke 的说明。
+
+八、验收命令（必须真实跑，数字写进交接）
+pnpm -s test    （期望 ≥698+5 全绿）
+pnpm typecheck  （0）
+pnpm -s build   （0，记录新 CSS/JS 产物名与大小）
+不要改旧 684 条；不要新增依赖；不要 commit。
