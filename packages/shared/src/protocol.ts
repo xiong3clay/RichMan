@@ -81,6 +81,8 @@ export const LobbyLeaveSchema = z.object({ type: z.literal("leave") }).strict();
 export const LobbyStartSchema = z.object({ type: z.literal("start") }).strict();
 export const RematchSchema = z.object({ type: z.literal("rematch") }).strict();
 export const ResumeGameSchema = z.object({ type: z.literal('resume_game') }).strict();
+/** 07C：仅房主可销毁当前房间；不含 gameId，因此必须走 lobby 分支。 */
+export const DestroyRoomSchema = z.object({ type: z.literal("destroy_room") }).strict();
 export const ResumeSchema = z.object({
   type: z.literal("resume"),
   roomCode: RoomCodeSchema,
@@ -116,6 +118,7 @@ export const ClientLobbyMessageSchema = z.discriminatedUnion("type", [
   RematchSchema,
   ResumeGameSchema,
   ResumeSchema,
+  DestroyRoomSchema,
 ]);
 export type ClientLobbyMessage = z.infer<typeof ClientLobbyMessageSchema>;
 
@@ -187,6 +190,15 @@ export const PeerLeftMessageSchema = z
   .object({ type: z.literal("peer_left"), playerId: z.string().min(1).max(64) })
   .strict();
 
+/** 07C：房间已销毁通知；只发给销毁前该房间的当前连接。 */
+export const RoomDestroyedMessageSchema = z
+  .object({
+    type: z.literal("room_destroyed"),
+    roomCode: RoomCodeSchema,
+    byPlayerId: z.string().min(1).max(64),
+  })
+  .strict();
+
 export const LobbyErrorSchema = z
   .object({ type: z.literal("error"), code: z.enum(LOBBY_ERROR_CODES), message: z.string() })
   .strict();
@@ -217,5 +229,6 @@ export const ServerLobbyMessageSchema = z.discriminatedUnion("type", [
   CommandResultMessageSchema,
   SnapshotMessageSchema,
   EventsMessageSchema,
+  RoomDestroyedMessageSchema,
 ]);
 export type ServerLobbyMessage = z.infer<typeof ServerLobbyMessageSchema>;

@@ -61,6 +61,55 @@ export function withinLimit(value: string, limit: string | null): boolean {
   return parsed <= max;
 }
 
+/** 服务端下发的“该笔私人合同最多可收回”上限；旧快照缺字段或非法时返回 null。 */
+export function collectLimitOf(view: WireSnapshotView, loanId: string): string | null {
+  const limits = view.finance.collectLimits as
+    | readonly { loanId: string; maxCents: string }[]
+    | undefined;
+  if (!Array.isArray(limits)) return null;
+  // S2：畸形元素（null/数字/缺 loanId）不能抛错，统一按“字段非法”返回 null。
+  const found = limits.find(
+    (entry): entry is { loanId: string; maxCents: string } =>
+      entry !== null &&
+      typeof entry === "object" &&
+      typeof (entry as { loanId?: unknown }).loanId === "string" &&
+      (entry as { loanId: string }).loanId === loanId,
+  );
+  if (found === undefined || typeof found.maxCents !== "string") return null;
+  return isNonNegativeCents(found.maxCents) ? found.maxCents : null;
+}
+
+/** 规范十进制整数分比较；调用方负责先校验格式，全程不做浮点换算。 */
+export function compareCentsText(left: string, right: string): number {
+  const leftNegative = left.startsWith("-");
+  const rightNegative = right.startsWith("-");
+  if (leftNegative !== rightNegative) return leftNegative ? -1 : 1;
+  const leftAbs = leftNegative ? left.slice(1) : left;
+  const rightAbs = rightNegative ? right.slice(1) : right;
+  const sign = leftNegative ? -1 : 1;
+  if (leftAbs.length !== rightAbs.length) {
+    return sign * (leftAbs.length < rightAbs.length ? -1 : 1);
+  }
+  if (leftAbs === rightAbs) return 0;
+  return sign * (leftAbs < rightAbs ? -1 : 1);
+}
+
+/** 全部还款可用：本人金币 >= 该笔剩余全额；负金币一律不可用。 */
+export function canRepayAll(view: WireSnapshotView, option: DebtOption): boolean {
+  if (!isNonNegativeCents(view.finance.cents) || !isPositiveCents(option.remainingCents)) {
+    return false;
+  }
+  return compareCentsText(view.finance.cents, option.remainingCents) >= 0;
+}
+
+/** 全部催收可用：服务端可收上限 >= 剩余全额；null 表示旧快照无法判断，按服务端为准允许点击。 */
+export function canCollectAll(view: WireSnapshotView, option: DebtOption): boolean | null {
+  const limit = collectLimitOf(view, option.loanId);
+  if (limit === null) return null;
+  if (!isPositiveCents(option.remainingCents)) return false;
+  return compareCentsText(limit, option.remainingCents) >= 0;
+}
+
 export type ActionStage =
   | "askPrivate"
   | "privateLender"
@@ -121,7 +170,7 @@ export function playerName(view: WireSnapshotView, playerId: string): string {
   return found?.nickname ?? playerId;
 }
 
-/** 可操作的负债/债权：只列 ACTIVE；没有可操作项时 Q3 自动跳到 Q4。 */
+/** 可操作的负债/债权：只列 ACTIVE；07C 起没有可操作项时停留 askDebt，可返回 Q2。 */
 export function debtOptions(view: WireSnapshotView): DebtOption[] {
   const me = view.me.playerId;
   const options: DebtOption[] = [];
@@ -242,9 +291,8 @@ export function deriveStep(view: WireSnapshotView, ui: UiState): GuidedStep {
       return { kind: "actionWait", seatId: view.currentSeatId, nickname: currentNickname, acted };
     }
     const options = debtOptions(view);
-    const stage: ActionStage =
-      ui.actionStage === "askDebt" && options.length === 0 ? "endAction" : ui.actionStage;
-    return { kind: "actionOwn", stage, debtOptions: options };
+    // 07C：空 Q3 不再自动跳到 endAction，保留“结束行动/返回 Q2”让玩家可回退一步。
+    return { kind: "actionOwn", stage: ui.actionStage, debtOptions: options };
   }
 
   if (view.phase === "BANK_DUE") {

@@ -99,6 +99,11 @@ export class RoomScheduler {
     }
   }
 
+  /** 07C：房间被销毁时取消残留 timer，避免其再推进已删除的房间。 */
+  cancelRoom(roomCode: string): void {
+    this.cancel(roomCode);
+  }
+
   close(): void {
     this.closed = true;
     for (const roomCode of this.wakeups.keys()) this.cancel(roomCode);

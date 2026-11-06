@@ -498,6 +498,28 @@ p {
   backdrop-filter: blur(6px);
 }
 
+.game-top-side {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.destroy-room-entry {
+  min-height: 44px;
+  padding: 0 8px;
+  color: #ffb0b0;
+}
+
+.destroy-confirm {
+  margin-top: 12px;
+  padding: 12px;
+  background: #2a1515;
+  border: 1px solid #6a2c2c;
+  border-radius: 10px;
+}
+
 .notice-shelf {
   display: flex;
   flex-direction: column;

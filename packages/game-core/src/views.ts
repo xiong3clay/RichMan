@@ -44,6 +44,17 @@ export interface LenderLimitView {
   maxCents: Cents;
 }
 
+/**
+ * 本人作为出借人的一笔 ACTIVE 私人合同最多能收回多少。
+ * 隐私说明：出借人本来就有权知道“这笔最多能收回多少”；maxCents < remainingCents
+ * 等价于暴露借款人余额不足，这是催收必需信息，已由用户确认接受。不新增任何
+ * “对方金币”字段，也不包含第三人合同。
+ */
+export interface CollectLimitView {
+  loanId: string;
+  maxCents: Cents;
+}
+
 export interface PlayerFinanceView {
   cents: Cents;
   /** 本人当前可向银行借到的普通贷款上限；失信、金币<=0、有未结清贷款或余额已近上限时为 0。 */
@@ -59,6 +70,8 @@ export interface PlayerFinanceView {
   bankDefaultedDebtCents: Cents;
   /** 只包含本人作为借款人或出借人的私人合同，第三人不出现。 */
   privateLoans: PrivateLoan[];
+  /** 本人为出借人的 ACTIVE 合同可收上限；只给金额，不含对方任何其他字段。 */
+  collectLimits: CollectLimitView[];
   privateDebtCents: Cents;
   receivableCents: Cents;
   frozenCents: Cents;
@@ -119,6 +132,16 @@ export function getPlayerView(
       maxCents: Math.max(0, Math.min(player.cents, MAX_MONEY_CENTS - me.cents)),
     }));
 
+  const collectLimits: CollectLimitView[] = myPrivateLoans
+    .filter((loan) => loan.lenderId === viewerId && loan.status === "ACTIVE")
+    .map((loan) => {
+      const borrowerCents = state.players.find((player) => player.playerId === loan.borrowerId)?.cents ?? 0;
+      return {
+        loanId: loan.loanId,
+        maxCents: Math.max(0, Math.min(loan.remainingCents, borrowerCents)),
+      };
+    });
+
   const publicPlayers: PublicPlayerView[] = state.players.map((player) => ({
     playerId: player.playerId,
     seatId: player.seatId,
@@ -155,6 +178,7 @@ export function getPlayerView(
         .reduce((total, loan) => total + loan.remainingCents, 0),
       bankDefaultedDebtCents: defaultedBankDebtCents(myBankLoans),
       privateLoans: myPrivateLoans,
+      collectLimits,
       privateDebtCents: privateDebtCents(myPrivateLoans, viewerId),
       receivableCents: receivableCents(myPrivateLoans, viewerId),
       frozenCents: frozenCents(myPrivateLoans),

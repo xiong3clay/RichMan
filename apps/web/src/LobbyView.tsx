@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { JoinedInfo, WireRoom } from "./net/wire";
 
 export interface LobbyViewProps {
@@ -6,6 +7,8 @@ export interface LobbyViewProps {
   error: string | null;
   onReady: (ready: boolean) => void;
   onStart: () => void;
+  /** 07C：仅房主可见；由 App 转发 client.destroyRoom；false 表示本地发送失败。 */
+  onDestroyRoom?: () => boolean;
 }
 
 const ROOM_STATE_LABELS: Record<WireRoom["state"], string> = {
@@ -16,7 +19,9 @@ const ROOM_STATE_LABELS: Record<WireRoom["state"], string> = {
   ENDED: "已结束",
 };
 
-export function LobbyView({ room, joined, error, onReady, onStart }: LobbyViewProps) {
+export function LobbyView({ room, joined, error, onReady, onStart, onDestroyRoom }: LobbyViewProps) {
+  const [confirmDestroy, setConfirmDestroy] = useState(false);
+  const [destroyError, setDestroyError] = useState<string | null>(null);
   const me = joined === null ? undefined : room.players.find((player) => player.playerId === joined.playerId);
   const isHost = joined !== null && room.hostId === joined.playerId;
   const allReady = room.players.length > 0 && room.players.every((player) => player.ready);
@@ -78,6 +83,50 @@ export function LobbyView({ room, joined, error, onReady, onStart }: LobbyViewPr
         </button>
       </div>
       {startReason !== null ? <p className="reason">{startReason}</p> : null}
+      {isHost ? (
+        confirmDestroy ? (
+          <div className="destroy-confirm">
+            <p className="question">销毁房间及数据？</p>
+            <p className="step-hint danger-text">
+              房间内所有玩家会被移出，服务器上的存档将删除，无法恢复。
+            </p>
+            <div className="choice-grid">
+              <button
+                type="button"
+                className="choice danger"
+                onClick={() => {
+                  const sent = onDestroyRoom?.() ?? false;
+                  setDestroyError(sent ? null : "连接未就绪，销毁请求未发送");
+                }}
+              >
+                确认销毁（不可恢复）
+              </button>
+              <button
+                type="button"
+                className="choice ghost"
+                onClick={() => {
+                  setConfirmDestroy(false);
+                  setDestroyError(null);
+                }}
+              >
+                返回
+              </button>
+            </div>
+            {destroyError !== null ? <p className="reason" role="alert">{destroyError}</p> : null}
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="link destroy-room-entry"
+            onClick={() => {
+              setDestroyError(null);
+              setConfirmDestroy(true);
+            }}
+          >
+            销毁房间及数据
+          </button>
+        )
+      ) : null}
       {room.state === "PLAYING" ? <p className="hint">对局已开始，正在等待服务端快照…</p> : null}
       {joined === null ? <p className="hint">正在分配座位…</p> : null}
     </section>

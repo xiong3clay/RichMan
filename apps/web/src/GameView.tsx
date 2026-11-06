@@ -23,6 +23,9 @@ import {
   bankBlockedReason,
   bankBorrowLimitOf,
   bankLimitText,
+  canCollectAll,
+  canRepayAll,
+  collectLimitOf,
   lenderLimitOf,
   privateLimitText,
   uiAfterOutcome,
@@ -37,6 +40,7 @@ import {
 } from "./game/settlement";
 import type { RoundSettlement } from "./game/settlement";
 import { deadlineSeconds, deriveBetRisk, remainingAfterRepay } from "./game/bet-outcome";
+import { pausedSubmitNotice } from "./game/paused-guard";
 import type { BetRisk } from "./game/bet-outcome";
 import { rememberLoanRequests } from "./game/notices";
 import type { KnownLoanRequest } from "./game/notices";
@@ -60,6 +64,8 @@ export interface GameViewProps {
   error: { code: string; message: string } | null;
   /** 服务端过滤后的本人可见事件；只用于本轮结算卡。 */
   events: WireGameEvent[];
+  /** 07C：房主销毁房间入口；非房主不显示。返回 false 表示本地未发送成功。 */
+  onDestroyRoom?: () => boolean;
 }
 
 const CONN_LABELS: Record<ConnectionStatus, string> = {
@@ -143,7 +149,7 @@ export function GameView(props: GameViewProps) {
   return <GameSessionView key={props.view.gameId} {...props} />;
 }
 
-function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, client, status, statusDetail, result, error, events }: GameViewProps) {
+function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, client, status, statusDetail, result, error, events, onDestroyRoom }: GameViewProps) {
   const [ui, setUi] = useState<UiState>(INITIAL_UI_STATE);
   const [amount, setAmount] = useState("");
   const [rateText, setRateText] = useState("1000");
@@ -335,6 +341,12 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
   }, [debtOpen]);
 
   const send = (run: () => string | null, kind: CommandKind = "generic", context: CommandSuccessContext = {}): string | null => {
+    // M2/S-A：暂停时经济命令一律只读；文案由 paused-guard 单一来源提供。
+    const pausedNotice = pausedSubmitNotice(paused);
+    if (pausedNotice !== null) {
+      setNotice(pausedNotice);
+      return null;
+    }
     if (status !== "open" || !client.hasJoined) {
       setNotice("连接未就绪，当前不能提交；恢复连接后请重新确认");
       return null;
@@ -378,6 +390,10 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
   const borrowableLenders = Array.isArray(finance.lenderLimits)
     ? finance.lenderLimits.filter((limit) => limit.maxCents !== "0").length
     : 0;
+  /** 07C 快捷项只填金额不提交：可用性由服务端快照推导，按钮 disabled 时同屏给原因。 */
+  const allRepayAvailable = chosenDebt === null ? false : canRepayAll(view, chosenDebt);
+  const allCollectLimit = chosenDebt === null ? null : collectLimitOf(view, chosenDebt.loanId);
+  const allCollectAvailable = chosenDebt === null ? null : canCollectAll(view, chosenDebt);
   const dangerDeadline = deadlineSeconds(view.deadlineAt, view.serverNow);
   /** 额度为 0 时“是，输入金额”是死路：进去后任何金额都会被禁用，故直接禁用并给出原因。 */
   const bankUnavailable = blockedBank !== null || bankLimit === "0";
@@ -437,6 +453,29 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
 
   /** 高风险动作的第二步：显示关键后果，确认后立即发送；不是层层弹窗。 */
   function renderConfirm(current: ConfirmAction) {
+    if (current.kind === "destroyRoom") {
+      return (
+        <section className="panel wizard">
+          <p className="eyebrow">房主操作 · 危险确认</p>
+          <h2 className="question">销毁房间及数据？</h2>
+          <p className="step-hint danger-text">
+            房间内所有玩家会被移出，服务器上的存档将删除，无法恢复。
+          </p>
+          <div className="choice-grid">
+            <Choice
+              label="确认销毁（不可恢复）"
+              tone="danger"
+              onClick={() => {
+                setConfirmAction(null);
+                const sent = onDestroyRoom !== undefined ? onDestroyRoom() : client.destroyRoom();
+                if (!sent) setNotice("连接未就绪，销毁请求未发送");
+              }}
+            />
+            <Choice label="返回" tone="ghost" onClick={() => setConfirmAction(null)} />
+          </div>
+        </section>
+      );
+    }
     if (current.kind === "abandonBet") {
       return (
         <section className="panel wizard">
@@ -629,6 +668,15 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
             <button type="button" className="link" onClick={() => setDebtOpen(true)}>
               债务中心（只读）
             </button>
+            {hostId === view.me.playerId ? (
+              <button
+                type="button"
+                className="link destroy-room-entry"
+                onClick={() => setConfirmAction({ kind: "destroyRoom" })}
+              >
+                销毁房间及数据
+              </button>
+            ) : null}
           </div>
           {!canSubmit ? <p className="step-hint">连接恢复后才能继续操作；当前不能开始新一局。</p> : null}
           {!rematchPending && error !== null ? <p className="reason" role="alert">{error.code}：{error.message}</p> : null}
@@ -1109,6 +1157,25 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
             value={amount}
             onChange={(event) => setAmount(event.target.value.trim())}
           />
+          {chosenDebt !== null ? (
+            <div className="choice-grid">
+              <Choice
+                label={"全部催收（" + formatCents(chosenDebt.remainingCents) + "）"}
+                hint={
+                  allCollectAvailable === false
+                    ? "对方当前仅有 " + formatCents(allCollectLimit ?? "0") + "，无法一次收清"
+                    : allCollectAvailable === null
+                      ? "旧快照无法判断上限，以服务端为准"
+                      : "只填入金额，仍需确认催收"
+                }
+                disabled={allCollectAvailable === false}
+                onClick={() => {
+                  setAmount(chosenDebt.remainingCents);
+                  setNotice(null);
+                }}
+              />
+            </div>
+          ) : null}
           <div className="choice-grid">
             <Choice
               label="确认催收"
@@ -1262,6 +1329,7 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
                 onClick={() => setActionStage("bankAmount")}
               />
               <Choice label="不需要" hint="进入 Q3" tone="ghost" onClick={() => setActionStage("askDebt")} />
+              <Choice label="返回 Q1" tone="ghost" onClick={() => setActionStage("askPrivate")} />
             </div>
           </section>
         );
@@ -1304,6 +1372,19 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
       }
 
       if (stage === "askDebt") {
+        if (debtList.length === 0) {
+          return (
+            <section className="panel wizard">
+              <p className="eyebrow">行动 · 第 3 问</p>
+              <h2 className="question">是否还款或催收？</h2>
+              <p className="step-hint">当前没有可还款或催收的贷款/合同。</p>
+              <div className="choice-grid">
+                <Choice label="结束行动" hint="进入 Q4" tone="ghost" onClick={() => setActionStage("endAction")} />
+                <Choice label="返回 Q2" tone="ghost" onClick={() => setActionStage("askBank")} />
+              </div>
+            </section>
+          );
+        }
         return (
           <section className="panel wizard">
             <p className="eyebrow">行动 · 第 3 问</p>
@@ -1323,6 +1404,7 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
             </div>
             <div className="choice-grid">
               <Choice label="跳过" hint="进入 Q4" tone="ghost" onClick={() => setActionStage("endAction")} />
+              <Choice label="返回 Q2" tone="ghost" onClick={() => setActionStage("askBank")} />
             </div>
           </section>
         );
@@ -1343,6 +1425,42 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
               value={amount}
               onChange={(event) => setAmount(event.target.value.trim())}
             />
+            {chosenDebt !== null && chosenDebt.kind === "collectPrivate" ? (
+              <div className="choice-grid">
+                <Choice
+                  label={"全部催收（" + formatCents(chosenDebt.remainingCents) + "）"}
+                  hint={
+                    allCollectAvailable === false
+                      ? "对方当前仅有 " + formatCents(allCollectLimit ?? "0") + "，无法一次收清"
+                      : allCollectAvailable === null
+                        ? "旧快照无法判断上限，以服务端为准"
+                        : "只填入金额，仍需确认催收"
+                  }
+                  disabled={allCollectAvailable === false}
+                  onClick={() => {
+                    setAmount(chosenDebt.remainingCents);
+                    setNotice(null);
+                  }}
+                />
+              </div>
+            ) : chosenDebt !== null ? (
+              <div className="choice-grid">
+                <Choice
+                  label={"全部还款（" + formatCents(chosenDebt.remainingCents) + "）"}
+                  hint={
+                    allRepayAvailable
+                      ? "只填入金额，仍需确认还款"
+                      : "金币 " + formatCents(finance.cents) + "不足 " +
+                        formatCents(chosenDebt.remainingCents) + "，不能一次还清"
+                  }
+                  disabled={!allRepayAvailable}
+                  onClick={() => {
+                    setAmount(chosenDebt.remainingCents);
+                    setNotice(null);
+                  }}
+                />
+              </div>
+            ) : null}
             <div className="choice-grid">
               <Choice
                 label={chosenDebt !== null && chosenDebt.kind === "collectPrivate" ? "确认催收" : "确认还款"}
@@ -1365,9 +1483,7 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
               label="确认结束行动"
               onClick={() => send(() => client.endAction(versionOptions))}
             />
-            {debtList.length > 0 ? (
-              <Choice label="返回 Q3" tone="ghost" onClick={() => setActionStage("askDebt")} />
-            ) : null}
+            <Choice label="返回 Q3" tone="ghost" onClick={() => setActionStage("askDebt")} />
           </div>
         </section>
       );
@@ -1389,6 +1505,13 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
       <button type="button" className="primary" onClick={() => { clearSession(); window.location.reload(); }}>返回恢复入口</button>
     </section>;
   }
+
+  /**
+   * M2：只有 destroyRoom 确认在 paused/gameOver/断线时保留优先；
+   * 其他确认卡必须让位给暂停/结束/连接占位，避免暂停时还能发经济命令。
+   */
+  const showConfirmation = currentConfirmation !== null &&
+    (currentConfirmation.kind === "destroyRoom" || (!paused && step.kind !== "gameOver" && canSubmit));
 
   /**
    * 命令结果/服务端 error/本地校验提示放在顶部吸顶区，滚动到操作卡后仍然可见。
@@ -1462,9 +1585,20 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
               剩余 <Countdown deadlineAt={paused ? null : view.deadlineAt} {...countdownProps} />
             </p>
           </div>
-          <div className={"conn " + status} title={statusDetail ?? undefined}>
-            <span className={"dot " + status} />
-            {CONN_LABELS[status]}
+          <div className="game-top-side">
+            <div className={"conn " + status} title={statusDetail ?? undefined}>
+              <span className={"dot " + status} />
+              {CONN_LABELS[status]}
+            </div>
+            {hostId === view.me.playerId ? (
+              <button
+                type="button"
+                className="link destroy-room-entry"
+                onClick={() => setConfirmAction({ kind: "destroyRoom" })}
+              >
+                销毁房间
+              </button>
+            ) : null}
           </div>
         </header>
         {paused ? <div className="banner warn" role="status">
@@ -1559,13 +1693,16 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
       </section>
 
       <section className="stage">
-        {paused ? <section className="panel wizard"><p className="eyebrow">已暂停</p><h2 className="question">等待继续对局</h2>
-          <p className="step-hint">账本与已提交操作已保留，请房主继续。</p></section> : step.kind === "gameOver" ? renderStep(step) : !canSubmit ? <section className="panel wizard">
-          <p className="eyebrow">连接未就绪</p><h2 className="question">连接恢复后才能继续操作</h2>
-          <p className="step-hint">当前仅显示最后一次快照；重连后以服务端最新状态重新确认。</p>
-        </section> : currentConfirmation !== null ? renderConfirm(currentConfirmation) : abandonPending && step.kind === "betting" ?
-          <section className="panel wizard"><p className="eyebrow">下注</p><h2 className="question">正在提交放弃…</h2>
-            <p className="step-hint">等待服务端确认锁定。</p></section> : renderStep(step)}
+        {/* M1/M2：仅销毁确认卡优先于 paused/gameOver/断线占位；其他确认卡暂停时必须让位。 */}
+        {showConfirmation ? renderConfirm(currentConfirmation!) : paused ?
+          <section className="panel wizard"><p className="eyebrow">已暂停</p><h2 className="question">等待继续对局</h2>
+            <p className="step-hint">账本与已提交操作已保留，请房主继续。</p></section> : step.kind === "gameOver" ? renderStep(step) : !canSubmit ?
+            <section className="panel wizard">
+              <p className="eyebrow">连接未就绪</p><h2 className="question">连接恢复后才能继续操作</h2>
+              <p className="step-hint">当前仅显示最后一次快照；重连后以服务端最新状态重新确认。</p>
+            </section> : abandonPending && step.kind === "betting" ?
+              <section className="panel wizard"><p className="eyebrow">下注</p><h2 className="question">正在提交放弃…</h2>
+                <p className="step-hint">等待服务端确认锁定。</p></section> : renderStep(step)}
       </section>
 
       {drawerOpen && step.kind !== "gameOver" ? (

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { GameView } from "./GameView";
 import { LobbyView } from "./LobbyView";
 import { clearSession, loadSession, RichmanClient } from "./net/client";
+import { createRoomDestroyedHandler, requestRoomDestroy } from "./app-handlers";
 import type { ClientHandlers, ConnectionStatus, StoredSession } from "./net/client";
 import type { JoinedInfo, WireCommandResult, WireGameEvent, WireRoom, WireSnapshotView } from "./net/wire";
 import { isSessionError, lobbyErrorText, serverErrorText } from "./net/wire";
@@ -102,6 +103,25 @@ export default function App() {
         if (nextResult.outcome.ok) setServerError(null);
         setResult(nextResult);
       },
+      onRoomDestroyed: createRoomDestroyedHandler({
+        markLeaving: () => { leavingRef.current = true; },
+        clearSession,
+        disposeClient: () => { clientRef.current?.dispose(); clientRef.current = null; },
+        apply: (reset) => {
+          setRoomCode(reset.roomCode);
+          setRoom(reset.room);
+          setJoined(reset.joined);
+          setSnapshot(reset.snapshot);
+          setEvents(reset.events);
+          setResult(reset.result);
+          setServerError(reset.serverError);
+          setLobbyError(reset.lobbyError);
+          setReplaced(reset.replaced);
+          setStatus(reset.status);
+          setStatusDetail(reset.statusDetail);
+          setEntryError(reset.entryError);
+        },
+      }),
       onServerError: (error) => {
         if (leavingRef.current) return;
         setServerError({ code: error.code, message: error.message });
@@ -250,9 +270,11 @@ export default function App() {
           result={result}
           error={serverError}
           events={events}
+          onDestroyRoom={() => requestRoomDestroy(clientRef.current)}
         />
       ) : roomCode !== null && room !== null ? (
-        <LobbyView room={room} joined={joined} error={lobbyError} onReady={handleReady} onStart={handleStart} />
+        <LobbyView room={room} joined={joined} error={lobbyError} onReady={handleReady} onStart={handleStart}
+          onDestroyRoom={() => requestRoomDestroy(clientRef.current)} />
       ) : roomCode !== null ? (
         <section className="panel">
           <h1>正在进入房间 {roomCode}</h1>

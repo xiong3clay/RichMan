@@ -5,10 +5,13 @@ export type ConfirmAction =
   | { kind: "abandonBet"; round: number; phaseInstanceId: string }
   | { kind: "acceptLoan"; request: WireLoanRequest }
   | { kind: "bankRepay"; loanId: string; remaining: string }
-  | { kind: "bankRefuse"; loanId: string; remaining: string };
+  | { kind: "bankRefuse"; loanId: string; remaining: string }
+  | { kind: "destroyRoom" };
 
 /** 仅绑定当前服务端待办；待办消失时立即撤下旧确认，不重做借款/还款规则判定。 */
 export function confirmationIsCurrent(action: ConfirmAction, view: WireSnapshotView): boolean {
+  // 07C：任何房间状态都可销毁；入口只对房主渲染，服务端最终裁决 NOT_HOST。
+  if (action.kind === "destroyRoom") return true;
   if (action.kind === "abandonBet") {
     return view.phase === "BETTING" && view.round === action.round && view.phaseInstanceId === action.phaseInstanceId &&
       view.me.alive && view.finance.myBet === null;

@@ -234,6 +234,19 @@ export class RoomManager {
       throw new LobbyError('ERROR_PAUSED','提交已保存，发布失败，请重新连接');
     }
   }
+/**
+   * 07C：房主销毁当前房间。只删除 rooms/<code>/（由 store.deleteRoom 的原子 tomb 实现），
+   * 不触碰其他房间目录；事务候选为 null 时复用现有 store/session 清理路径。
+   */
+  async destroyRoom(roomCode: string, playerId: string): Promise<void> {
+    this.reconcileDurable(roomCode);
+    if (!this.rooms.get(roomCode)) throw new LobbyError("ROOM_NOT_FOUND", "房间不存在");
+    const { room } = this.resolvePlayer(roomCode, playerId);
+    if (room.hostId !== playerId) throw new LobbyError("NOT_HOST", "只有房主可以销毁房间");
+    await this.transact(roomCode, () => { this.rooms.delete(roomCode); });
+    this.durablePending.delete(roomCode);
+  }
+
   async resumeGame(code: string, id: string, nowMs: number): Promise<GameEvent[]> {
     this.reconcileDurable(code);
     const { room } = this.resolvePlayer(code, id);

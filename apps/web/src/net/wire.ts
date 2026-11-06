@@ -86,6 +86,12 @@ export interface WireLenderLimit {
   maxCents: string;
 }
 
+/** 本人作为出借人的一笔 ACTIVE 合同可收上限；旧快照可能没有该字段。 */
+export interface WireCollectLimit {
+  loanId: string;
+  maxCents: string;
+}
+
 export interface WireFinance {
   cents: string;
   /** 服务端计算的可借银行额度；旧快照可能缺字段，调用方需按通用文案兜底。 */
@@ -96,6 +102,8 @@ export interface WireFinance {
   bankDebtCents: string;
   bankDefaultedDebtCents: string;
   privateLoans: WirePrivateLoan[];
+  /** 07C：本人为出借人的 ACTIVE 合同可收上限；旧快照缺失时回退“以服务端为准”。 */
+  collectLimits?: WireCollectLimit[];
   privateDebtCents: string;
   receivableCents: string;
   frozenCents: string;

@@ -31,6 +31,8 @@ export interface ClientHandlers {
   onEvents?: (events: WireGameEvent[]) => void;
   onCommandResult: (result: WireCommandResult) => void;
   onServerError: (error: { code: string; message: string }) => void;
+  /** 07C：房主销毁房间；收到后本客户端停止重连并回大厅首页。 */
+  onRoomDestroyed?: (info: { roomCode: string; byPlayerId: string }) => void;
 }
 
 export function loadSession(): StoredSession | null {
@@ -169,6 +171,11 @@ export class RichmanClient {
   resumeGame(): boolean {
     if (!this.joined || this.disposed || this.replaced) return false;
     return this.rawSend({ type: 'resume_game' });
+  }
+  /** 07C：只有 joined 后可发；是否房主由服务端裁决（NOT_HOST 走普通 error）。 */
+  destroyRoom(): boolean {
+    if (!this.joined || this.disposed || this.replaced) return false;
+    return this.rawSend({ type: "destroy_room" });
   }
 
   /** 组命令信封；version/roundId/phaseInstanceId 全部来自服务端 snapshot。 */
@@ -370,9 +377,45 @@ export class RichmanClient {
       return;
     }
 
+    if (type === "room_destroyed") {
+      const roomCode = typeof message["roomCode"] === "string" ? message["roomCode"] : this.roomCode;
+      const byPlayerId = typeof message["byPlayerId"] === "string" ? message["byPlayerId"] : "";
+      // 房间已不存在：停止重连、清会话并回首页；不要当作普通 error 或 REPLACED。
+      this.disposed = true;
+      this.joined = false;
+      this.session = null;
+      clearSession();
+      if (this.retryTimer !== null) {
+        window.clearTimeout(this.retryTimer);
+        this.retryTimer = null;
+      }
+      const socket = this.socket;
+      this.socket = null;
+      if (socket !== null && socket.readyState <= WebSocket.OPEN) socket.close();
+      this.handlers.onRoomDestroyed?.({ roomCode, byPlayerId });
+      return;
+    }
+
     if (type === "error") {
       const code = String(message["code"]);
       const text = typeof message["message"] === "string" ? message["message"] : code;
+      if (code === "ROOM_NOT_FOUND" && this.joined) {
+        // S4：已加入后才发现房间不存在（通知丢失/重连兜底）——与 room_destroyed 同路径回首页，
+        // 不再走普通 onServerError，避免重复提示且卡在已消失的房间。
+        this.disposed = true;
+        this.joined = false;
+        this.session = null;
+        clearSession();
+        if (this.retryTimer !== null) {
+          window.clearTimeout(this.retryTimer);
+          this.retryTimer = null;
+        }
+        const socket = this.socket;
+        this.socket = null;
+        if (socket !== null && socket.readyState <= WebSocket.OPEN) socket.close();
+        this.handlers.onRoomDestroyed?.({ roomCode: this.roomCode, byPlayerId: "" });
+        return;
+      }
       if (code === "REPLACED") {
         this.replaced = true;
         if (this.retryTimer !== null) {

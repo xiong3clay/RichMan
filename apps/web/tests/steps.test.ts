@@ -161,13 +161,13 @@ describe("deriveStep：自己的行动回合", () => {
     if (step.kind === "actionOwn") expect(step.stage).toBe("bankAmount");
   });
 
-  it("Q3 没有任何可还款/可催收项时自动跳到 Q4", () => {
+  it("Q3 没有可操作债务时停留在 askDebt（07C 起不再自动跳到 Q4）", () => {
     const step = deriveStep(
       makeView({ phase: "ACTION", currentSeatId: 1 }),
       ui({ actionStage: "askDebt" }),
     );
     expect(step.kind).toBe("actionOwn");
-    if (step.kind === "actionOwn") expect(step.stage).toBe("endAction");
+    if (step.kind === "actionOwn") expect(step.stage).toBe("askDebt");
   });
 
   it("有未结清银行贷款时，Q3 列出“还银行”选项", () => {

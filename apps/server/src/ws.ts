@@ -30,6 +30,55 @@ interface Connection {
   rateCount: number;
   pauseErrors: number;
 }
+export interface DestroyPeer {
+  ws: { readyState: number; close(code?: number, reason?: string): void };
+  identity: { roomCode: string } | null;
+}
+
+/**
+ * S5：按 identity.roomCode + OPEN 收集销毁广播对象，不要求 current。
+ * 这样被替换/旧 epoch 但仍在房间上的连接也会收到 room_destroyed 并被关闭。
+ */
+export function selectDestroyPeers<T extends DestroyPeer>(
+  connections: Iterable<T>,
+  roomCode: string,
+  openState: number,
+): T[] {
+  return [...connections].filter(
+    (peer) => peer.identity !== null && peer.identity.roomCode === roomCode && peer.ws.readyState === openState,
+  );
+}
+
+/** S5：逐 peer try/finally；单个 send 抛错不阻断后续 detach/close。 */
+export function notifyAndCloseDestroyedPeers<T extends DestroyPeer>(
+  peers: readonly T[],
+  message: ServerLobbyMessage,
+  send: (peer: T, message: ServerLobbyMessage) => void,
+  detach: (peer: T) => void,
+): void {
+  for (const peer of peers) {
+    try {
+      send(peer, message);
+    } catch {
+      // 单个连接已断开时.send 可能抛错；忽略并继续清理其余连接。
+    } finally {
+      try { detach(peer); } catch { /* detach 失败也必须尝试关闭 */ }
+      try { peer.ws.close(4002, "ROOM_DESTROYED"); } catch { /* 已关闭则忽略 */ }
+    }
+  }
+}
+
+/**
+ * 07C 第三轮 S-B：resume 在 bind 前失败时，旧 owner 可能仍 OPEN 且 non-current。
+ * 只有“旧 owner 存在且已不再 current”才需要主动释放；供单测锁住四组合。
+ */
+export function shouldReleaseSupersededOwner(
+  previousExists: boolean,
+  previousIsCurrent: boolean,
+): boolean {
+  return previousExists && !previousIsCurrent;
+}
+
 export interface LobbyWsRuntime { connections: () => number; close: () => Promise<void> }
 export interface LobbyWsOptions {
   now?: () => number;
@@ -175,6 +224,13 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
       previous.ws.close(4001, "REPLACED");
     }
   };
+  /** S-B：transact(disconnect) 成功后调用；只释放 superseded 旧连接，绝不关闭新 conn。 */
+  const releaseSupersededOwner = (joined: SessionIdentity): void => {
+    const previous = owners.get(ownerKey(joined));
+    if (!shouldReleaseSupersededOwner(previous !== undefined, previous !== undefined && current(previous))) return;
+    detach(previous!);
+    if (previous!.ws.readyState === WebSocket.OPEN) previous!.ws.close(4001, "REPLACED");
+  };
 
   const handleLobby = async (conn: Connection, json: unknown): Promise<void> => {
     if (conn.closed || conn.replaced) return;
@@ -201,6 +257,10 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
       if (conn.closed || conn.replaced) {
         if (freshJoin) await manager.discardUndelivered(roomCode);
         else {
+          // 06 契约：resume 在 bind 前被中断时只解绑旧 owner，保留其 socket 以便它
+          // 继续收到 NOT_JOINED（M1_M2 disconnect_during_recovery 依赖此行为）。
+          // identity 已清空，不会进入 destroy_room 的 identity+OPEN 选择；因此这里
+          // 不调用 releaseSupersededOwner 的 close 路径。
           const previous = owners.get(ownerKey(joined));
           if (previous && !current(previous)) detach(previous);
           await manager.transact(roomCode, () => sessions.disconnect(joined));
@@ -217,6 +277,7 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
       }
       if (conn.closed || !delivered) {
         await manager.transact(roomCode, () => sessions.disconnect(joined));
+        releaseSupersededOwner(joined);
         return;
       }
       bind(conn, joined, epoch);
@@ -245,6 +306,18 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
           gameVersion: manager.getGame(identity.roomCode)!.version, events });
       }
       scheduler.schedule(identity.roomCode);
+    } else if (message.type === "destroy_room") {
+      const roomCode = identity.roomCode;
+      // 必须先收集 peers：destroyRoom 成功后 sessions 已清空，current() 会全部为 false。
+      const peers = selectDestroyPeers(connections.values(), roomCode, WebSocket.OPEN);
+      await manager.destroyRoom(roomCode, identity.playerId);
+      scheduler.cancelRoom(roomCode);
+      notifyAndCloseDestroyedPeers(
+        peers,
+        { type: "room_destroyed", roomCode, byPlayerId: identity.playerId },
+        (peer, destroyed) => send(peer, destroyed),
+        detach,
+      );
     }
   };
   const handle = async (conn: Connection, raw: string): Promise<void> => {
