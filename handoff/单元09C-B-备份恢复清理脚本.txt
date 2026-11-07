@@ -1,0 +1,246 @@
+单元 09C-B 备份 / 恢复 / 清理脚本（含 09C-A 复核补强）
+================================================================
+日期：2026-11-08
+代码基线：beacf6a（09C-A 实现与交接已提交；工作区应为干净）
+上一单元：09C-A（apps/server/src/storage/backup.ts、backup-cli.ts、tests/backup.test.ts）
+本单元目标：把备份/恢复/清理做成用户能直接运行的一键脚本，并补掉 Qoder 对 09C-A 的
+            S1/S2/S3/S4/S5/S6 可观测性与测试缺口。
+提交状态：不 commit，由 Lead 验收后提交。
+
+================================================================
+零、范围与禁区
+- 允许修改：
+  apps/server/src/storage/backup.ts
+  apps/server/tests/backup.test.ts
+  apps/server/tests/scripts.test.ts（只追加 T16–T22；T1–T15 一个断言都不得放宽）
+  README.md（追加“备份、恢复与清理”一节）
+- 允许新增：
+  scripts/backup.ps1、scripts/restore.ps1、scripts/cleanup.ps1
+  handoff/单元09C-B-成果报告.txt、运行与验收.txt、下一阶段交接.txt、注意事项.txt
+- 禁止修改：apps/server/src/storage/{file-store,atomic}.ts、apps/server/src/**、packages/**、
+  apps/web/**、协议、package.json/pnpm-lock.yaml/tsconfig、scripts/start-lan.ps1、
+  scripts/start-tunnel.ps1、scripts/stop.ps1、scripts/status.ps1、scripts/richman-common.ps1。
+- 不新增任何依赖；不 commit；不得跳过/删除/放宽既有 813 条测试。
+- 必须 PS 5.1 与 pwsh 7 兼容；三个新 .ps1 为 UTF-8 with BOM，首行 [CmdletBinding()]。
+
+================================================================
+一、F0 核心补强（Qoder 复核 handoff/复核-单元09C-A.txt 的 should-fix）
+说明：这些改动是 09C-B 的前置条件，必须在本轮完成，否则脚本层会建立在“失败看不见”的
+      接口上。
+
+F0-1（S1）CleanupResult 可见失败
+- backup.ts 的 CleanupResult 增加：
+    failed: { group: 'tmp' | 'logs' | 'backups' | 'corrupt'; path: string; message: string }[]
+  （现有 tmpFilesRemoved/logsRemoved/backupsRemoved/corruptRemoved 保持不变）
+- 四类删除的 catch（约 backup.ts:641-646、659-665、686-690、713-721）逐项 push 到 failed，
+  不得再静默吞掉；单项失败不影响其余项清理，也不上抛。
+- cleanupData 增加测试钩子（只供测试注入，生产默认走真实文件系统）：
+    export interface CleanupHooks { removePath?: (target: string, options: { recursive: boolean }) => Promise<void>; }
+    cleanupData(options & { hooks?: CleanupHooks })
+  默认实现调用 fs.rm(target, { recursive, force: true })。除删除动作外，判定集合的逻辑不得变。
+- F0-1 测试：T20 cleanup_reports_failed_removals
+  用 hooks.removePath 对其中一个 logs/server-*.log 抛 EACCES，断言：
+  (a) 其余可删项仍被删除；(b) failed 长度 1 且 group='logs'、path 指向该文件、
+  message 含 EACCES；(c) 不抛异常。
+
+F0-2（S2）写入后复校验/回滚的自动化回归
+- restoreRoom 的 options 增加测试钩子：
+    hooks?: { afterWrite?: () => void | Promise<void> }   // 在“复校验之前”调用
+  生产代码不传；不得因钩子存在而跳过任何校验。
+- 回滚失败时 BackupError.details 增加 rollbackError（字符串）与 keptPath（字符串），
+  与 message 内容一致（S6）。
+- T18 restore_post_write_failure_rolls_back_original：
+  目标目录已存在 + force=false 不适用于本测试；做法：先放一个旧房间目录，调用
+  restoreRoom({force:true, hooks:{afterWrite(){ throw new Error('INJECTED_AFTER_WRITE'); }}})
+  断言抛 RESTORE_VERIFY_FAILED、目标目录已恢复为旧档（读旧 snapshot 的关键字段相等）、
+  不残留新的半成品目录、rooms 下无多余的 restore-keep-*（旧档已 rename 回去）。
+- T19 restore_rollback_failure_details：
+  用 hooks 让 afterWrite 抛错，并让回滚（rename 回原位置）失败——可通过把 keptPath
+  的父目录权限/占用制造，或在 restoreRoom 内部再开一个可注入 seam（如 hooks.rollback）。
+  断言错误 details 同时含 rollbackError 与 keptPath，且 message 提示“回滚旧档失败”。
+  若某一平台无法稳定制造回滚失败，允许用 hooks.rollback 注入，但必须在交接里写明
+  “仅为测试 seam，不改变生产路径”。
+
+F0-3（S3）outDir 符号链接策略
+- 结论：拒绝把 --out / createBackup 的 outDir 指向符号链接或 junction。
+- createBackup 在 outDir 已存在时用 lstat 判断；若是 reparse point / symbolic link，
+  抛 BackupError，新增错误码 BACKUP_OUT_INVALID，message 必须说明“outDir 不能是
+  符号链接/junction”。outDir 不存在时先创建再校验（或先 realpath 父目录），不得写穿。
+- backupDir（读取方）允许跟随链接，不额外限制；在 README/交接写明“只读允许跟随，
+  写入口拒绝链接”。
+- F0-3 测试：T21 create_refuses_symlink_out
+  Windows 上用 fs.symlink(target, link, 'junction') 造 junction；断言 BACKUP_OUT_INVALID，
+  且 junction 目标目录里没有任何新文件（没写穿）。清理时注意 rmdir 链接本身。
+
+F0-4（S4）空备份
+- verifyBackup：manifest.rooms 为空（roomCount=0）时返回 ok=false，
+  problems 至少一条“manifest.rooms 为空（空备份不可用于恢复）”。
+- F0-4 测试：T22 verify_rejects_empty_manifest
+  手工造 <backup>/manifest.json（rooms=[]，roomCount=0，其他字段合法），断言 ok=false。
+
+F0-5（S5）dryRun 计数
+- CleanupResult 增加：
+    wouldRemove: { tmp: number; logs: number; backups: number; corrupt: number }
+  仅 dryRun 时填充（非 dryRun 时四项为 0）。removed 数组在 dryRun 下保持为空
+  （保持 T14 现有断言）。
+- 在《注意事项》写明 dryRun 语义。
+
+F0-6 文档与 nit
+- 《注意事项》补：force 目标为普通文件时的语义（先被 rename 成 restore-keep-* 文件，
+  再建目录）、恢复 audit 不复校验、复用已存在空 outDir 中途失败会留部分文件
+  （脚本层一律新建 outDir 规避）。
+- 不得改 createBackup 的“manifest 最后写”“只复制 snapshot 字节”等既有不变量。
+
+================================================================
+二、scripts/backup.ps1
+参数（全部 [CmdletBinding()]）：
+  [string]$DataDir = ''      # 不传则 Resolve-DataDir（与 09B 一致）
+  [string]$Out = ''          # 不传则 <DataDir>\backups\richman-backup-<yyyyMMdd-HHmmss>
+  [int]$Keep = 0             # >0 时传给 CLI create --keep
+  [switch]$WithAudit
+  [switch]$Json
+行为：
+1. . (Join-Path $PSScriptRoot 'richman-common.ps1')；$dataPath = Resolve-DataDir $DataDir。
+2. 数据目录不存在 → 输出 JSON/文本错误 code=DATA_DIR_MISSING，exit 1。
+3. $Out 省略时生成全新时间戳目录；不允许复用已存在的空目录（09C-A nit）。
+   显式 -Out 且已存在 → 交给 CLI，返回 BACKUP_OUT_EXISTS 时 exit 2。
+4. 调 CLI：
+   node --import tsx apps/server/src/storage/backup-cli.ts create --data <dataPath> --out <out> [--with-audit] [--keep n]
+   用 & node ... 2>错误捕获；把 stdout 最后一行 JSON 解析；非 0 退出时按 JSON code 映射退出码
+   （2 = BACKUP_OUT_EXISTS；其余 1），仍然只打印一行 JSON（-Json 时）。
+5. 成功非 -Json 输出人话：备份目录、房间数、跳过数、保留（pruned）；-Json 输出单行
+   {"ok":true,"script":"backup","out":"...","rooms":n,"skipped":n,"pruned":n}。
+6. 失败 -Json 输出 {"ok":false,"script":"backup","code":"...","message":"..."}，退出码按上。
+7. -Keep 传 0 表示不 prune；负数 → BAD_ARGUMENT exit 1。
+
+================================================================
+三、scripts/restore.ps1（本单元的安全重点）
+参数：
+  [string]$DataDir = ''
+  [string]$Backup = ''        # 必填（--backup 目录）
+  [string[]]$Room = @()       # 房间码，可重复传
+  [switch]$All                # 恢复 manifest 里全部房间
+  [switch]$Force
+  [int]$Port = 0              # 0 = 从 run/server.json 的 port 取值，取不到用 8000
+  [switch]$Json
+行为：
+1. 参数校验：Backup 为空或目录不存在 → code=BAD_ARGUMENT exit 1；
+   -All 与 -Room 同时给 → BAD_ARGUMENT；两者都不给 → BAD_ARGUMENT。
+2. 服务运行检查（必须先于任何磁盘写）：
+   - 读 <dataPath>/run/server.json，用 Get-RunStateProcess $state 'server'；
+   - 若 status='running' 或该端口 /health 返回 ok=true 且 service='richman'
+     → 输出 code=SERVICE_RUNNING（message 明确“请先运行 scripts/stop.ps1 并确认
+     服务已退出”），exit 2，一个字节都不写。
+   - status 为 mismatch/unknown/broken 时：若 /health 不通，允许继续但打印 WARN。
+3. 先校验：node --import tsx ...backup-cli.ts verify --backup <Backup>；
+   ok=false → code=VERIFY_FAILED exit 1，并把 problems 前 5 条带进输出。
+4. -All 时从 <Backup>/manifest.json 读 rooms[].code（backupFormatVersion 必须为 1，
+   否则 MANIFEST_INVALID exit 1）；按 code 升序逐个恢复。
+5. 逐个执行：
+   node --import tsx ...backup-cli.ts restore --data <dataPath> --backup <Backup> --room <code> [--force]
+   目标已存在且无 -Force → RESTORE_TARGET_EXISTS exit 2，并提示 -Force 会保留旧档；
+   其余失败 exit 1。逐个失败即停，输出已完成列表。
+6. 成功输出（-Json 单行）：
+   {"ok":true,"script":"restore","restored":[{"code":"0042","keptPath":null}],"pausedHint":true}
+   pausedHint=true 固定表示“恢复后房间会以暂停态载入，需房主在界面点继续”。
+7. 恢复完成打印下一步提示：先 start-lan.ps1，再进房间点“继续游戏”。
+
+================================================================
+四、scripts/cleanup.ps1
+参数：
+  [string]$DataDir = ''
+  [int]$KeepLogs = 20
+  [int]$KeepBackups = 10
+  [int]$KeepCorrupt = 5
+  [int]$TmpHours = 24
+  [switch]$DryRun
+  [switch]$Json
+行为：
+1. 调 CLI cleanup --data ... --keep-logs n --keep-backups n --keep-corrupt n --tmp-hours n [--dry-run]。
+2. JSON 解析后输出：removed 四类路径数量、failed 列表、wouldRemove 计数。
+3. failed 非空 → 非 -Json 打印“警告：N 项删除失败”并列出前 5 条；退出码 1。
+   failed 为空 → exit 0。参数非法（负数/小数）→ BAD_ARGUMENT exit 1。
+4. -Json 单行：{"ok":true|false,"script":"cleanup","dryRun":bool,"removed":{...},
+   "wouldRemove":{...},"failed":[{group,path,message}]}
+5. 绝不允许脚本自己 rm -Recurse rooms/<code>；只经 CLI/核心库。
+
+================================================================
+五、测试（apps/server/tests）
+A. backup.test.ts 追加 T18–T22（见 F0-1..F0-4；T22 为空 manifest；编号可按实际顺序，
+   但每条的断言必须包含“反例会红”的关键点）。
+B. scripts.test.ts 追加 T16–T22，复用现有 makeTempDir/runScript/runScriptToFile/
+   killAndWait/rmDirWithRetry/afterEach；不得修改 T1–T15：
+   T16 backup_script_creates_backup
+       - 用 persistence-harness 或直接构造一个最小合法房间目录（推荐复用
+         apps/server/tests 里已有 diskHarness：开一局→BORROW_BANK→persist→关服务）。
+       - 运行 scripts/backup.ps1 -DataDir <temp> -Out <tempOut> -Json
+       - 断言 exit 0；<tempOut>/manifest.json 存在且 roomCount=1；输出是单行 JSON。
+   T17 restore_script_refuses_while_running
+       - 用 runScriptToFile 起 start-lan.ps1 -Port <随机> -DataDir <temp>（真实服务）；
+       - 运行 restore.ps1 -DataDir <temp> -Backup <上面的备份> -Room <code>
+       - 断言 exit 2、code=SERVICE_RUNNING，且 rooms/<code>/snapshot.json 的 sha256 未变。
+       - finally：stop.ps1 -DataDir <temp>，端口释放。
+   T18 restore_script_restores_after_stop
+       - 服务停止后删掉 rooms/<code>，再 restore.ps1 -Room <code> -Json
+       - 断言 exit 0、restored[0].code 正确、keptPath=null；snapshot.json 字节与备份一致。
+   T19 restore_script_requires_force_for_existing
+       - 目标已存在时 → exit 2、code=RESTORE_TARGET_EXISTS；加 -Force → exit 0 且
+         生成 rooms/restore-keep-*。
+   T20 cleanup_script_dry_run
+       - 布置 logs/server-*.log 3 个、.tmp 1 个旧文件；cleanup.ps1 -DryRun -KeepLogs 1 -Json
+       - 断言 exit 0、removed 全空、wouldRemove.logs=2、文件仍在。
+   T21 cleanup_script_reports_failed
+       - 若无法在真实文件系统稳定制造删除失败，允许用 T20 的钩子路径在核心测试覆盖，
+         脚本测试只断言 failed 字段存在且为数组（不得伪造成功）。
+   T22 scripts_reject_unknown_parameter
+       - backup.ps1 -Nope 1 → exit 1（CmdletBinding 默认行为），不得崩栈。
+C. 测试纪律：每条新测试都必须能在“删掉对应实现”时变红（交接里写明你验证了哪几条）。
+
+================================================================
+六、README.md 追加一节（中文，简洁）
+标题：备份、恢复与清理（Windows）
+内容必须包含：
+- 三条命令：scripts/backup.ps1、restore.ps1、cleanup.ps1 的最简用法与 -Json。
+- 备份目录结构（manifest.json + rooms/<code>/snapshot.json(+events.ndjson)）。
+- 恢复前必须先停止服务（脚本会拒绝，exit 2 SERVICE_RUNNING）；恢复后房间是暂停态，
+  需房主点“继续游戏”。
+- 已有房间时恢复必须 -Force，旧档保留在 rooms/restore-keep-*（需人工清理）。
+- 退出码 0/1/2 语义；清理保留策略默认值（20/10/5/24h）与 -DryRun。
+- 安全：备份含身份摘要，等同私有账务，不得公开、上传或贴聊天；outDir 不能是链接。
+- 空备份不可用于恢复；junction 只读可跟随、写入口拒绝。
+
+================================================================
+七、必做验证（把真实命令与输出写进 handoff/单元09C-B-运行与验收.txt）
+1. node --version、corepack pnpm -s vitest run apps/server/tests/backup.test.ts  （含新测试全绿）
+2. corepack pnpm -s vitest run apps/server/tests/scripts.test.ts  （T1–T22 全绿）
+3. corepack pnpm -s test        （期望 ≥820 条，66 文件；旧 813 一条不少）
+4. corepack pnpm -s typecheck   （0）
+5. corepack pnpm -s build       （0）
+6. 手工端到端（临时 data/端口，不许碰 apps/server/data 与 8000）：
+   起服务→建房→backup.ps1→stop.ps1→删房间目录→restore.ps1 -Json→start-lan.ps1→
+   /health rooms=1 且 /api/rooms paused=true→stop.ps1。
+   把每步 exit code 与关键 JSON 抄进交接；失败就如实记录，不得声称通过。
+
+================================================================
+八、交付物
+1. 改：backup.ts、backup.test.ts、scripts.test.ts、README.md
+2. 新增：scripts/backup.ps1、restore.ps1、cleanup.ps1（UTF-8 BOM）
+3. 四份交接：handoff/单元09C-B-{成果报告,运行与验收,下一阶段交接,注意事项}.txt
+   - 成果报告：改动文件/新增文件、CleanupResult 与 BackupErrorCode 新字段、CLI 与脚本
+     退出码映射表、测试清单 T18–T22 与 T16–T22 各自断言、真实命令输出。
+   - 运行与验收：可复制的命令序列（含临时目录与随机端口）、每步预期与实测。
+   - 下一阶段交接：给 09C-C（BET_SETTLED 按 audience 拆分）与 09C-D（LICENSE/CHANGELOG/
+     版本记录）的输入；列出备份/恢复仍缺的能力（定时备份、加密、云上传、day-2 保留策略）。
+   - 注意事项：dryRun 语义、force 保留目录、空备份、junction 策略、恢复后必须暂停、
+     “删除失败必须可见”的接口约定。
+4. 不 commit，最后输出 git status --porcelain 与 git diff --stat。
+
+================================================================
+九、完成判据（Lead 会逐条复核）
+- [ ] F0-1..F0-5 全部落地，且 S1/S2 有真实测试（不是只改文档）
+- [ ] outDir 链接被拒且不写穿
+- [ ] 三个 ps1 在 PS 5.1 下真实跑通（Lead 会用 powershell.exe 复跑）
+- [ ] restore.ps1 在服务运行时 exit 2 且磁盘零改动
+- [ ] 旧 813 条一条不少；T1–T15 未改动
+- [ ] README 一节完成
+- [ ] 交接四份齐全、数字与实际输出一致
