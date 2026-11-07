@@ -1,0 +1,135 @@
+RichMan 单元 09A 第三轮修复（F13–F15）
+================================================================
+触发：Qoder 复核报告 handoff/复核-单元09A-修复验证.txt 判「可提交」，但它在
+S1/should-fix 里点到“handleUpgrade 抛错前/后的释放没有专门测试”。我按这条去
+探测，发现不是“缺测试”，而是**真实配额泄漏 + 可利用的拒绝服务**。
+
+Lead 实测证据（真实 startServer，临时 data 目录，脚本已删）：
+1) 单次握手失败：
+   GET /ws + Upgrade: websocket 但缺 Sec-WebSocket-Key
+   → 服务返回 400 "Missing or invalid Sec-WebSocket-Key header"
+   → 之后 guard.stats() = {"total":1,"unauthenticated":1,"perIp":{"127.0.0.1":1}}
+   这条连接不在 connections Map 里，authScan 永远扫不到，配额永久不回收。
+2) 连续攻击 61 次后：
+   → guard.stats() = {"total":20,"unauthenticated":20,"perIp":{"127.0.0.1":20}}
+   （撞到 maxConnectionsPerIp=20 才停）
+   → 同一 IP 的正常 WebSocket 连接被 503 拒绝：
+     "Unexpected server response: 503"
+   即 20 次无效握手就能把单个来源 IP 打满；换多个 IP 可把 maxUnauthenticated
+   60 / maxConnectionsTotal 200 打满，让全服新连接 503。这是 must-fix。
+
+根因：apps/server/src/ws.ts:508-520。guard.admit(ip) 在 handleUpgrade 之前，
+但 ws 的 abortHandshake 在握手头非法时**既不抛错也不调用 callback**，而是直接
+写 400 并 destroy socket；现有 catch 分支（:517-520）因此永不执行，
+initialized 永远为 false，配额无人释放。
+
+范围：只改 apps/server/src/ws.ts 的 onUpgrade、apps/server/tests/security-harness.ts
+（Peer.open 增加可选 ws 选项参数，纯增量）与 apps/server/tests/security.test.ts；
+文档四份 09A 交接 + 项目当前状态。不改 security.ts/http.ts/协议/game-core/web；
+不新增依赖；不 commit；旧 779 条不得删除/跳过/放宽。
+
+----------------------------------------------------------------
+F13（must）握手失败也必须释放配额，且只释放一次
+----------------------------------------------------------------
+文件：apps/server/src/ws.ts:508-520。
+
+把 admit 之后到握手完成之间的配额做成“有唯一归属”：
+- 握手未完成时，socket 的 close 负责回收；
+- 握手成功后，归属转交 Connection，由 init catch / disconnected 释放；
+- 任何路径都恰好一次，不允许双重 release。
+
+建议实现（语义照此，写法可微调）：
+
+    const ip = clientIp(req, security.limits);
+    const admission = security.guard.admit(ip);
+    if (!admission.ok) {
+      rejectUpgrade(socket, 503, admission.code ?? "TOO_MANY_CONNECTIONS");
+      return;
+    }
+    // 握手失败时 ws 内部 abortHandshake 直接写 400 并 destroy，不抛错也不回调；
+    // 因此配额必须挂到 socket 的 close 上回收。
+    let released = false;
+    const releaseIfUnclaimed = (): void => {
+      if (released) return;
+      released = true;
+      security.guard.release(ip, false);
+    };
+    socket.once("close", releaseIfUnclaimed);
+    try {
+      wss.handleUpgrade(req, socket, head, ws => {
+        released = true;                                  // 认领：后续由 conn 释放
+        socket.removeListener("close", releaseIfUnclaimed);
+        init(ws, url.searchParams.get("room"), ip);
+      });
+    } catch {
+      releaseIfUnclaimed();
+      socket.destroy();
+    }
+
+要求：
+1) 成功握手路径不得改变现有行为：init 仍负责 markAuthenticated，
+   disconnected 仍按 conn.authenticated 释放一次（F1 语义不变）。
+2) init 抛错路径仍由 init 的 catch 释放（F7，测试 39 必须继续绿）。
+3) 403（Origin 拒绝）与 503（admit 失败）路径本来就没 admit/已提前 return，
+   不得新增释放，避免减到别人的额度。
+4) socket 已是 destroyed 时 removeListener 不抛错。
+
+必测（新增 49）：
+- 真实服务 + 原始 TCP：发缺 Sec-WebSocket-Key 的 upgrade，读回 400；
+  waitFor guard.stats().total === 0 且 unauthenticated === 0；
+- 连续 60 次无效握手后 guard 仍为 0，随后开一条正常 Peer join 成功
+  （证明配额没有泄漏、正常连接不再 503）；
+- 不要用 sleep 猜测，统一 waitFor。
+
+----------------------------------------------------------------
+F14（should）心跳超时关闭路径也要有 release 证据
+----------------------------------------------------------------
+文件：apps/server/tests/security-harness.ts、apps/server/tests/security.test.ts。
+
+Qoder S1 指出 42 只覆盖手动 terminate，没覆盖心跳 missedPongs>=2 的
+disconnected + terminate 路径（ws.ts:466-473）。
+
+做法：
+1) security-harness.ts 的 Peer.open 增加第 4 个可选参数
+   `options: ConstructorParameters<typeof WebSocket>[1] = {}`（或等价的
+   WebSocket.ClientOptions），构造时 `new WebSocket(url, { headers, ...options })`。
+   所有既有调用（只传 headers）行为不变。
+2) 新增测试 50：
+   - startSecurityServer({}, { heartbeatClock: { setInterval(cb){ tick = cb; return 1; }, clearInterval(){} } })
+   - peer = Peer.open(port, room, {}, { autoPong: false })；join 成功；
+   - 按 session.test.ts:258-277 的节奏推进心跳：tick 并等收到 ping，
+     连续两次后再 tick 一次 → 服务端关闭该连接；
+   - waitFor guard.stats().total === 0；
+   - 房间座位仍在（onLine=false），与 session.test 的“保留离线座位”一致。
+   注意：autoPong:false 只用于这条测试，不要改其他测试。
+
+----------------------------------------------------------------
+F15（docs）修正文档 + 记录 M3
+----------------------------------------------------------------
+1) handoff/单元09A-运行与验收.txt:117 附近：把“修复前 /api%2Frooms 解码后曾
+   命中合法 GET 路由并返回 200 {"rooms":[]}”改为真实行为
+   “修复前返回 200 text/html（index.html 回退）”。这是 Qoder 指出的历史描述错误。
+2) handoff/单元09A-成果报告.txt：F10 不再写“release 全路径”，改为
+   “主要路径（替换/terminate/init 抛错/握手失败/心跳超时）+ 对应测试编号”；
+   新增 M3（握手失败配额泄漏）与 F13/F14 的修复说明、测试 49/50。
+3) handoff/单元09A-注意事项.txt：新增不变量——
+   “guard.admit 之后必须有唯一归属：握手失败由 socket close 回收，成功由
+   Connection 释放，禁止双重 release；任何终止路径结束后 guard 必须归零”；
+   把“极端瞬时值 1025 随后回落”标注为推演（测试 38 未直接断言 1025）。
+4) handoff/单元09A-下一阶段交接.txt：09C 待办补“无效握手/半开连接配额回收已修，
+   仍需代理层 429/503 与多段 XFF 验证”。
+5) handoff/项目当前状态.txt：测试数改为实跑（预期 64 文件 / 781 条：
+   779 + 49/50），不可回退点补 M3 与“admit 归属唯一”。
+6) 四份文档都不得再声称“release 全路径已覆盖”。
+
+----------------------------------------------------------------
+验证与交付
+----------------------------------------------------------------
+- corepack pnpm -s test（预期 64 文件 / 781 条）
+- corepack pnpm -s typecheck（0）
+- corepack pnpm -s build（0）
+- 手工探针写进运行与验收：
+  * 缺 Sec-WebSocket-Key 的 upgrade → 400，随后 guard.total=0；
+  * 连续 60 次无效握手后 guard.total=0，正常 WS 仍可 join；
+  * 无效握手不再导致同 IP 正常连接 503。
+- 完成后只回报：改动文件、新增测试编号与名称、三条命令真实结果、F13–F15 落点。
