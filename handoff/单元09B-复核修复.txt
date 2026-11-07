@@ -1,0 +1,193 @@
+单元 09B 复核修复单（一键启动 / 隧道 / 停止 / 状态脚本）
+================================================================
+日期：2026-11-07
+复核来源：handoff/复核-单元09B.txt（Qoder，结论 FAIL，M1/M2 必修，S1-S4 应修）
+当前 HEAD：1ebdbe0（09A 第四轮补强已提交）
+本轮目标：修掉 M1/M2，修 S1/S2/S3，补 N1/N2，并把“会杀进程的脚本”补上回归测试。
+不 commit：改完由 Lead 验收后统一提交。
+
+一、范围与硬约束
+1) 只允许改：
+   - scripts/richman-common.ps1、start-lan.ps1、start-tunnel.ps1、stop.ps1、status.ps1
+   - apps/server/tests/scripts.test.ts
+   - README.md 的「一键启动 / 停止」一节
+   - handoff/单元09B-*.txt 四份、handoff/项目当前状态.txt
+2) 不允许改：apps/server/src/**、packages/**、apps/web/**、协议、依赖、版本号。
+3) 五个 .ps1 必须仍然是 UTF-8 with BOM，必须兼容 Windows PowerShell 5.1
+   （禁 ??、?:、三元运算符、管道并行、PS7 专有语法）。
+4) 旧 786 条测试不得削弱；scripts.test.ts 现有 5 条全部保留，
+   只允许把“首行 param(”的断言改成“允许 [CmdletBinding()] 在 param 前”，
+   以及追加新测试。其它断言一律不许放宽。
+5) 路径与端口：只在临时目录 + 随机空闲端口测试，禁止使用 8000 与 apps/server/data。
+
+二、M1（必须）：停止脚本会杀掉“复用了旧 PID 的陌生进程”
+现状事实（已复核）：
+- scripts/richman-common.ps1:110-131 Get-ProcessInfo 只校验 pid 存活 + 进程名，
+  完全不读 state.startedAtUtc；
+- scripts/start-lan.ps1:156-163 的 startedAtUtc 是在健康检查通过之后才取 [DateTime]::UtcNow，
+  并不是真实进程启动时间；
+- Qoder 实测：写出 startedAtUtc=2020 的状态指向一个无关 node 进程，stop.ps1 仍然把它杀了。
+
+F1.1 状态文件记录“真实进程启动时间”
+- start-lan 与 start-tunnel 都改为：Start-Process 之后立刻读取真实启动时间，
+  health 检查与写状态都使用这一个值：
+    $process = Start-Process ... -PassThru
+    $startedAtUtc = ''
+    try {
+        $procInfo = Get-Process -Id $process.Id -ErrorAction Stop
+        $startedAtUtc = $procInfo.StartTime.ToUniversalTime().ToString('o')
+    } catch {
+        # 读不到说明子进程立刻退出了，走失败清理
+    }
+  写状态时 startedAtUtc = $startedAtUtc（不要再用 [DateTime]::UtcNow）。
+  若 $startedAtUtc 为空：视为启动失败，清理子进程后 exit 1。
+
+F1.2 新增 Get-RunStateProcess，替换 Get-ProcessInfo 的全部 4 处调用
+（start-lan.ps1:57、start-tunnel.ps1:27、stop.ps1:36、status.ps1:42）。
+返回一个有序字典（PS 5.1 支持 [ordered]@{}），字段：
+  status：missing | stale | running | mismatch | unknown
+  reason：给用户看的中文原因
+  process：存活且身份匹配时的 System.Diagnostics.Process，否则 $null
+  pid：状态里的 pid（无效则 0）
+判定顺序：
+  1) State 为 null → missing（没有状态文件或为空）。
+  2) pid 解析失败或 <= 0 → unknown，reason='状态文件中的 pid 无效'。
+  3) Get-Process -Id 为空 → stale，reason='进程已退出'。
+  4) 进程名不是期望值（server=node，tunnel=cloudflared）→ mismatch，
+     reason='pid 现在属于 <名字>，不是 <期望>'。
+  5) State.startedAtUtc 缺失/空白 → unknown，
+     reason='状态文件缺少 startedAtUtc，无法确认进程归属'。
+  6) 解析 startedAtUtc（InvariantCulture + AdjustToUniversal）失败 → unknown，
+     reason='startedAtUtc 无法解析'。
+  7) 与 $process.StartTime.ToUniversalTime() 比较，绝对差 > 2 秒 → mismatch，
+     reason='进程启动时间与状态文件相差 N 秒，pid 可能已被复用'。
+  8) 否则 status='running'，process=$process。
+可以保留 Get-ProcessInfo 作为薄包装（内部调用新函数），也可以直接删掉它，
+但四个脚本里不允许再出现“只看进程名就 Stop-Process”的路径。
+
+F1.3 各脚本的语义
+- stop.ps1：
+  * missing：保持现状（跳过；最终 stopped 为空则打印“未在运行”）。
+  * stale：打印 WARN，清理状态文件，继续（原有行为）。
+  * running：CheckOnly 时进 planned；否则 Stop-Process 后删状态。
+  * mismatch / unknown：绝不 Stop-Process、绝不删状态文件，
+    追加 warning：'状态文件 <path> 与进程不匹配（<reason>），未杀进程，'
+    '请人工确认后删除状态文件或手动停止。'；
+    该轮 ok=false，脚本最终 exit 2（即使其它进程已成功停止，也要 exit 2）。
+  * CheckOnly 的 planned 项要带 port（见 F6）。
+- start-lan.ps1：alreadyRunning 只在 status==='running' 且 Wait-HttpHealth 通过时为 true。
+  mismatch/unknown 时只打印一行提示，不要停进程、不要删状态（后续端口检查会兜底）。
+- start-tunnel.ps1：alreadyRunning 只在 status==='running' 且有 url 时为 true。
+- status.ps1：processRunning 只在 status==='running' 时为 true；
+  状态文件存在但 mismatch/unknown/stale 时，在 server.reason / tunnel.reason 里
+  写清楚（tunnel 增补 reason 字段，保持向后兼容的字段名）。
+
+F1.4 回归测试（scripts.test.ts 新增，Windows 专属）
+T6「无关 node + 旧启动时间 → stop 不杀」：
+  - spawn 一个无关 node：node -e "setTimeout(()=>{},120000)"；
+  - 取它的真实 StartTime（powershell -Command "(Get-Process -Id <pid>).StartTime.ToUniversalTime().ToString('o')"）；
+  - 在临时 dataDir/run/server.json 写 { pid, startedAtUtc:'2020-01-01T00:00:00.0000000Z', port:19999 }；
+  - 跑 stop.ps1 -DataDir 临时目录，断言：退出码 === 2；dummy 仍存活；server.json 仍存在；
+    输出包含“不匹配”或“复用”；
+  - 测试结束 kill dummy、清理目录。
+
+三、M2（必须）：start-tunnel 没有 -DataDir，被静默忽略，stop 会漏停隧道
+F2.1 start-tunnel.ps1 的 param 增加 [string]$DataDir = ''，并把第 14 行
+Resolve-DataDir '' 改成 Resolve-DataDir $DataDir。
+F2.2 五个入口脚本全部改成：
+    [CmdletBinding()]
+    param( ... )
+  目的：未知命名参数直接报错，不再被 PowerShell 5.1 静默吞进 $args。
+  对应把 scripts.test.ts 里“首行 param(”的断言改成允许可选 [CmdletBinding()] 行，
+  例如匹配 /^\s*(\[CmdletBinding\(\)\]\s*)?param\(/（多行模式，注意 BOM）。
+F2.3 文档承诺与实现统一：README、09B 运行与验收、注意事项统一写
+  “start-lan / start-tunnel / stop / status 都支持 -DataDir；
+  未显式传时依次读 RICHMAN_DATA_DIR、再回退 apps/server/data”。
+F2.4 回归测试
+T7「start-tunnel 认 -DataDir，stop 能停同一个目录里的隧道」：
+  - 复制 process.execPath 到临时目录，命名 cloudflared.exe（进程名就是 cloudflared）；
+  - spawn 它并传 -e "setTimeout(()=>{},120000)" 作为假隧道进程；
+  - 取真实 StartTime，在 dirA/run/tunnel.json 写 { pid, startedAtUtc, url:'https://probe.trycloudflare.com', port }；
+  - 跑 start-tunnel.ps1 -CheckOnly -Port <另一个空闲端口> -DataDir dirA：
+    断言 alreadyRunning.running === true、reason === 'ALREADY_RUNNING'；
+  - 再跑 -DataDir dirB（空目录）：断言 alreadyRunning.running === false；
+  - 跑 stop.ps1 -DataDir dirA：断言假 cloudflared 已退出、exit 0；
+  - 清理。
+
+四、S1（应修）：健康检查只认 HTTP 2xx，不认 RichMan 身份
+F3.1 Wait-HttpHealth：2xx/3xx 之后解析 JSON，必须 ok === true 且 service === 'richman'
+才返回 $true；解析失败或字段不符继续轮询到超时。
+F3.2 status.ps1：serverOk 也只在这个条件下为 true，否则 reason 写
+'健康检查返回的不是 RichMan 服务'。
+F3.3 回归测试
+T8「普通 HTTP 200 JSON 不被当成 RichMan」：
+  - spawn 一个普通 node HTTP 服务，/health 返回 200 {"hello":"world"}；
+  - 在临时 dataDir 写 server.json（pid 与真实 StartTime 正确，port 为该端口）；
+  - start-lan.ps1 -CheckOnly -Port <另一空闲端口> -DataDir：alreadyRunning.running === false；
+  - status.ps1 -Json -DataDir -Port <该端口>：server.ok === false、退出码 1。
+
+五、S2（应修）：健康通过后写状态失败 → 留下无状态文件的孤儿进程
+F4.1 start-lan：把 Start-Process 之后的“读启动时间 → 健康检查 → 写状态”整段放进 try/catch。
+  任何异常（含 Write-RunState 失败）都要：
+  - 只停止“本次刚启动”的子进程：新增 Stop-LaunchedProcess -ProcessId -StartedAtUtc，
+    内部 Get-Process 后比对 StartTime（±2 秒）再 Stop-Process，不匹配则只告警不杀；
+  - 删除半写的 <state>.tmp；
+  - 打印失败原因 + 日志尾部 + 退出 1。
+  健康检查超时路径也改用同一个 Stop-LaunchedProcess（替代 start-lan.ps1:147-149）。
+F4.2 start-tunnel：同样结构；URL 捕获超时或 Write-RunState 失败时停止 cloudflared、删 .tmp、exit 1。
+F4.3 Write-RunState：Move-Item 失败时先删除 $tmp 再抛出，避免遗留 .tmp。
+F4.4 回归测试
+T9「状态目录写入失败要清理孤儿进程」：
+  - 临时 dataDir 下把 run 建成普通文件（不是目录）；
+  - start-lan.ps1 -Port <空闲端口> -DataDir 临时目录 -TimeoutSec 40；
+  - 断言：退出码 1；输出提到失败；该端口无监听（Node net.connect 拒绝）；
+    没有遗留带 apps/server/src/http.ts 命令行、且属于本次启动的 node 进程。
+
+六、S3（应修）：状态文件坏 JSON 被当成“未在运行”
+F5.1 stop.ps1：先 Test-Path；文件存在但 Read-RunState 返回 null →
+  追加 warning '状态文件存在但无法解析（可能损坏）：<path>，未按端口杀进程，请人工检查。'，
+  不删文件、不杀进程；该轮 ok=false，最终 exit 2。
+F5.2 status.ps1：状态文件存在但无法解析时，server/tunnel 的 reason 写
+  '状态文件损坏，无法确认进程归属'，不要当成“没有服务”。
+F5.3 回归测试
+T10「坏 JSON 不被静默忽略」：
+  - spawn 无关 node；写 server.json 内容 '{not valid json'；跑 stop.ps1 -DataDir；
+  - 断言退出码 2、dummy 存活、坏文件仍在、输出含“无法解析”或“损坏”。
+
+七、F6（应修，原 N1/N2）
+F6.1 stop -CheckOnly 的 planned 每项增加 port（来自 state.port，取不到写 0）。
+F6.2 status.ps1：未显式传 -Port 时，从 server.json 的 port 取（$PSBoundParameters.ContainsKey('Port')），
+  取不到再回退 8000；输出里的 port 用生效值。
+F6.3 回归测试
+T11「未知参数必须报错」：start-lan.ps1 -CheckOnly -Nope 1 →
+  退出码非 0，输出含 'Nope' 或 'parameter'。
+T12「status 不带 -Port 时读状态文件的端口」：
+  - 用随机端口 + 临时 dataDir 起真实服务；status.ps1 -DataDir（不带 -Port）→ ok true、port 等于实际端口；
+  - stop -CheckOnly -DataDir → planned[0].port === 实际端口；再 stop → 端口释放。
+  这条同时覆盖“start → health → status → stop → 端口释放”的完整生命周期。
+
+八、F7 文档与交接（必须与实跑一致）
+- handoff/单元09B-成果报告.txt：基线改成 1ebdbe0；新增“复核修复（第五轮）”一节，
+  逐条列 M1/M2/S1/S2/S3/F6 的修法与对应测试编号；测试条数写实跑值；
+  删掉“本轮实现未提交 / 无新提交”之类陈旧表述。
+- handoff/单元09B-运行与验收.txt：补四脚本统一 -DataDir、新退出码 2 的含义、
+  M1/M2 的手工复现命令与预期、T6-T12 的覆盖、Windows 专属说明。
+- handoff/单元09B-注意事项.txt：写三条不变量
+  （a) 状态文件必须含真实 startedAtUtc，缺失/不符一律不杀进程；
+   b) 任何“启动后失败”的路径必须回收本次子进程，且不留 .tmp/半写状态；
+   c) 坏状态文件必须显式告警并以非 0 退出，不得静默当未运行）；
+  另加 [CmdletBinding()] 与 BOM 的维护要求。
+- handoff/单元09B-下一阶段交接.txt：基线 1ebdbe0；下一单元 09C（备份恢复、
+  BET_SETTLED 按 audience 拆分、文档/许可证/版本记录）。
+- handoff/项目当前状态.txt：09A 第四轮已提交；09B Qoder 复核结论 FAIL(M1/M2)+修复进度。
+- README「一键启动 / 停止」：参数表补 start-tunnel -DataDir；补 exit 2。
+
+九、完成前必须实跑并粘贴输出
+1) corepack pnpm -s test          → 期望 65 文件 / 794 条左右（786 + 8 条上下，写实数）
+2) corepack pnpm -s typecheck     → 0
+3) corepack pnpm -s build         → 0
+4) 手工复现 M1：无关 node + 旧 startedAtUtc 状态 → stop 输出“未杀进程”、dummy 仍活、exit 2
+5) 手工复现 M2：start-tunnel -CheckOnly -DataDir dirA 看到 dirA 的隧道状态；
+   stop -DataDir dirA 停掉假 cloudflared
+6) 不要把测试脚本输出直接接管道（node 子进程继承句柄会挂起），一律重定向到文件。
+7) 不 commit，把改动留在工作区，等 Lead 验收。
