@@ -1,0 +1,113 @@
+单元 09A 复核修复（服务端加固与限流）
+================================================================
+日期：2026-11-07
+基线：HEAD aabf407（09A 规格）+ 工作区未提交的 09A 初版实现。
+本轮只修 F1–F5；不改 packages/game-core、apps/web、协议消息形状、PROTOCOL_VERSION、
+默认阈值（DEFAULT_SECURITY_LIMITS 数值）。不新增依赖，不 commit。
+
+F1（must）ConnectionGuard 认证归属错误 —— 配额会永久泄漏
+文件：apps/server/src/security.ts:204-222（release）、:195-202（markAuthenticated）
+现象：release(ip) 只按 IP 猜“这条连接是否已认证”。同一 IP 下已认证连接 A 与未认证
+连接 B 并存时，B 关闭会看到 authenticatedPerIp>0，先减掉 A 的认证数；unauthenticated
+与 unauthPerIp 永远不降。每发生一次这种关闭泄漏 1 个未认证名额，累计到 60 后整台
+NAT/隧道出口 IP 的新连接全部 503 TOO_MANY_UNAUTHENTICATED；只有该 IP 所有连接
+都断开才会自愈。
+复现探针（我已在仓库内实跑，tsx 直接 import security.ts）：
+  limits=maxUnauthenticated 2；admit(a) admit(a) markAuthenticated(a) release(a)
+  → stats()={"total":1,"unauthenticated":1}，此时该 IP 只剩 1 条已认证连接。
+修法（最小改动，保持类形状）：
+1) 签名改为 release(ip: string, authenticated: boolean): void。
+2) 计数规则：
+   - total、perIp 恒减（沿用现有边界判断，不为负）；
+   - authenticated===true 时只减 authenticatedPerIp(>0 才减)；
+   - authenticated===false 时只减 unauthenticated(>0) 与 unauthPerIp(>0)；
+   - 严禁跨维度回退（auth 维度为 0 不得去减 unauth），不匹配时宁可不动，
+     让错误暴露而不是污染其它连接的额度。
+3) markAuthenticated(ip) 语义不变（聚合减未认证、加已认证）；调用点仍要求
+   “每个 Connection 只调用一次”。
+4) ws.ts 三处调用点同步：
+   - 连接 close：security.guard.release(conn.ip, conn.authenticated)（ws.ts:405-415 附近）；
+   - onUpgrade 捕获 handleUpgrade 抛错：release(ip, false)；
+   - 不要在任何地方再用无第二参数的 release。
+5) onUpgrade 的同一次 admit 只允许 release 一次：用 initialized 标志，回调里进入
+   init 前置 true；catch 里仅当 !initialized 才 release(ip,false)，避免“回调已执行
+   后抛错”导致双重扣减。init 自身若在注册 close 监听前抛错，捕获后 release 一次并
+   destroy（可在 init 内 try/catch）。
+测试：
+- 更新既有 15：release("a") → release("a", false)，断言不变。
+- 新增 33（单元）：limits maxUnauthenticated 10；admit("a") 两次；markAuthenticated("a")；
+  release("a", false)；期望 stats() {total:1, unauthenticated:0, perIp:{a:1}}；
+  再 release("a", true)；期望 {total:0, unauthenticated:0, perIp:{}}。
+- 新增 34（集成）：server({maxConnectionsTotal:10, maxConnectionsPerIp:10, maxUnauthenticated:1})；
+  A join 成功（已认证）；B 打开但不发 join 后 close；轮询
+  s.security.guard.stats().unauthenticated 直到 0（上限 500ms，每 10ms 一次）；
+  C 再打开必须成功升级（若仍有泄漏会 503）；结束后 A/C 都 close，stats.total 回 0。
+
+F2（must）命令限流桶 key 缺房间码 —— 跨房间互相限流
+文件：apps/server/src/ws.ts:372-383（commandBucket / economicBucket）
+现象：key 只有 playerId（"p1"）或 playerId|type。每个房间都有 p1…p10，于是不同房间
+的同座位玩家共用同一桶：A 房 p1 连续操作可让 B 房 p1 收到 RATE_LIMITED（跨房 DoS），
+经济命令桶同样。
+修法：key 改为 identity.roomCode + "|" + identity.playerId（经济桶再加 "|" + type），
+即 "房间码|玩家ID"；同一房间同一玩家的多连接仍共享额度（resume 语义不变）。
+测试：新增 35（集成）：两端各自建房（房间码不同），各自由同一座位 p1 加入（不开始游戏）；
+  参数 commandBurst=2、commandPerSecond=0、economicBurst=99、economicPerSecond=0；
+  A 房 p1 连发 3 条命令信封（gameId 可任意字符串、commandId 唯一）→ 必收到
+  RATE_LIMITED；随后 B 房 p1 发 1 条 → 不得是 RATE_LIMITED（允许 NOT_STARTED /
+  UNAUTHORIZED 等其它错误，说明桶没被占）。断言后关闭全部连接。
+  命令只需满足 ClientGameCommandSchema（含 gameId/commandId/type/payload 字段）；
+  若处理器在未开局时直接抛错，也以“错误码不是 RATE_LIMITED”判定通过。
+
+F3（must）删除 Content-Type "{}" 兼容旁路
+文件：apps/server/src/http.ts:104-121（legacyEmptyObject 与其注释）
+现象：body trim 恰为 "{}" 时允许 text/plain，与规格“非空非 JSON body 必须 415”冲突，
+且没有任何测试覆盖这个例外（测试 17 只测 {"nickname":"x"}）。
+修法：
+1) 删除 legacyEmptyObject 分支与注释；判定恢复为：
+   trimmed !== "" 时必须 content-type 以 application/json 开头，否则 415；
+   空 body 仍按 {} 处理（保持旧行为）。
+2) 旧调用点只补请求头，不改任何断言：
+   apps/server/tests/crash-recovery.test.ts:31
+   apps/server/tests/persistence.test.ts:135、:222
+   apps/server/tests/review06-crash.test.ts:14、:29、:52
+   apps/server/tests/review06.test.ts:61、:71、:79
+   统一加 headers: { "content-type": "application/json" }（已有则不动）。
+   rematch-smoke.ts:148、rooms.test.ts:510 已有该头，不动。
+3) 新增 36：text/plain + body "{}" → 415 UNSUPPORTED_MEDIA_TYPE（补上原例外缺口）。
+
+F4（must）删除 NODE_ENV=test 的 Origin 白名单 shim
+文件：apps/server/src/security.ts:62-66
+现象：生产模块读取 NODE_ENV 并自动把 https://different.example 加入白名单，属于
+测试专用旁路进入运行时代码；生产若误设 NODE_ENV=test 会额外放行该 origin。
+修法：
+1) loadSecurityLimits 完全不读 NODE_ENV，allowedOrigins 只来自 RICHMAN_ALLOWED_ORIGINS。
+2) apps/server/tests/session.test.ts：server() 增加可选参数
+   limits?: Partial<SecurityLimits>（import type 与 DEFAULT_SECURITY_LIMITS），
+   传给 startServer({security:{limits:{...DEFAULT_SECURITY_LIMITS, ...limits}}})；
+   recover_different_origin（:139-153）改为
+   const s = await server({ allowedOrigins: ["https://different.example"] })，
+   其余断言与行为一律不变（仍验证跨 origin 用恢复码回座、旧 token 立即失效）。
+3) security.test.ts 32 追加：loadSecurityLimits({NODE_ENV:"test"}).allowedOrigins === []。
+4) 新增 37：allowedOrigins:["https://different.example"] 的 server 上
+   Peer.open(..., {origin:"https://different.example"}) 能 open 且 close 正常；
+   同时 evil.example 仍 403（已有 22，不必重复，可只测白名单放行）。
+
+F5（docs）同步交接文档，删除已不存在的兼容说法
+- handoff/单元09A-成果报告.txt：六、兼容取舍删除 1) Content-Type 与 2) NODE_ENV
+  两段，只保留「满房 join 跳过 join 桶」；七/八按修复后事实改写；测试总数以实跑为准
+  （预计 32+5=37，验收命令重新执行并填真实数字/日志名）。
+- handoff/单元09A-运行与验收.txt：手工验收补一条 text/plain + "{}" → 415 的真实命令
+  与输出；自动化数字同步。
+- handoff/单元09A-下一阶段交接.txt：删除 “{}” 兼容与 NODE_ENV shim 的 09C 待办；
+  新增不变量“命令/经济桶 key 必须含房间码”。
+- handoff/单元09A-注意事项.txt：第 5 节两条 shim 改为“已移除”，写明旧测试只补了
+  content-type 请求头、session.test 改为显式注入白名单，断言未改。
+- handoff/项目当前状态.txt：09A 行补“复核修复：F1–F5 已处理，测试 N 条”。
+
+不可破坏：
+- 旧 731 条测试不得删除/跳过/放宽；本单只允许 F3 的补请求头、F4 的 session.test 注入
+  白名单、F1 的 test 15 传参，断言正文不得改。
+- DEFAULT_SECURITY_LIMITS 数值、HTTP 判定顺序、WS 升级先 Origin 后配额、
+  close 4003 AUTH_TIMEOUT、安全头覆盖、未知 /api/* JSON 404 均保持。
+- 完成后必须真实执行并记录：pnpm -s test、pnpm -s typecheck、pnpm -s build；
+  把真实输出（文件数/条数、退出码、JS/CSS 体积）写进成果报告。
