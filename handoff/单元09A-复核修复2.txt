@@ -1,0 +1,164 @@
+RichMan 单元 09A 第二轮复核修复（F6–F12）
+================================================================
+背景：Qoder 独立复核报告 handoff/复核-单元09A.txt 结论“需修复”（M1/M2 + S1–S4）。
+Lead 已用真实服务/仓库外探针逐条复现，处置如下：
+
+- M1 编码 /api 路径回退 index.html：成立（/api%2Funknown 实测 200 text/html）。必修。
+- M2 init 创建阶段抛错泄漏 guard 配额：成立（now() 抛错后 stats total=1）。必修。
+- S1 TokenBucket 只增不减：成立，prune/size 无运行时调用点。修。
+- S2 满房 join 跳过 joinBucket：成立。修（保留 ROOM_FULL 旧契约）。
+- S3 F1 release 全路径测试不足：成立。补测试。
+- S4 规格 28 条若干端到端缺口：成立。补测试。
+- N1 GET /api 落 SPA：并入 F6 一并 404。
+- N2 markAuthenticated 只一次：并入 F10 的替换路径断言。
+- N3/N5/N6/N7：记录为已知边界，不阻塞（N3 trustProxy 多段 XFF、N5 代理层未验、
+  N6 异常顺序穷举、N7 runtime 对象包裹）。
+
+范围：只改 apps/server/**（含 security.ts、tests 与 security-harness.ts）与 handoff 文档。
+不改 packages/game-core、apps/web、协议消息形状、PROTOCOL_VERSION、默认阈值数值；
+不新增依赖；不 commit；旧 731 条测试不得删除/跳过/放宽（仍只允许 09A 第一轮
+已授权的五处旧测试改动）；security.test.ts 在 37 条后追加 38–47。
+
+----------------------------------------------------------------
+F6（must，M1）路由统一使用 decodedPath
+----------------------------------------------------------------
+文件：apps/server/src/http.ts:193-240。
+
+现状：路由用未解码的 url.pathname（:207 /health、:221 POST /api/rooms、
+:225 GET /api/rooms、:231 /api/ 前缀），而 serveStatic 用 decodedPath(:239)，
+导致 /api%2Funknown、/api%2Frooms、/api%2funknown 落到 SPA 回退 200 index.html。
+
+修法：
+1) /health、/api/rooms、/api/ 前缀三处判断全部改用 decodedPath。
+2) 增加 decodedPath === "/api" → JSON 404（与 N1 一并处理）。
+3) 保持 POST/GET 方法与判定顺序不变；serveStatic 继续用 decodedPath。
+4) 编码路径不得再触发 index.html 回退。
+
+必测（38 起编号从 38 顺延，见 F11 汇总）：GET /api%2Funknown、/api%2Frooms、
+/api%2funknown 均 404 且 content-type application/json；GET /api 也 404 JSON。
+
+----------------------------------------------------------------
+F7（must，M2）init 创建 Connection 阶段也必须恰好释放一次
+----------------------------------------------------------------
+文件：apps/server/src/ws.ts:419-453（init）、:491-513（onUpgrade）。
+
+现状：`const conn = { ... createdAt: now(), rateStart: now() ... }` 在 try 之外，
+try 从 ws.on("message") 才开始；onUpgrade 在调用 init 前已置 initialized=true，
+因此 conn 创建阶段抛错时外层 catch 不再 release，guard.total 泄漏。
+
+修法（推荐，禁止双重释放）：
+- init 内先声明 `let conn: Connection | null = null;`，把 Connection 对象创建、
+  connections.set、四个 ws.on 全部放进 try。
+- catch 中：
+  * conn !== null：若 !conn.released 则置 released=true 并
+    `security.guard.release(conn.ip, conn.authenticated)`，connections.delete(ws)；
+  * conn === null：`security.guard.release(ip, false)`；
+  * 再 try { ws.terminate(); } catch {}，最后 throw error。
+- onUpgrade 的 initialized 语义保持不变：handleUpgrade 同步失败且 callback 未执行时
+  外层 catch release；callback 已执行时由 init 自己负责且只释放一次。
+- 不得改动 markAuthenticated 的时机（bind 时仍只一次）。
+
+必测（39）：注入 now 第一次调用抛错（之后返回 Date.now），打开 /ws → 连接失败后
+`s.security.guard.stats().total` 必须为 0；再开一条正常连接仍能加入。
+测试要等待 stats 归零（waitFor），并避免定时器未处理异常。
+
+----------------------------------------------------------------
+F8（should，S1）TokenBucket 惰性 prune，禁止无限增长
+----------------------------------------------------------------
+文件：apps/server/src/security.ts:78-113。
+
+修法：
+- 增加常量（模块内）：PRUNE_AT_SIZE = 1024、PRUNE_IDLE_MS = 10 * 60_000。
+- TokenBucket.tryTake 开头：`if (this.buckets.size >= PRUNE_AT_SIZE) this.prune(PRUNE_IDLE_MS);`
+  （在创建/取用当前 key 之前执行）。
+- 保留公开的 prune(idleMs) 与 size()，供测试与后续维护使用。
+
+必测（38 之外的编号由 Trae 顺延，最终编号在 F11 表内统一）：
+- 构造 1024 个 key（now=t0），now 前进 11 分钟后 tryTake 一个新 key →
+  size() 必须为 1（旧的都被清掉）；
+- 同一 now 下先建 1023 个旧 key，再建活跃 key "hot"，然后 tryTake("new") →
+  size() 为 2，"hot" 仍在（活跃 key 不被清）。
+
+----------------------------------------------------------------
+F9（should，S2）满房 join 也必须限流，同时保留 ROOM_FULL 旧契约
+----------------------------------------------------------------
+文件：apps/server/src/security.ts（SecurityRuntime/SecurityOverrides）、
+apps/server/src/ws.ts:264-280。
+
+修法：
+1) SecurityRuntime 与 SecurityOverrides 增加 fullJoinBucket；
+   createSecurityRuntime 缺省创建 `new TokenBucket(limits.joinBurst, limits.joinPerMinute / 60_000, now)`。
+2) ws.ts join 分支改为：
+   - 计算 roomFull（现有逻辑）；
+   - `const joinBucket = roomFull ? security.fullJoinBucket : security.joinBucket;`
+   - `if (!joinBucket.tryTake(conn.ip)) { sendError(RATE_LIMITED); return; }`
+   - 删除当前“满房跳过桶”的分支。
+3) 语义：前 joinBurst 次满房请求仍走 sessions.join 返回 ROOM_FULL；之后返回 RATE_LIMITED。
+   rooms.test.ts:554-561 的“第十一人 ROOM_FULL”必须继续通过（它只发 1 次）。
+
+必测：服务 joinBurst=10、joinPerMinute=0；先用 10 个连接正常 join 填满房间，
+第 11 个连接连续发 11 次 join → 前 10 次 ROOM_FULL，第 11 次 RATE_LIMITED。
+
+----------------------------------------------------------------
+F10（tests，S3/N2）F1 release 全路径断言
+----------------------------------------------------------------
+现有 33/34 只覆盖 guard 单元与 close。补：
+- 41 替换路径：A join 后，B 用 A 的 sessionToken resume → A 收 REPLACED 并关闭；
+  waitFor guard.total === 1 且 unauthenticated === 0；关闭 B 后 total === 0
+  （同时证明 markAuthenticated 只减一次）。
+- 42 异常断开：正常加入后用 `peer.ws.terminate()` 粗暴断开；
+  waitFor guard.total === 0。
+- 39 已在 F7 覆盖 init 抛错；升级前 403（22）不消耗配额，测试 22 追加
+  `expect(s.security.guard.stats().total).toBe(0)`。
+禁止用 sleep 猜测，统一 waitFor。
+
+----------------------------------------------------------------
+F11（tests，S4）端到端缺口 + 编号汇总
+----------------------------------------------------------------
+新增（security.test.ts 追加，全部在 describe 内）：
+38 lazy prune 清旧 key、保活跃 key（F8 两条断言可合为一条用例或拆两条，
+   总数以最终 47 为准：37 + 10 = 47）。
+39 init 抛错后 guard 归零（F7）。
+40 满房 join 走 fullJoinBucket（F9）。
+41 被替换连接释放且只减一次（F10）。
+42 terminate 断开释放（F10）。
+43 昵称控制字符走 WS join：nickname "a\u0000b" → error INVALID_MESSAGE（按现有契约）。
+44 昵称控制字符走 HTTP：POST /api/rooms {"nickname":"a\u0000b"} → 400 INVALID_NICKNAME。
+45 空 body：POST /api/rooms 无 content-type、无 body → 201 JSON，且带三个安全头。
+46 安全头覆盖：evil Origin 403、text/plain 415、/api/unknown 404、GET / 200
+   四条响应都必须含 x-content-type-options nosniff / referrer-policy no-referrer /
+   x-frame-options DENY。
+47 共用 runtime：WS 连接加入后 `s.security.guard.stats().total >= 1`
+   （证明 WS 用的就是 startServer 暴露的同一个 guard），关闭后归零。
+
+若某条必须拆成两条，允许总数 48，但不得少；编号连续、名称可读。
+
+----------------------------------------------------------------
+F12（docs）文档同步
+----------------------------------------------------------------
+更新：
+- handoff/单元09A-成果报告.txt：M1/M2 修复、S1/S2 处理、测试总数与命令真实输出、
+  变异/探针结果引用 Qoder 报告与 Lead 复现。
+- handoff/单元09A-运行与验收.txt：全部命令真实输出；手工探针补
+  /api%2Funknown 404、GET /api 404、init now 抛错后 total=0、满房第 11 次 RATE_LIMITED。
+- handoff/单元09A-注意事项.txt：删除“prune 暂不构成泄漏”的无依据结论，改为
+  “惰性 prune，阈值 1024/10 分钟”；写明满房 fullJoinBucket 取舍与剩余未验证项。
+- handoff/单元09A-下一阶段交接.txt：09C 待办去掉“{} 旁路/NODE_ENV shim”，
+  增加“代理层 429/503 未验证、trustProxy 多段 XFF 未验证”。
+- handoff/项目当前状态.txt：09A 测试数按实跑、不得回退点补 M1/M2/S1/S2；
+  注明 Qoder 复核报告与第二轮修复单。
+- 四份文档都不得再声称“暂不构成泄漏”或“未知 /api 一定 404”而未提编码路径已修。
+
+----------------------------------------------------------------
+验证与交付
+----------------------------------------------------------------
+- corepack pnpm -s test（预期 64 文件 / 777 或 778 条，旧 731 不动）
+- corepack pnpm -s typecheck（0）
+- corepack pnpm -s build（0）
+- 真实手工探针（写进运行与验收）：
+  * /api%2Funknown、/api%2Frooms、/api%2funknown、/api → 404 JSON；
+  * 注入 now 抛错的 ws → guard.total=0；
+  * 满房连续 join → 最终 RATE_LIMITED，首次仍 ROOM_FULL；
+  * 旧 /health、evil Origin 403、text/plain 415、同源 201 仍正确。
+- 完成后只回报：改动文件、新增测试编号与名称、三条命令真实结果、F6–F12 落点。
+- 不 commit。
