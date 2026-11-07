@@ -1,0 +1,114 @@
+单元 09A 复核修复（第四轮：测试 49/50 强度）
+================================================================
+日期：2026-11-07
+实施：Trae（只改测试与交接文档，不改生产代码）
+依据：handoff/复核-单元09A-第三轮验证.txt（Qoder，结论「需修复」）
+基线：09A 实现 eeec8ca；09B 实现 6491fe9 + 文档 39dc1b9；本单提交后 HEAD 继续前移。
+现状：64/65 文件 781→786 条全绿（含 09B scripts 5 条），typecheck/build 0。
+目标：让 Qoder 指定的两个变异探针真实变红，同时不削弱任何既有测试。
+
+----------------------------------------------------------------
+一、问题（Qoder 已复现，Lead 认可）
+----------------------------------------------------------------
+M1（must）测试 49 不能证明「只释放一次」
+- 位置：apps/server/tests/security.test.ts:661-675（缺 Sec-WebSocket-Key 的裸 TCP 升级）。
+- 现状：只断言 60 次无效握手后 guard.total=0。ConnectionGuard.release 在
+  total<=0 时幂等返回，所以「release 两次」与「恰好一次」结果相同。
+- Qoder 变异：在仓库外副本把 ws.ts 的 releaseIfUnclaimed 改成
+  released=true; release(ip,false); release(ip,false);（删掉 released 守卫）
+  → security.test 仍 50/50 全绿，49 不变红。
+- 要求：测试必须能区分「一次」与「两次」；双释放时 49 必须失败。
+
+M2（must）测试 50 不能证明「客户端不自动 pong」
+- 位置：apps/server/tests/security.test.ts:678-703；
+  security-harness.ts:51-58（Peer.open 第 4 参数透传 ws options）。
+- 现状：收到 ping 后立刻 tick 下一次，服务端还没处理客户端 pong，
+  missedPongs 已被推到 2，即使 autoPong:true 也会被关闭。
+- Qoder 变异：把测试里的 { autoPong:false } 改成 true → 50 仍绿。
+- 要求：tick 之间必须等到 pong 确实被服务端处理；autoPong:true 必须保持
+  连接与座位，autoPong:false 才超时关闭。
+
+S1（should）handleUpgrade 同步抛错路径无测试：ws.ts:529-532 的 catch 分支
+（releaseIfUnclaimed + destroy）没有任何用例触发。
+
+S2（should）文档陈旧：
+- handoff/单元09A-成果报告.txt:48 仍写「security.test.ts（48 条）」，应为 50+
+  （补强后按实跑数字）。
+- 同文件 :4 写「基线 HEAD 0f2838e；实现位于工作区，未 commit」，实际 09A
+  已提交 eeec8ca，复核时工作区 clean。改为事实描述，不要硬编码会过期的 HEAD。
+
+----------------------------------------------------------------
+二、修复项
+----------------------------------------------------------------
+F16（M1）重写测试 49 的断言，用「基线连接 + 只减一」证明单次释放
+1. 先建立一条真实有效连接 A：走现有 Peer 的 join（房间码+昵称+sessionToken），
+   确认 guard.stats().total === 1（若测试内已有现成 join 辅助，优先复用；
+   不要新造生产接口）。
+2. 发一次缺 Sec-WebSocket-Key 的裸升级 → 断言 400（沿用现有 raw TCP 代码）。
+3. waitFor guard.stats() 满足：total === 1、unauthenticated === 0、
+   perIp[ip] 回到 1（即无效握手先加到 2，close 回调只减 1）。
+   若实现被改成双释放，total 会变成 0 → 本断言必须失败。禁止只断言 total===0。
+4. 再连续发 60 次无效握手，每次仍 400；waitFor total === 1 且 A 的 ws
+   仍 OPEN、A 仍可正常发一条无害命令/收到响应（证明没有误释放别人配额）。
+5. 测试结束关闭 A，waitFor total === 0，避免污染后续用例。
+
+F17（M2）重写测试 50：正反两段 + tick 间等待 pong
+1. 正段（autoPong 默认 true）：注入 heartbeatClock，连接 Peer B 并 join；
+   每次 tick 后 await peer.ws 上的 pong 已发送 + 一个短稳定窗口
+   （建议 await new Promise(r => setTimeout(r, 50))，禁止长 sleep），
+   共 3 次 tick；断言 B 仍 OPEN、座位 online=true、guard.total === 1。
+   该段必须能抓住「测试把 autoPong 写成 true 却仍关闭」的变异。
+2. 反段（{ autoPong:false }）：同样注入 heartbeatClock，tick 3 次
+   （每次等 ping 事件），然后 waitFor 连接关闭；断言座位仍存在但
+   online=false、guard.total === 0。
+3. 关闭残留连接；不得依赖真实 30s 心跳间隔，必须用注入 clock。
+4. 若现有 waitFor 只支持布尔条件，可扩展为返回布尔/取值的 helper，
+   但不得改动 security-harness 以外无关文件。
+
+F18（S1）同步抛错路径：先找可注入缝隙（例如给 onUpgrade 传入可控
+  wss/handleUpgrade 或 socket 的测试钩子）；只有在不改生产代码语义、
+  不新增依赖的前提下才补测试。若确实没有缝隙：
+  - 不要为了测试重构 ws.ts；
+  - 在 handoff/单元09A-注意事项.txt 与 下一阶段交接.txt 明确写
+    「handleUpgrade 同步抛错分支（ws.ts:529-532）无自动化测试，
+    依赖代码审查；补测试需先引入可注入的 upgrade 执行器」，
+    并在成果报告「未验证项」重复一次。
+
+F19（S2）文档修正：
+- 单元09A-成果报告.txt:48 的 48 改为补强后实跑条数（security.test.ts 条数）；
+- :4 基线改成「09A 实现 eeec8ca；09B 后 HEAD 39dc1b9；本修复单提交后
+  以 git log 为准」，删「未 commit / 0f2838e」；
+- 成果报告「测试」与运行与验收里的条数同步更新（全部按 pnpm -s test 实跑）；
+- 四份 09A 交接都要能看出：49/50 已按 M1/M2 加严，F16/F17 能抓住双释放
+  与 autoPong:true 两个变异。
+
+F20 自己跑变异探针（不改仓库、不提交）：
+1. 复制 apps/server/{src,tests} 到仓库外临时目录（可用 git archive 或 robocopy），
+   基线跑 security.test.ts 全绿；
+2. 变异 1：把 releaseIfUnclaimed 改成无 released 守卫、连续 release 两次
+   → 运行 security.test.ts，F16 必须红；
+3. 变异 2：把测试 50 的 autoPong 改成 true（仅副本）→ 运行，必须红；
+4. 恢复副本或删除；把两组输出（失败用例名/断言消息）写进
+   handoff/单元09A-复核修复4报告.txt 的「变异探针」一节。
+
+----------------------------------------------------------------
+三、允许改动范围
+----------------------------------------------------------------
+- apps/server/tests/security.test.ts（主要）
+- apps/server/tests/security-harness.ts（仅当必须扩展 waitFor/Peer 可选参数）
+- handoff/单元09A-成果报告.txt、运行与验收.txt、注意事项.txt、下一阶段交接.txt
+- handoff/项目当前状态.txt（测试条数、09A 测试补强状态）
+- 新增 handoff/单元09A-复核修复4报告.txt（记录命令、变异、结果）
+禁止：apps/server/src/**、packages/**、apps/web/**、协议、依赖、lockfile；
+禁止删除/跳过/放宽任何既有测试（旧 731 + security 50 + 09B scripts 5 = 786 起，
+补强后应为 786 或 787/788，按实跑写）。
+
+----------------------------------------------------------------
+四、验收
+----------------------------------------------------------------
+- corepack pnpm -s test 全绿（文件数不减少，条数 ≥786）；
+- corepack pnpm -s typecheck 0；
+- corepack pnpm -s vitest run apps/server/tests/security.test.ts 全绿；
+- 两组变异探针按 F20 真实变红，输出贴进报告；
+- git diff 只落在允许范围；
+- 不 commit（Lead 验收后提交）。
