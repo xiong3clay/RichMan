@@ -1,0 +1,177 @@
+单元 09C-A 备份与恢复核心（一致性备份 / 校验 / 恢复 / 清理）
+================================================================
+日期：2026-11-08
+代码基线：59c00f0（09B 第六轮文档修正后；工作区干净，796 条测试全绿）
+本轮范围：只新增三个文件 + 一个测试文件，不修改任何既有文件。为 09C-B 的 PowerShell 脚本提供可测试的核心。
+  apps/server/src/storage/backup.ts         （新增：备份/校验/恢复/列表/清理）
+  apps/server/src/storage/backup-cli.ts     （新增：给脚本调用的命令行入口）
+  apps/server/tests/backup.test.ts          （新增：单元 + 真实磁盘集成测试）
+  不改：apps/server/src 其它文件、packages/**、apps/web/**、协议、package.json、pnpm-lock、scripts/*.ps1、README。
+  Trae 需另写四份交接：handoff/单元09C-A-成果报告.txt、-运行与验收.txt、-下一阶段交接.txt、-注意事项.txt（下文第八节给模板要点）。
+
+零、现有事实（写代码前先读这些，别猜）
+- 提交点：apps/server/src/storage/file-store.ts:107-124 commitRoom：先 writeSnapshotAtomic 写 snapshot.json，再 append events.ndjson；rename 成功即提交点。
+- 原子写：apps/server/src/storage/atomic.ts:13-35 writeSnapshotAtomic：.tmp 目录临时文件 → fsync → 旧 snapshot 复制为 snapshot.bak.json → rename → 失败抛 AtomicWriteError(committed)。
+- 载入：file-store.ts:132-157 loadAll：校验失败先回退 snapshot.bak.json，再失败把房间目录移到 rooms/corrupt-<ts>-<code>-<uuid>；载入后一律 paused=true、online=false。
+- 结构校验：file-store.ts:14-101 validateSnapshot(value, code)：校验 schemaVersion=1、房间码、座位、tokenDigest/recoveryDigest 为 64 位小写 hex、金额整数上限、事件 seq、禁凭证原文等。备份/恢复必须复用它，不要另写一套。
+- 删除：file-store.ts:125-130 deleteRoom：rename 到 .tmp/deleted-<uuid> 再 rm。
+- 数据目录布局：<data>/rooms/<code>/{snapshot.json,snapshot.bak.json,events.ndjson}、<data>/.tmp/、<data>/logs/（start-lan.ps1:19 把日志写在这里：server-*.log、tunnel-*.log）。
+- 现在没有任何备份脚本/接口；Qoder 09B 复核把“日志无轮转”列为 09C 任务。
+
+一、目标与不变量
+1) 一致性备份：不暂停服务也能得到自洽快照——因为 snapshot.json 是 rename 替换的整文件，读到的要么是旧提交要么是新提交。禁止读一半再拼。
+2) 恢复必须先校验后落地：对备份目录做完整校验（manifest、sha256、validateSnapshot），校验不通过一律不动目标目录。
+3) 恢复绝不自动覆盖唯一现存档：目标房间目录已存在且没给 force 时返回 RESTORE_TARGET_EXISTS（CLI 退出码 2），目标一个字节都不改。
+4) force 恢复必须先保留原档：把原房间目录 rename 到 rooms/restore-keep-<时间戳>-<code>，再写入；写入/复校验失败要回滚（把保留目录 rename 回去）。
+5) 备份目录只包含：manifest.json、rooms/<code>/snapshot.json、可选 rooms/<code>/events.ndjson。不得写入 token/恢复码原文（存档里本来只有摘要，照抄即可）。
+6) 所有写文件走“临时文件 + fsync + rename”，不允许直接覆盖半成品。
+7) 不引入任何新依赖（只用 node:fs/promises、node:path、node:crypto、node:os、node:process）。
+
+二、备份目录格式（精确）
+<outDir>/
+  manifest.json
+  rooms/<code>/snapshot.json
+  rooms/<code>/events.ndjson      （仅 --with-audit 时存在）
+
+manifest.json（UTF-8、2 空格缩进、末尾换行；写成一行也行但必须可 JSON.parse）：
+{
+  "backupFormatVersion": 1,
+  "createdAt": "2026-11-08T00:00:00.000Z",
+  "sourceRoot": "<创建时传入的 root 绝对路径>",
+  "roomCount": 2,
+  "rooms": [
+    {
+      "code": "0042",
+      "savedAt": "<snapshot.savedAt 原值>",
+      "gameId": "<snapshot.gameId 或 null>",
+      "paused": true,
+      "eventSeq": 12,
+      "snapshotSha256": "<sha256(snapshot.json 文件字节) 小写 hex>",
+      "snapshotBytes": 12345,
+      "audit": null | { "file": "events.ndjson", "bytes": 456, "sha256": "<hex>" }
+    }
+  ],
+  "skipped": [ { "code": "0099", "reason": "存档无效：..." } ]
+}
+- rooms 按 code 升序；skipped 按 code 升序。
+- eventSeq 取 snapshot.game?.eventSeq ?? null。
+- 校验：backupFormatVersion 必须为 1；code 必须 ^\d{4,8}$ 且不重复；snapshotSha256 必须 ^[a-f0-9]{64}$；roomCount 必须等于 rooms.length。
+
+三、backup.ts 契约（导出，全部 async）
+export type BackupErrorCode =
+  | 'BACKUP_OUT_EXISTS' | 'BACKUP_EMPTY' | 'BACKUP_MANIFEST_INVALID'
+  | 'BACKUP_FILE_INVALID' | 'BACKUP_HASH_MISMATCH'
+  | 'RESTORE_TARGET_EXISTS' | 'RESTORE_ROOM_NOT_FOUND' | 'RESTORE_VERIFY_FAILED'
+  | 'PRUNE_KEEP_INVALID' | 'CLEANUP_BAD_ARGUMENT';
+
+export class BackupError extends Error { readonly code: BackupErrorCode; readonly details?: unknown }
+
+export interface BackupManifest { backupFormatVersion: 1; createdAt: string; sourceRoot: string; roomCount: number; rooms: BackupRoomEntry[]; skipped: { code: string; reason: string }[] }
+export interface BackupRoomEntry { code: string; savedAt: string; gameId: string | null; paused: boolean; eventSeq: number | null; snapshotSha256: string; snapshotBytes: number; audit: { file: 'events.ndjson'; bytes: number; sha256: string } | null }
+
+export async function createBackup(opts: {
+  root: string;            // 数据目录（含 rooms/）
+  outDir: string;          // 备份输出目录
+  roomCodes?: string[];    // 省略=全部
+  withAudit?: boolean;     // 是否复制 events.ndjson
+  now?: Date;              // 注入时间，便于测试
+}): Promise<BackupManifest>;
+  - outDir 必须不存在或为空目录，否则 BACKUP_OUT_EXISTS（空目录允许，非空拒绝；不要自动删）。
+  - 只处理 <root>/rooms 下 ^\d{4,8}$ 的目录；忽略 corrupt-*、restore-keep-*、.tmp 等。
+  - 指定 roomCodes 时缺房间 → RESTORE_ROOM_NOT_FOUND。
+  - snapshot.json 读不出来或 validateSnapshot 抛错：该房间不写入，记入 skipped（reason 带原始错误消息前 200 字符），继续其它房间。
+  - 一个房间都没成功 → 删除刚创建的 outDir（如果本轮创建）并抛 BACKUP_EMPTY。
+  - 每个房间：复制 snapshot 字节到 outDir/rooms/<code>/snapshot.json（先写 tmp 再 rename），算 sha256；withAudit 且 events.ndjson 存在才复制并记录 audit（不存在则 audit:null，不算失败）。
+  - manifest 最后写（这样中途崩溃不会留下“看起来完整”的备份）；manifest 自身也 tmp+fsync+rename。
+  - 返回 manifest。
+
+export async function loadBackupManifest(backupDir: string): Promise<BackupManifest>;
+export async function verifyBackup(backupDir: string): Promise<{ ok: boolean; manifest: BackupManifest | null; problems: string[] }>;
+  - 校验顺序：manifest 可读且结构合法 → 每个 room 的文件存在/大小/sha256 → JSON.parse → validateSnapshot(snapshot, code) → audit 若声明则 sha256 匹配。
+  - 任何一步失败：problems 里写清楚（房间码 + 原因），ok=false；不抛异常（CLI 用它给人类看）。manifest 读不出来时 manifest=null 且 problems 至少一条。
+
+export async function restoreRoom(opts: {
+  backupDir: string; root: string; code: string; force?: boolean; now?: Date;
+}): Promise<{ code: string; keptPath: string | null }>;
+  - 先 verifyBackup；不 ok → RESTORE_VERIFY_FAILED（details.problems 原样带上）。备份里没有该 code → RESTORE_ROOM_NOT_FOUND。
+  - 目标 <root>/rooms/<code> 已存在且 !force → RESTORE_TARGET_EXISTS（不创建/不改任何东西）。
+  - force：rename 目标到 <root>/rooms/restore-keep-<yyyyMMdd-HHmmss>-<code>，记录 keptPath。
+  - 复制 snapshot（+audit 若备份里有）；复制后重新读取并 validateSnapshot，失败则：删掉刚写入的目标目录、把 keptPath rename 回原位置、抛 RESTORE_VERIFY_FAILED。
+  - 不修改 snapshot 里的任何字段（paused 由服务启动时 loadAll 统一置 true，见 file-store.ts:154）；恢复出的目录不写 snapshot.bak.json（下次提交会自然生成）。
+  - 不允许路径穿越：code 必须 ^\d{4,8}$。
+
+export async function listBackups(dir: string): Promise<{ name: string; dir: string; createdAt: string; roomCount: number; ok: boolean }[]>;
+  - 只列直接子目录且名字以 richman-backup- 开头；按 createdAt 倒序；manifest 坏的目录也返回（ok:false, roomCount:0）。
+
+export async function pruneBackups(opts: { dir: string; keep: number; now?: Date }): Promise<{ removed: string[] }>;
+  - keep 必须是 >=1 的整数，否则 PRUNE_KEEP_INVALID。
+  - 按 createdAt 倒序保留前 keep 个，其余 rm -rf；目录不是 richman-backup-* 一律不碰；不删除 dir 本身。
+
+export interface CleanupResult { tmpFilesRemoved: number; logsRemoved: string[]; backupsRemoved: string[]; corruptRemoved: string[]; }
+export async function cleanupData(opts: {
+  root: string; keepLogs?: number; keepBackups?: number; keepCorrupt?: number; tmpMaxAgeMs?: number; now?: Date;
+}): Promise<CleanupResult>;
+  - 默认 keepLogs=20、keepBackups=10、keepCorrupt=5、tmpMaxAgeMs=24*3600*1000。
+  - 参数非法（负数/非整数）→ CLEANUP_BAD_ARGUMENT。
+  - 日志：<root>/logs 下 server-*.log 与 tunnel-*.log 分别按 mtime 倒序保留 keepLogs 个，其余 unlink。
+  - 备份：<root>/backups 下 richman-backup-* 用 pruneBackups 的同一套规则保留 keepBackups。
+  - 损坏存档：<root>/rooms/corrupt-* 目录按名字里的时间戳降序保留 keepCorrupt 个，其余 rm -rf。
+  - 临时文件：<root>/.tmp 下普通文件，mtime 早于 now - tmpMaxAgeMs 才删；不删目录、不删别的东西。
+  - 任何一项失败都不要中断其它项；失败计数/错误不上抛（返回结果里能看出来）。目录不存在视为 0。
+
+四、backup-cli.ts 契约
+只被 PowerShell 脚本和验收调用，不 import 进服务端运行时。
+命令（全部支持 --data/--backup/--dir 绝对路径）：
+  create  --data <数据目录> --out <备份目录> [--with-audit] [--keep <n>]
+  verify  --backup <备份目录>
+  restore --data <数据目录> --backup <备份目录> --room <code> [--force]
+  list    --dir <备份根目录>
+  cleanup --data <数据目录> [--keep-logs n] [--keep-backups n] [--keep-corrupt n] [--tmp-hours n] [--dry-run]
+- stdout 必须恰好一行 JSON（不打印别的；进度/警告走 stderr）：
+  成功 {"ok":true,"command":"create","rooms":2,"out":"...","pruned":0}
+  失败 {"ok":false,"command":"restore","code":"RESTORE_TARGET_EXISTS","message":"..."}
+- 退出码：0 成功；1 运行失败（含 BACKUP_EMPTY、VERIFY 失败）；2 需要人类决定（RESTORE_TARGET_EXISTS、BACKUP_OUT_EXISTS）；参数错误 1 并在 JSON 里给 code=BAD_ARGUMENT。
+- create 带 --keep n 时，成功后对该 out 的父目录执行 pruneBackups({dir: 父目录, keep:n})。
+- cleanup --dry-run 只统计不删除（同一函数加 dryRun 选项，返回值里 removed 列表为空但计数保留）。
+
+五、tests/backup.test.ts 必测（每条测试名用英文短名 + 中文断言意图，风格照现有测试）
+用 mkdtemp(os.tmpdir()) + afterEach rm；不要碰 apps/server/data。
+T1 create_writes_manifest_and_snapshot：真实 FileRoomStore 提交一个房间 → createBackup → manifest 字段、sha256 与文件字节一致、rooms/<code>/snapshot.json 与源文件逐字节相同。
+T2 create_with_audit_copies_events：withAudit 时 events.ndjson 逐字节复制且 audit.sha256 正确；without 时 audit=null 且文件不存在。
+T3 create_refuses_non_empty_out：outDir 已存在且非空 → BackupError(BACKUP_OUT_EXISTS)，目录内容不变。
+T4 create_empty_room_set：数据目录没有房间 → BACKUP_EMPTY，且刚创建的 outDir 被清理。
+T5 create_skips_corrupt_room：写一个坏 snapshot 的房间 → 不中断，skipped 里出现该 code，好房间正常备份。
+T6 verify_detects_hash_tamper：改备份里的 snapshot 一个字节 → ok=false、problems 提到 sha256。
+T7 verify_detects_invalid_snapshot：把备份 snapshot 的 cents 改成字符串（sha256 同步改对）→ ok=false、problems 提到 validateSnapshot 的信息。
+T8 restore_into_empty_root：恢复后目标文件逐字节等于备份；loadAll() 得到 1 个房间且 paused=true、online=false。
+T9 restore_refuses_existing_without_force：目标已存在 → RESTORE_TARGET_EXISTS，目标 snapshot 字节不变。
+T10 restore_force_keeps_original：force 后旧目录在 rooms/restore-keep-*-<code> 下且内容为旧快照，新快照生效。
+T11 restore_failure_keeps_target：备份 verify 失败（先篡改）→ RESTORE_VERIFY_FAILED，目标目录完全没动、没有 restore-keep-* 残留。
+T12 prune_keeps_newest：造 4 个备份（createdAt 递增）keep=2 → 删掉最旧 2 个，新 2 个仍在；keep=0 → PRUNE_KEEP_INVALID。
+T13 cleanup_retention：tmp 里造 2 个旧文件 + 1 个新文件（用 utimes）、logs 造 25 个、backups 造 12 个、corrupt 造 7 个 → 计数与保留数符合策略；不删 rooms/<code>。
+T14 cleanup_dry_run：dry-run 不删除任何东西，计数与 T13 一致。
+T15 cli_create_and_verify_json：spawn process.execPath ['--import','tsx', cliPath, 'create', ...] → stdout 恰好一行 JSON、ok=true、exit 0；verify 同样。
+T16 cli_restore_exit_codes：目标存在 → exit 2 且 JSON code=RESTORE_TARGET_EXISTS；--force → exit 0 且 JSON ok=true。
+T17 restored_game_equals_original：用 tests/persistence-harness.ts 的 diskHarness 开一局、打一条命令 → 导出快照 → createBackup → 删除房间目录 → restoreRoom → 新 FileRoomStore(root).loadAll()，比较 gameId/version/eventSeq/players[].cents/bankLoans/privateLoans/bets/deadlineAt/phase 与 tokenDigest+recoveryDigest 全部相等；再 validateSnapshot 不抛。这是“实际恢复一局”的自动化证据。
+
+不要削弱既有 796 条；不要用网络、不要用 8000 端口。
+
+六、禁止事项
+- 不新增依赖、不改 package.json/pnpm-lock、不改 tsconfig。
+- 不改 file-store.ts / atomic.ts / manager.ts / ws.ts / http.ts：本轮零既有文件修改。
+- 不实现 HTTP 管理接口、不做定时备份、不做加密/云上传（留给后续，写进注意事项）。
+- 不修改恢复出来的 snapshot 内容（包括不把 paused 改成 false）；不伪造 events.ndjson。
+- 不删除 <data>/rooms/<code> 以外的用户数据；cleanup 的路径必须严格按上面四类匹配。
+
+七、验收命令（Trae 自己跑，把真实输出贴进交接）
+corepack pnpm -s test        → 期望 65 文件 / 796 + 新增（约 17 条）全绿
+corepack pnpm -s typecheck   → 0
+corepack pnpm -s build       → 0
+单文件：corepack pnpm -s vitest run apps/server/tests/backup.test.ts → 全绿
+git status 只允许出现上述 3 个新文件 + 4 份交接（不改既有文件）；不 commit。
+
+八、交接文件要点
+- 成果报告：目录格式、五个导出函数签名、CLI 命令与退出码、测试清单 T1–T17 结果、未做项（脚本、README、定时、加密）。
+- 运行与验收：真实命令输出、单文件耗时、总测试数、typecheck/build、恢复演练步骤（create→删房→restore→loadAll paused）。
+- 下一阶段交接（09C-B）：PowerShell 包装需要读的接口（createBackup/verifyBackup/restoreRoom/listBackups/pruneBackups/cleanupData + CLI 参数）、脚本层要自己做的“服务运行中拒绝恢复”检查、默认备份目录建议 <root>/backups、日志轮转已由 cleanupData 覆盖。
+- 注意事项：为什么 rename 即一致性点、恢复后必须先暂停再继续、force 的保留目录命名、审计缺行只告警不重建、备份含身份摘要不得外传、Windows 上 fsync 的局限。
