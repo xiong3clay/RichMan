@@ -24,6 +24,30 @@
 
 手机同一局域网访问启动日志里打印的 LAN 地址（默认 8000 端口）。
 
+## 一键启动 / 停止（Windows）
+
+脚本同时兼容 Windows PowerShell 5.1 与 pwsh 7，`.ps1` 均保存为 UTF-8 with BOM：
+
+    powershell -ExecutionPolicy Bypass -File scripts/start-lan.ps1
+    powershell -ExecutionPolicy Bypass -File scripts/start-tunnel.ps1
+    powershell -ExecutionPolicy Bypass -File scripts/status.ps1
+    powershell -ExecutionPolicy Bypass -File scripts/stop.ps1
+
+- `start-lan.ps1`：单进程 `node --import tsx` 起服，先做健康检查；已运行则幂等退出。
+  可选 `-Port 8000`、`-DataDir <目录>`、`-Build`（缺前端产物时先构建）、`-CheckOnly`。
+- `start-tunnel.ps1`：要求本地 `/health` 先通过，再起 cloudflared 临时隧道并打印
+  `https://<随机>.trycloudflare.com`。可选 `-Port`、`-Cloudflared <exe>`、`-CheckOnly`。
+- `status.ps1`：查看本地服务与隧道健康；`-Json` 输出单行 JSON；可选 `-Port`、`-DataDir`。
+- `stop.ps1`：只按 `run/server.json`、`run/tunnel.json` 里的 pid + 进程名白名单停止，
+  绝不按端口杀陌生进程；可重复执行（幂等）。
+- 状态与日志落在数据目录（默认 `apps/server/data`，可用 `-DataDir` 或
+  `RICHMAN_DATA_DIR` 覆盖）：`run/server.json`、`run/tunnel.json`、
+  `logs/server-*.log`、`logs/tunnel-*.log`。
+- 隧道域名每次重启都会变；换域名后请用“房间码 + 恢复码”恢复。
+- 手机访问需允许 Windows 防火墙入站 TCP（默认端口 8000，需管理员）；
+  笔记本电池策略可能让服务睡眠，建议接电源或设置“接通电源时永不睡眠”。
+- 非 Windows 仍使用 `corepack pnpm -s start`（隧道可用任意 cloudflared 客户端）。
+
 ## 四个指导文件在哪、哪个说了算
 
 | 文件 | 作用 | 权威 |
