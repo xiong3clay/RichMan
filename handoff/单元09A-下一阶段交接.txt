@@ -1,0 +1,129 @@
+单元 09A 下一阶段交接（服务端加固与限流）
+================================================================
+日期：2026-11-07
+基线：aabf407；本轮实现未提交（工作区）。下一单元：09B 一键启动/隧道/停止脚本。
+
+一、架构与入口
+1) apps/server/src/security.ts（新增，纯函数/类，不 import socket/fs/clock）
+   - SecurityLimits / DEFAULT_SECURITY_LIMITS：唯一默认阈值来源（未复制进 shared）。
+   - loadSecurityLimits(process.env)：HTTP 与 WS 分别在 startServer 里各读一次，
+     最终由 createSecurityRuntime 统一成同一实例（startServer 显式传给
+     createRequestHandler 与 attachLobbyWebSocket）。
+   - TokenBucket：key → {tokens,last}，毫秒线性回填；createSecurityRuntime 中各桶：
+       createRoomBucket key=来源IP（capacity=createRoomBurst，回填 createRoomPerMinute/60_000）
+       joinBucket       key=来源IP（joinBurst / joinPerMinute/60_000）
+       fullJoinBucket   key=来源IP（满房 join 专用；容量 joinBurst、回填 joinPerMinute）
+       resumeBucket     key=来源IP（resumeBurst / resumePerMinute/60_000）
+       resumeRoomBucket key=房间码（resumeBurst / resumePerRoomPerMinute/60_000）
+       commandBucket    key=房间码+"|"+playerId（commandBurst / commandPerSecond/1_000）
+       economicBucket   key=房间码+"|"+playerId+"|"+type（economicBurst / economicPerSecond/1_000）
+   - ConnectionGuard：total → perIp(maxConnectionsPerIp) → unauthenticated；
+     admit 成功才计数；markAuthenticated 降未认证；
+     release(ip, authenticated) 按真实认证维度扣减，不跨维度回退。
+   - isAllowedOrigin / clientIp：Origin 只防跨站，不是认证。
+2) apps/server/src/http.ts
+   - withSecurityHeaders / sendJson / serveStatic：所有响应三安全头。
+   - handleCreateRoom：Origin → Content-Type → createRoomBucket → roomCount → 创建。
+   - createRequestHandler / startServer 的 security 注入点；
+     StartedServer.security 暴露给测试与诊断。
+3) apps/server/src/ws.ts
+   - onUpgrade：pathname /ws → isAllowedOrigin(403) → guard.admit(503) →
+     wss.handleUpgrade；handleUpgrade 抛错 release。
+   - init：Connection{ip,authenticated,createdAt,released}；bind 后
+     markAuthenticated；disconnected 按 conn.authenticated 调
+     release(conn.ip, conn.authenticated) 一次；init 抛错 release(false) 并 destroy。
+   - authScan：独立 authClock（默认 5s，unref），未认证且超时 → error + close 4003。
+   - handle 的 command.success 分支：commandBucket → economicBucket → processor。
+   - handleLobby 的 join/resume：join（满房时 fullJoinBucket，否则 joinBucket）；
+     resumeBucket + resumeRoomBucket，均在 manager.transact 之前。
+     满房前 joinBurst 次仍返回 ROOM_FULL，之后 RATE_LIMITED（见注意事项）。
+4) packages/shared/src/protocol.ts
+   - 仅 NicknameSchema 增加控制字符 refine；其他 schema、PROTOCOL_VERSION(=1) 未动。
+
+二、数据流（判定顺序不可换）
+HTTP POST /api/rooms：
+  Origin 403 {ORIGIN_NOT_ALLOWED}
+  → 非空非 JSON 415 {UNSUPPORTED_MEDIA_TYPE}（空 body 仍按 {}）
+  → IP 建房桶 429 {RATE_LIMITED}
+  → roomCount >= maxRooms 503 {ROOM_LIMIT}
+  → createRoomPersisted 201 {ok,roomCode}
+WS upgrade：
+  Origin 403（不升级）→ guard.admit 503（不升级）→ 升级 → init
+WS 消息：
+  每连接 60/s 粗限流 → 大厅消息/游戏命令分流
+  游戏命令：全局命令桶 10/s( burst 20, key=房间码|玩家ID ) →
+            经济命令桶 5/s( burst 10, key=房间码|玩家ID|type ) → 处理器
+  join/resume：IP/房间桶 → transact（含身份/epoch 校验）→ bind
+HTTP 未知 /api/*：404 {NOT_FOUND}（不回退 index.html）。
+
+三、协议 / 存档格式
+- 消息形状与 PROTOCOL_VERSION 不变。
+- 存档 schema 不变；NicknameSchema 只在 join 时校验，历史快照里的昵称不重新校验，
+  不需要迁移；不会因新校验导致旧房载入失败。
+- 新增错误码（JSON error / WS error）：
+    ORIGIN_NOT_ALLOWED（403）
+    UNSUPPORTED_MEDIA_TYPE（415）
+    RATE_LIMITED（429 HTTP / WS error）
+    ROOM_LIMIT（503）
+    TOO_MANY_CONNECTIONS / TOO_MANY_UNAUTHENTICATED（WS 升级 503 reason）
+    INVALID_MESSAGE "连接超时，请重新加入" + WS close code 4003 AUTH_TIMEOUT
+  既有错误码（ROOM_NOT_FOUND / ROOM_FULL / INVALID_NICKNAME / NOT_JOINED /
+  UNAUTHORIZED / REPLACED / ERROR_PAUSED 等）语义未变。
+
+四、环境变量（运维必读）
+  RICHMAN_ALLOWED_ORIGINS   逗号分隔完整 origin，如 https://abc.trycloudflare.com
+  RICHMAN_TRUST_PROXY=1     仅此时读 X-Forwarded-For 第一段；默认关
+  RICHMAN_MAX_CONNECTIONS   总连接上限，默认 200；非正整数忽略
+  RICHMAN_MAX_CONNECTIONS_PER_IP  单 IP 上限，默认 20；非正整数忽略
+  RICHMAN_MAX_ROOMS         房间上限，默认 50；非正整数忽略
+  非法值一律回退默认，不阻止服务启动。
+隧道/反向代理部署时：若需要按真实客户端 IP 限流，必须同时设置 RICHMAN_TRUST_PROXY=1
+且保证代理会覆盖/清洗 X-Forwarded-For；直连公网不要开。
+
+五、迁移与回退
+- 回退：删除 security.ts、恢复 http.ts/ws.ts/protocol.ts 旧实现即可；
+  无存档/协议迁移，无锁文件变化。
+- 部分回退注意：http.ts 的 startServer 需同时移除传给 ws 的 security，
+  否则 ws 会退回 loadSecurityLimits(process.env) 读默认值（行为仍可用但阈值分叉）。
+- 09B 脚本若新增环境变量透传，必须保留上述五个变量的默认值语义。
+
+六、下一单元入口
+09B（启动/隧道/停止一键脚本）：
+- 可在脚本里生成/透传 RICHMAN_ALLOWED_ORIGINS（隧道域名每次重启会变）；
+- 启动后应抓取 /health 与一次 POST /api/rooms 验证，而不是只看进程存活；
+- 不要把 data/ 或源码挂到公网静态目录；隧道只暴露 8000。
+09C（备份恢复/安全补强）：重新评估：
+- 满房 fullJoinBucket 与普通 joinBucket 的额度合并策略（必须保留第 11 人
+  首次 ROOM_FULL 的旧契约）；
+- BET_SETTLED 按 audience 拆分、限流跨进程存储、负载测试；
+- 无效握手/半开连接的配额回收已修（F13/M3），仍需代理层 429/503 与
+  多段 X-Forwarded-For 验证；
+- ConnectionGuard 的 perIp 映射无周期清理（历史来源 IP 数约束）；
+- TokenBucket 活跃 key 长期超过 1024 时仍会增长，可评估周期兜底。
+  （原 Content-Type "{}" 旁路与 NODE_ENV=test Origin shim 已按复核修复 F3/F4 删除，
+   09C 不再需要处理。）
+09D（真机矩阵）：手机 Origin、429/415/403 文案、4003 超时、2/10 人并发。
+
+七、不可破坏的不变量（09B 及以后）
+1) 默认阈值必须与规格一致（200/20/60/50/60s/60/20/10/10/5/10/10/10/20/5/10/30）。
+2) HTTP 判定顺序 Origin → Content-Type → 限流 → 房间上限；WS 升级必须先 Origin
+   后配额，失败都不得升级。
+3) 未认证超时 close code 4003、reason AUTH_TIMEOUT；错误消息只带 code/固定文案，
+   不输出 token、恢复码、原始消息。
+4) 命令限流发生在 processor 之前，超限不得改状态/version；命令桶 key 必须含
+   房间码|玩家ID，经济命令桶再含 type（跨房间不得共用额度）。
+5) ConnectionGuard release(ip, authenticated) 幂等且必须传真实的 conn.authenticated；
+   bind 只 markAuthenticated 一次；init 必须把 Connection 创建包进 try 并恰好释放一次；
+   guard.admit 之后必须有唯一归属：握手失败由 socket.once("close") 回收，
+   成功回调认领后交给 Connection；onUpgrade catch 用 releaseIfUnclaimed；
+   403/503 不得新增释放；任何终止路径结束后 guard 必须归零；
+   HTTP 与 WS 必须共用 startServer 创建的同一 runtime。
+6) 安全头对所有 JSON 与静态响应生效，不能只给 /health。
+7) API 命名空间必须用 decodedPath 路由，且只接受 url.pathname===decodedPath 的原样路径；
+   未知 /api/*、/api、编码路径（%2F 等）一律 JSON 404，不得回退 index.html。
+8) 昵称控制字符校验错误文案固定为"昵称不能包含控制字符"；码点上限仍 20。
+9) 满房 join 必须消耗 fullJoinBucket；前 joinBurst 次仍 ROOM_FULL，之后 RATE_LIMITED；
+   rooms.test 第 11 人契约不得破。
+10) TokenBucket 必须保留 tryTake 的惰性 prune（size>=1024 清 10 分钟未用 key），
+    不得退回只增不减。
+11) 旧 731 条测试不得删改跳过；新增测试只能追加。

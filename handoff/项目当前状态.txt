@@ -1,6 +1,6 @@
 RichMan 项目当前状态
 更新日期：2026-11-07
-更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复；07A/07B/07C 由 Trae 实现，Qoder 三轮复核，Lead 验收）
+更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复；07A/07B/07C 由 Trae 实现，Qoder 三轮复核，Lead 验收；08A/08B/08C 由 Trae 实现并完成复核修复；09A 由 Trae 实现并完成 F1–F15 三轮复核修复，代码验证通过、未提交，待 Qoder 第三轮复核）
 
 【版本】
 方案版本：V1.3.3（V1.3.2 + 引导式界面 + 连接实测）
@@ -9,12 +9,13 @@ RichMan 项目当前状态
 游戏版本：未发布，目标 V1.0
 
 【进度与范围】
-已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C。
-当前子任务：09A 服务加固（输入校验、连接/房间上限、Origin、限流）规格已写
-handoff/单元09A-服务加固与限流.txt，待 Trae 实现；08C 已提交 d7b67f8 并通过 Qoder 二次验证
-（63 文件/731 条、typecheck/build 0、6 个 WAV + 播放器/事件音效），真机音频未测。
+已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（代码验证通过，工作区未提交，待独立复核）。
+当前子任务：09B 启动/隧道/停止一键脚本（尚未开始）。09A 基线 0f2838e（Qoder 修复验证
+handoff/复核-单元09A-修复验证.txt + 第三轮修复单 handoff/单元09A-复核修复3.txt），按用户要求本轮不 commit。
+08C 已提交 d7b67f8 并通过 Qoder 二次验证（63 文件/731 条、typecheck/build 0、6 个 WAV + 播放器/事件音效），真机音频未测。
+09A 后实测 64 文件/781 条（旧 731 未削弱 + security.test 50），typecheck/build 0。
 05B 真人试玩：2026-11-06 用户在 07C 后完整玩过一局并确认“不错”，判为真人试玩通过；清单中的等待时长与 360px 截图未逐项记录，并入 08 记录。
-09 拆分：09A 服务加固与限流（当前）→ 09B 启动/隧道/停止一键脚本 → 09C 备份恢复、
+09 拆分：09A 服务加固与限流（已完成，待复核）→ 09B 启动/隧道/停止一键脚本（当前）→ 09C 备份恢复、
   安全测试补强与文档/许可证/版本记录 → 09D 真机发布验收矩阵（局域网 + 隧道 + 2/10 人）。
 08C 音频：全部素材由 make-audio.mjs 合成（无第三方采样），6 个 sha256 见 08C 交接；
       首次手势才 unlock，不自动播放；失败降级不影响游戏。
@@ -36,16 +37,54 @@ handoff/单元09A-服务加固与限流.txt，待 Trae 实现；08C 已提交 d7
      终局名单与本人破产说明；只改 apps/web，BET_SETTLED 只取本人条目。
 06 起会话与命令去重已落盘（apps/server/data，RICHMAN_DATA_DIR 可覆盖），服务重启后房间恢复为暂停态，房主 resume_game 继续。
 
-【测试与构建（2026-11-07 单元08C 后实测）】
-pnpm -s test    63 文件 / 731 条（703 + 08C 音频 28），TEST_EXIT=0，6.06s
+【测试与构建（2026-11-07 单元09A 后实测，工作区未提交）】
+pnpm -s test    64 文件 / 781 条（旧 731 未删改 + security.test 50），TEST_EXIT=0，8.40s
 pnpm typecheck  TSC_EXIT=0
-pnpm -s build   BUILD_EXIT=0（index--JyM_5JG.css 18.07kB、index-DIQs21ey.js 425.04kB，
-                141 modules，402ms；dist/audio 6 文件共 391,652 bytes）
+pnpm -s build   BUILD_EXIT=0（index--JyM_5JG.css 18.07kB、index-CrCvzBNf.js 425.13kB，
+                141 modules，239ms；dist/audio 6 文件不变）
+手工验收：/health 三安全头、evil Origin 403、/api/unknown 404、同源 201、
+          text/plain 415、text/plain+"{}" 415、json+"{}" 201、ws evil Origin 升级 403、
+          /api%2Funknown、/api%2Frooms、/api%2funknown、/api 均 404 JSON、
+          init now 抛错 total=0、满房 10×ROOM_FULL+RATE_LIMITED、
+          缺 Sec-WebSocket-Key→400 且 60 次后 guard 归零、随后正常 join 全 PASS
+          （日志 artifacts/test-logs/09Afix3-*）
 pnpm smoke:lan PASS（05D 验收时）
 旧 481 条中只有两条断言按 Lead 明确授权改正（都在 persistence.test.ts）：
   after_rename_identity_write：旧 token 连接必须 NOT_JOINED，只有恢复码换的新 token 能继续；
   stale_owner_not_revived：失败 join 不得留座，新人要拿全新 token 重新 join。
 其余旧断言未删、未跳过、未放宽；引擎改动仍只有新增 resumeFromPause。
+【09A 不得回退的点】
+- 默认阈值唯一来源是 apps/server/src/security.ts 的 DEFAULT_SECURITY_LIMITS（200/20/60/50/
+  60s/60/20/10/10/5/10/10/10/20/5/10/30），不得复制进 rules.ts 或前端；改阈值必须同步测试。
+- HTTP POST /api/rooms 判定顺序 Origin 403 → Content-Type 415 → 建房桶 429 → 房间上限 503 → 创建；
+  API 命名空间必须用 decodedPath 路由且只接受原样路径：未知 /api/*、/api、%2F 等编码路径
+  一律 JSON 404，不得回退 index.html（Qoder M1；测试 48）。
+- WS upgrade 必须先 Origin 403 再 guard.admit 503，两者都不升级。
+- guard.admit 之后必须有唯一归属：握手未完成时由 socket.once("close") 回收，
+  handleUpgrade 成功回调认领（置 released、移除 close 监听）后交给 Connection；
+  onUpgrade catch 用 releaseIfUnclaimed；403/503 不得新增释放。
+  任何终止路径（含缺 Sec-WebSocket-Key 的 400）结束后 guard 必须归零
+  （Qoder M3；测试 49）。
+- 未认证超时独立 authClock（5s、unref、close 清理），不与 10s 心跳合并；
+  超时先 sendError(INVALID_MESSAGE,"连接超时，请重新加入") 再 close(4003,"AUTH_TIMEOUT")。
+- 命令限流必须在 processor 之前：全局桶 key=房间码|playerId（20/10s），
+  经济桶 key=房间码|playerId|type（10/5s）；ECONOMIC_COMMANDS 九条不得增删；
+  超限不得执行、不得 bump version。
+- join 按 IP、resume 按 IP + 按房间，均在 manager.transact 之前；失败重试也计数。
+- 满房 join 必须走 fullJoinBucket：前 joinBurst 次仍 ROOM_FULL，之后 RATE_LIMITED；
+  rooms.test 第 11 人契约不得破（Qoder S2；测试 40）。
+- ConnectionGuard release(ip, authenticated) 必须传真实 conn.authenticated 且幂等、
+  不跨维度回退；bind 只 markAuthenticated 一次；init 必须把 Connection 创建（含 now）
+  包进 try，conn 为 null 时 release(ip,false)，非 null 按 conn.authenticated 只释放一次；
+  HTTP 与 WS 必须共享 startServer 创建的同一 SecurityRuntime（Qoder M2；测试 39）。
+- TokenBucket 必须保留 tryTake 的惰性 prune：size>=1024 时清 10 分钟未用 key；
+  不得退回只增不减（Qoder S1；测试 38）。
+- 所有 JSON 与静态响应必须带 nosniff / no-referrer / X-Frame-Options DENY；新响应走
+  sendJson/withSecurityHeaders，不要裸 res.writeHead。
+- NicknameSchema 禁止 C0 与 DEL，文案固定"昵称不能包含控制字符"，码点 1～20；其余 schema/协议不变。
+- Content-Type 只接受 application/json（空 body 按 {}）；NODE_ENV 不影响 allowedOrigins。
+- 限流是单进程内存态、重启清零；trustProxy 默认关，直连公网开启会被伪造 XFF 绕过。
+
 【06 不得回退的点】
 - 提交顺序：tmp + fsync → 备份旧 snapshot 到 snapshot.bak.json → rename 才算出账；rename 成功后才发布内存/广播/回成功。
 - 失败一律回滚旧内存 + paused=true + ERROR_PAUSED；rename 后失败要把已提交快照记入 durablePending，后续写入先对齐，禁止旧内存覆盖已提交账。
@@ -138,6 +177,21 @@ https://diego-rotary-inclusive-hughes.trycloudflare.com（2026-11-06 21:5x 重�
    N2/N3/N7 旧 nit 未处理；真机音频未测。
    07C 已完成并验收（54 文件/646 条）：全部还款/全部催收、返回上一步、房主销毁房间；
    遗留：360px 真机截图未采集、销毁仅单进程验证、S-B 毫秒竞态无端到端用例（有判定单测 + peer 兜底）。
+0d) 09A 已完成代码验证并完成三轮复核修复 F1–F15（工作区未提交，基线 0f2838e）：
+   security.ts + HTTP/WS 加固 + 昵称控制字符；F1 release(ip,authenticated)/conn.authenticated；
+   F2 命令桶 key=房间码|玩家ID；F3 删除 Content-Type "{}" 旁路；
+   F4 删除 NODE_ENV Origin shim、session.test 显式注入白名单；
+   F6 路由改用 decodedPath、编码 API 路径一律 404；F7 init 创建阶段恰好释放一次；
+   F8 TokenBucket 1024/10 分钟惰性 prune；F9 满房 fullJoinBucket；
+   F13 握手失败配额挂 socket close 回收（M3）；F14 心跳超时 release 证据。
+   64 文件/781 条、typecheck/build 0；28 条必测全覆盖，另补 22 条（29–50）。
+   手工 curl（三安全头、evil Origin 403、/api/unknown 404、同源 201、text/plain 415、
+   text/plain+"{}" 415、json+"{}" 201、编码 API 路径 404）与 tsx 探针
+   （init now 抛错 total=0、满房 10×ROOM_FULL+RATE_LIMITED、缺 Sec-WebSocket-Key→400
+    且 60 次后 guard 归零、随后正常 join）全 PASS；四份 handoff 已写。
+   遗留：Qoder 第三轮复核未做；429/503/WS 配额未手工复测（自动化 18/19/24 覆盖）；
+   代理层 429/503 未验证；trustProxy 多段 XFF 未独立验证；手机端 Origin 与错误文案转 09D；
+   限流为单进程内存态。验收房间 1232、8737、7375 已从 apps/server/data/rooms 清理。
 1) 05B 真机复测：按 handoff/单元05B-试玩清单.txt 记录等待/卡点，重点看 05E 提示可见性与 05F 额度数字/禁用态。
 2) 05F 复核已处理（handoff/复核-单元05F.txt）：1 must-fix + 4 should-fix 已修复并全量验证；
    未重拍 360px 截图、“借到贷款后额度 0”只做了单测，并入 05B。

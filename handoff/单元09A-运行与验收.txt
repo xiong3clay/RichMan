@@ -1,0 +1,184 @@
+单元 09A 运行与验收说明（服务端加固与限流）
+================================================================
+日期：2026-11-07
+环境：Windows（PowerShell 5.1）；Node v24.18.0；corepack pnpm 11.7.0；
+      工作目录 D:\Lianjunjie\biancheng\RichMan。
+
+一、安装与启动
+依赖已存在，无需新增依赖（09A 未改 package.json / lockfile）。
+  corepack pnpm install        # 仅在全新环境需要
+启动真实服务（监听 0.0.0.0:8000，打印本机与 LAN 地址）：
+  corepack pnpm -s start
+本次实测输出：
+  [richman] 服务已启动，监听 0.0.0.0:8000
+  [richman] 本机： http://localhost:8000/
+  [richman] 局域网： http://10.25.226.102:8000/
+  [richman] 健康检查： /health
+
+二、自动化验收命令（真实执行，第三轮修复后）
+1) corepack pnpm -s test
+   输出：Test Files 64 passed (64)；Tests 781 passed (781)；Duration 8.40s；
+   退出码 0。日志：artifacts/test-logs/09Afix3-test.log
+2) corepack pnpm -s typecheck
+   输出：无诊断；退出码 0。日志：artifacts/test-logs/09Afix3-typecheck.log
+3) corepack pnpm -s build
+   输出：✓ 141 modules transformed；dist/index-CrCvzBNf.js 425.13 kB；
+   index--JyM_5JG.css 18.07 kB；built in 239ms；退出码 0。
+   日志：artifacts/test-logs/09Afix3-build.log
+4) 单文件：corepack pnpm -s vitest run apps/server/tests/security.test.ts
+   输出：security 50 passed；退出码 0。
+   日志：artifacts/test-logs/09Afix3-security.log
+
+三、手工验收（真实服务 + curl.exe）
+说明：服务用 `corepack pnpm -s start` 后台启动；以下命令在另一个终端执行。
+Windows PowerShell 中必须用 curl.exe（curl 是 Invoke-WebRequest 别名）。
+
+1) /health 安全响应头
+   命令：
+     curl.exe -s -i http://127.0.0.1:8000/health
+   实际输出（节选）：
+     HTTP/1.1 200 OK
+     x-content-type-options: nosniff
+     referrer-policy: no-referrer
+     x-frame-options: DENY
+     content-type: application/json; charset=utf-8
+     {"ok":true,...,"rooms":0,...}
+   预期：200 且三安全头齐全。PASS。
+
+2) 跨站 Origin 建房被拒
+   命令：
+     curl.exe -s -i -X POST http://127.0.0.1:8000/api/rooms ^
+       -H "Origin: https://evil.example" -H "Content-Type: application/json" --data "{}"
+   实际输出（节选）：
+     HTTP/1.1 403 Forbidden
+     x-content-type-options: nosniff
+     referrer-policy: no-referrer
+     x-frame-options: DENY
+     {"ok":false,"error":"ORIGIN_NOT_ALLOWED"}
+   预期：403 ORIGIN_NOT_ALLOWED。PASS。
+
+3) 未知 /api 路径
+   命令：
+     curl.exe -s -i http://127.0.0.1:8000/api/unknown
+   实际输出（节选）：
+     HTTP/1.1 404 Not Found
+     content-type: application/json; charset=utf-8
+     {"ok":false,"error":"NOT_FOUND"}
+   预期：404 JSON，不是 index.html。PASS。
+
+4) 同源建房（对照）
+   命令：
+     curl.exe -s -i -X POST http://127.0.0.1:8000/api/rooms ^
+       -H "Origin: http://127.0.0.1:8000" -H "Content-Type: application/json" --data "{}"
+   实际输出（节选）：
+     HTTP/1.1 201 Created
+     {"ok":true,"roomCode":"7375"}
+   预期：201 并返回 4 位房间码。PASS。
+   注：验收产生的空房间 7375 已从 apps/server/data/rooms 删除，避免污染运行态。
+
+5) 非 JSON Content-Type
+   命令：
+     curl.exe -s -i -X POST http://127.0.0.1:8000/api/rooms ^
+       -H "Origin: http://127.0.0.1:8000" -H "Content-Type: text/plain" --data "nickname=x"
+   实际输出（节选）：
+     HTTP/1.1 415 Unsupported Media Type
+     {"ok":false,"error":"UNSUPPORTED_MEDIA_TYPE"}
+   预期：415。PASS。
+
+6) 复核修复 F3：text/plain + body "{}" 必须 415（旧兼容旁路已删除）
+   命令：
+     curl.exe -s -i -X POST http://127.0.0.1:8000/api/rooms ^
+       -H "Origin: http://127.0.0.1:8000" -H "Content-Type: text/plain" --data "{}"
+   实际输出（节选）：
+     HTTP/1.1 415 Unsupported Media Type
+     x-content-type-options: nosniff
+     referrer-policy: no-referrer
+     x-frame-options: DENY
+     {"ok":false,"error":"UNSUPPORTED_MEDIA_TYPE"}
+   对照（application/json + "{}"）实际输出：
+     HTTP/1.1 201 Created
+     {"ok":true,"roomCode":"8737"}
+   预期：text/plain 415、application/json 201。PASS。
+
+7) 第二轮 F6：编码 API 路径必须 404 JSON，不得回退 index.html
+   命令（逐条执行，curl.exe 会原样发送 %2F）：
+     curl.exe -s -i http://127.0.0.1:8000/api%2Funknown
+     curl.exe -s -i http://127.0.0.1:8000/api%2Frooms
+     curl.exe -s -i http://127.0.0.1:8000/api%2funknown
+     curl.exe -s -i http://127.0.0.1:8000/api
+   实际输出（四条均相同的关键行）：
+     HTTP/1.1 404 Not Found
+     x-content-type-options: nosniff
+     referrer-policy: no-referrer
+     x-frame-options: DENY
+     content-type: application/json; charset=utf-8
+     {"ok":false,"error":"NOT_FOUND"}
+   预期：404 JSON，不是 200 text/html。PASS。
+   说明：修复前 /api%2Frooms 返回 200 text/html（index.html SPA 回退），
+   不是 200 JSON；现 API 命名空间只接受 url.pathname===decodedPath 的原样路径。
+
+8) 第二轮 F7/F9：init 抛错归零、满房连续 join 限流（tsx 探针）
+   说明：用临时脚本 %TEMP%\09Afix2-probe.mts，从 security-harness 起真实服务。
+   F7：注入 now 第一次抛错后打开 /ws：
+     initThrow guard stats = {"total":0,"unauthenticated":0,"perIp":{}}
+     再正常加入：
+     after normal join stats = {"total":1,"unauthenticated":0,"perIp":{"127.0.0.1":1}}
+   F9：joinBurst=10、joinPerMinute=0，10 人填满房间后第 11 个连接连续 join：
+     fullJoin codes = ["ROOM_FULL" ×10, "RATE_LIMITED"]
+   预期：抛错不泄漏配额；满房先 ROOM_FULL、超出后 RATE_LIMITED。PASS。
+   日志：artifacts/test-logs/09Afix2-manual-wsprobe.log
+
+9) 第三轮 F13：无效握手配额回收（tsx 探针，真实 TCP + 真实服务）
+   说明：用临时脚本 %TEMP%\09Afix3-probe.mts，对 startSecurityServer 起真实服务：
+   - 原始 TCP 发 Upgrade: websocket 但不带 Sec-WebSocket-Key，服务返回 400；
+   - 每次握手后 waitFor guard 归零，连续 60 次后仍归零；
+   - 随后正常 WS 连接与 join 成功（不再 503）。
+   实际输出：
+     single invalid handshake => 400
+     stats after single (settled) = {"total":0,"unauthenticated":0,"perIp":{}}
+     stats after 60 (settled) = {"total":0,"unauthenticated":0,"perIp":{}}
+     normal join after attacks => joined playerId=p1 stats={"total":1,"unauthenticated":0,"perIp":{"127.0.0.1":1}}
+     stats after close (settled) = {"total":0,"unauthenticated":0,"perIp":{}}
+   预期：400 后配额归零；60 次后仍为 0；正常连接可加入。PASS。
+   日志：artifacts/test-logs/09Afix3-manual-probe.log
+
+完整原始输出：artifacts/test-logs/09A-manual-curl.log（初版）、
+             artifacts/test-logs/09Afix-manual-curl.log（第一轮）、
+             artifacts/test-logs/09Afix2-manual-curl.log（第二轮，含编码路径）
+服务启动控制台：artifacts/test-logs/09Afix2-server-console.log
+
+四、手工验收：ws 升级 Origin（node + ws）
+用临时脚本 %TEMP%\09A-ws-origin-check.mjs（createRequire 从 apps/server 解析 ws，
+不新增项目依赖）。核心逻辑：
+  - new WebSocket("ws://127.0.0.1:8000/ws?room=1232", { origin: "https://evil.example" })；
+  - 监听 unexpected-response，期望 statusCode=403、statusMessage=ORIGIN_NOT_ALLOWED；
+  - 再以 origin "http://127.0.0.1:8000" 连接，期望 open。
+实际输出：
+  https://evil.example -> UPGRADE_REJECTED status=403 message=ORIGIN_NOT_ALLOWED
+  http://127.0.0.1:8000 -> OPENED
+  RESULT evilRejected=true sameOriginOpen=true
+  退出码 0。日志：artifacts/test-logs/09A-manual-ws.log
+
+五、建房到开局步骤（人工复验用）
+1) 打开 http://localhost:8000/（同源页面）。
+2) POST /api/rooms（页面按钮）得到 4 位房间码；跨站页面调用会 403。
+3) 手机/第二浏览器打开同地址，输入房间码 + 昵称加入；
+   昵称含换行/NUL 会收到 INVALID_NICKNAME（服务端昵称校验）。
+4) 全员准备 → 房主开始；对局中连续超频点击会收到 RATE_LIMITED，
+   状态与 gameVersion 不变。
+5) 断线后用房间码 + 恢复码恢复；同一 IP 1 分钟内超过 10 次 resume
+   会收到 RATE_LIMITED（默认阈值）。
+
+六、真机记录与未验证项
+- 真机（手机浏览器）本轮未测：Origin 头行为、429/415/403 文案呈现、
+  手机弱网下的认证超时（4003）。均转 09D 真机矩阵。
+- 未手工触发 429 / ROOM_LIMIT(503) / WS 配额 503；自动化 18/19/24 已覆盖，
+  手工只覆盖 403/415/404/201/安全头；代理层（隧道）429/503 未验证。
+- 未在多进程或多实例部署下验证限流（当前为单进程内存态）。
+- trustProxy 多段 X-Forwarded-For 只取第一段有实现，未独立测试/未在真实代理后验证。
+- 本轮新增手工探针覆盖编码 API 路径 404、init 抛错归零、满房 join 限流、
+  缺 Sec-WebSocket-Key→400 且 60 次后配额归零（F13/M3 已修并实测）。
+
+七、清理
+- 停止服务：停止 `corepack pnpm -s start` 进程。
+- 删除验收房间：apps/server/data/rooms/1232、8737、7375（均已删）。

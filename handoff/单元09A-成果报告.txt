@@ -1,0 +1,288 @@
+单元 09A 成果报告（服务端加固与限流）
+================================================================
+日期：2026-11-07
+基线：HEAD 0f2838e（第三轮修复规格 F13-F15）；实现位于工作区，未 commit。
+规格：handoff/单元09A-服务加固与限流.txt、单元09A-复核修复.txt、
+     单元09A-复核修复2.txt、单元09A-复核修复3.txt
+结论：完成（自动化验证通过；独立复核与真机项未做，见"未完成/未验证"）。
+
+一、完成项
+1) 新增 apps/server/src/security.ts：
+   - SecurityLimits / DEFAULT_SECURITY_LIMITS（20 个字段，默认值与规格逐项一致）；
+   - loadSecurityLimits(env)：RICHMAN_MAX_CONNECTIONS / RICHMAN_MAX_CONNECTIONS_PER_IP /
+     RICHMAN_MAX_ROOMS 只接受正整数，非法值静默回退；RICHMAN_ALLOWED_ORIGINS 逗号分隔；
+     RICHMAN_TRUST_PROXY 只认 "1"；
+   - TokenBucket(capacity, refillPerMs, now)：每 key 满桶、毫秒线性回填、tryTake/prune/size；
+   - isAllowedOrigin(origin, host, extra)：缺失/空串放行、http(s) URL、
+     同 Host（含 :80/:443 默认端口兼容）、extra 白名单、其余拒绝；
+   - clientIp(req, limits)：trustProxy=false 用 socket.remoteAddress（去 ::ffff:、IPv6 小写）；
+     trustProxy=true 取 X-Forwarded-For 第一段；
+   - ConnectionGuard：总数 → 单 IP → 未认证；admit/markAuthenticated/
+     release(ip, authenticated)（按真实维度扣减、幂等、不跨维度）/stats；
+   - ECONOMIC_COMMANDS 9 条；
+   - SecurityRuntime + createSecurityRuntime(limits, now, overrides)：HTTP 与 WS 共用同一实例。
+2) 改 apps/server/src/http.ts：
+   - 所有 JSON 与静态响应统一经 withSecurityHeaders：nosniff / no-referrer /
+     X-Frame-Options DENY；
+   - POST /api/rooms 判定顺序：Origin 403 → Content-Type 415 → 建房桶 429 →
+     房间上限 503 → createRoomPersisted 201；
+   - 未知 /api/* 返回 404 JSON，不回退 index.html；
+   - ServerOptions.security / StartedServer.security 注入点；startServer 创建的同一 runtime
+     传给 HTTP 与 WS。
+3) 改 apps/server/src/ws.ts：
+   - upgrade 前 Origin 失败写 HTTP/1.1 403 ORIGIN_NOT_ALLOWED 并 destroy，不升级；
+   - guard.admit 失败写 503（TOO_MANY_CONNECTIONS / TOO_MANY_UNAUTHENTICATED），不升级；
+     admit 后的配额先挂 socket close 回收（缺 Sec-WebSocket-Key 的 400 也不会漏），
+     握手成功后移除监听、认领给 Connection；handleUpgrade 同步抛错时 catch 再释放；
+   - 未认证连接满 unauthTimeoutMs：先 sendError INVALID_MESSAGE "连接超时，请重新加入"，
+     再 close(4003, "AUTH_TIMEOUT")；独立 5s authClock（unref，close 时清理）；
+   - bind 成功 markAuthenticated；close 时 release(conn.ip, conn.authenticated) 一次
+     （conn.released 幂等）；
+   - 命令桶 key=房间码|playerId（10/s 突发 20）；经济命令桶 key=房间码|playerId|type
+     （5/s 突发 10）；超限 RATE_LIMITED "操作过于频繁，请稍后重试"，不执行、不改状态；
+   - 保留每连接 60 条/秒粗限流；
+   - join 按 IP、resume 按 IP + 按房间；超限 RATE_LIMITED "尝试过于频繁，请稍后重试"。
+4) 改 packages/shared/src/protocol.ts：
+   - NicknameSchema 拒绝 C0 控制字符（\u0000-\u001F）与 DEL（\u007F），
+     错误信息"昵称不能包含控制字符"；仍按 Unicode 码点 1～20。
+5) 新增 apps/server/tests/security-harness.ts 与 security.test.ts（48 条：规格 28 条必测 + 20 条补充）。
+
+二、改动文件
+修改：packages/shared/src/protocol.ts
+新增：apps/server/src/security.ts
+修改：apps/server/src/http.ts
+修改：apps/server/src/ws.ts
+新增：apps/server/tests/security-harness.ts
+新增：apps/server/tests/security.test.ts
+修改（复核修复 F3，仅补 content-type 请求头、断言未改）：
+      apps/server/tests/crash-recovery.test.ts、persistence.test.ts、
+      review06.test.ts、review06-crash.test.ts
+修改（复核修复 F4，server 支持注入 limits + recover_different_origin 显式白名单）：
+      apps/server/tests/session.test.ts
+新增：handoff/单元09A-成果报告.txt、运行与验收.txt、下一阶段交接.txt、注意事项.txt
+更新：handoff/项目当前状态.txt
+未改：packages/game-core/**、apps/web/**、packages/shared/src/rules.ts、
+      协议消息形状、PROTOCOL_VERSION、存档 schema、依赖清单。
+（规格允许 rules.ts 加 SERVER_DEFAULTS.security，本轮选择不把阈值复制进 shared，
+  统一放 security.ts，避免双份默认值漂移。）
+
+三、验收命令与真实结果（2026-11-07 19:10，第三轮修复后）
+1) corepack pnpm -s test
+   64 文件 / 781 条全部通过（旧 731 条未删改/跳过/放宽 + security.test 50 条）。
+   TEST_EXIT=0；Duration 8.40s。
+   日志：artifacts/test-logs/09Afix3-test.log
+2) corepack pnpm -s typecheck
+   TSC_EXIT=0（无诊断输出）。
+   日志：artifacts/test-logs/09Afix3-typecheck.log
+3) corepack pnpm -s build
+   BUILD_EXIT=0；141 modules；index--JyM_5JG.css 18.07 kB、index-CrCvzBNf.js 425.13 kB；
+   built in 239ms。
+   日志：artifacts/test-logs/09Afix3-build.log
+4) 单独复跑 security.test.ts：50/50 passed，EXIT=0。
+   日志：artifacts/test-logs/09Afix3-security.log
+5) 真实服务/探针验收（0.0.0.0:8000 或 port=0 真实 server）：
+   编码 API 四路径 404 JSON；/health 200 + 三安全头；evil Origin 403；text/plain 415；
+   同源 JSON 201；init now 抛错 total=0；满房 10×ROOM_FULL+RATE_LIMITED；
+   缺 Sec-WebSocket-Key 的 upgrade → 400，配额归零；连续 60 次无效握手后仍为 0，
+   随后正常 WS join 成功。
+   命令与输出见 handoff/单元09A-运行与验收.txt；
+   日志：artifacts/test-logs/09Afix2-manual-curl.log、09Afix2-manual-wsprobe.log、
+         09Afix3-manual-probe.log。
+   验收建房产生的空房间 7375 已清理（此前 1232、8737 亦已清理）。
+
+四、规格 28 条必测覆盖（全部通过，security.test.ts 内编号 1-28）
+纯函数：
+1 TokenBucket 容量内连续取成功、超出失败            PASS
+2 回填后恢复并封顶                                   PASS
+3 不同 key 独立                                      PASS
+4 prune 后 size 下降且活跃 key 不受影响               PASS
+Origin：
+5 无 Origin 放行                                     PASS
+6 同 Host（含端口）放行                              PASS
+7 extra 白名单放行                                   PASS
+8 http://evil.example 拒绝                           PASS
+9 Host 缺失 + Origin 存在拒绝                        PASS
+10 非法 URL 拒绝                                     PASS
+ConnectionGuard：
+11 总数上限                                          PASS
+12 单 IP 上限                                        PASS
+13 未认证上限                                        PASS
+14 markAuthenticated 后未认证数下降                  PASS
+15 release 幂等且不为负                              PASS
+HTTP（真实 server.listen + fetch）：
+16 跨站 Origin 403                                   PASS
+17 非 JSON Content-Type 415（{"nickname":"x"}）      PASS
+18 超 createRoomBurst 连续建房 429                   PASS
+19 房间数达 maxRooms 503                             PASS
+20 /api/unknown 404 JSON 且不是 index.html           PASS
+21 /health 与静态响应三安全头                        PASS
+WS（真实 upgrade + ws 消息）：
+22 evil Origin 升级 403                              PASS
+23 同 Host Origin 能连上                             PASS
+24 连接数超 per-IP 上限被 503                         PASS
+25 命令突发超 commandBurst 收 RATE_LIMITED 且 version 不变 PASS
+26 经济命令第 11 条 BORROW_BANK 被限流               PASS
+27 同 IP 连续 join 超 joinBurst 后 RATE_LIMITED      PASS
+昵称：
+28 20 emoji 通过；21 码点 / "\n" / "\u0000" 拒绝    PASS
+
+结论：28 条必测无未覆盖项。
+
+五、规格 28 条之外额外补测（22 条，编号 29-50）
+29 未认证连接超时先 INVALID_MESSAGE 后 close 4003（注入 now + 手动 authClock）。
+30 resume 超过 resumeBurst 后 RATE_LIMITED，座位数不变。
+31 resume 按房间桶：trustProxy + 不同 X-Forwarded-For 的第二次 resume
+   仍被同房 30/min 桶拦截（证明房间维度独立于按 IP 桶）。
+32 loadSecurityLimits：合法覆盖、0/非数字回退默认、allowedOrigins 拆分、
+   trustProxy 只认 "1"（"true" 不生效）；NODE_ENV=test 时 allowedOrigins 必须为空（F4）。
+33 ConnectionGuard.release(ip, authenticated=false)：同 IP 有已认证连接时
+   不跨维度回退，unauthenticated 与 unauthPerIp 正确归零（F1）。
+34 集成：maxUnauthenticated=1，A 已认证、B 未认证关闭后 unauthenticated 归零，
+   C 的新连接不再 503；全部关闭后 total=0（F1）。
+35 命令桶 key 含房间码：A 房 p1 耗尽额度后，B 房 p1 的命令不被 RATE_LIMITED（F2）。
+36 HTTP text/plain + body "{}" → 415（F3 删除例外后的缺口回归）。
+37 显式 allowedOrigins:["https://different.example"] 时该 Origin 可建连（F4）。
+38 TokenBucket 惰性 prune：1024 个旧 key 在 11 分钟后被清、活跃 hot 保留（F8）。
+39 init 创建阶段抛错（注入 now 抛一次）后 guard.total=0，随后正常连接可加入（F7/M2）。
+40 满房 join 走 fullJoinBucket：前 10 次 ROOM_FULL、第 11 次 RATE_LIMITED（F9/S2）。
+41 被替换连接释放且只减一次：A 被 resume 替换后 total=1/unauth=0，关 B 后 total=0（F10/N2）。
+42 terminate 粗暴断开后 guard.total=0（F10/S3）。
+43 WS join 昵称含 \u0000 → INVALID_MESSAGE（S4）。
+44 HTTP 建房昵称含 \u0000 → 400 INVALID_NICKNAME（S4）。
+45 空 body 建房 → 201 JSON + 三安全头（S4）。
+46 403/415/404/静态四类响应都带三安全头（S4）。
+47 WS 与 startServer 共用同一 guard/runtime：total≥1，关闭后归零（S4）。
+48 编码 API 路径 /api%2Funknown、/api%2Frooms、/api%2funknown、/api 均 404 JSON，
+   不回退 index.html（F6/M1）；F11 允许拆分/追加，故总数为 48。
+49 缺 Sec-WebSocket-Key 的原始 TCP upgrade → 400；单次与连续 60 次后
+   guard.total/unauthenticated 均归零，随后正常 Peer join 成功（F13/M3）。
+50 心跳两次无 pong 后 terminate：guard.total=0，房间保留离线座位
+   online=false（F14，autoPong:false + 注入 heartbeatClock）。
+
+六、兼容取舍（第二轮修复后）
+1) 满房 join 使用独立 fullJoinBucket：
+   rooms.test 第 11 人 join 期望 ROOM_FULL；joinBurst=10 会先返回 RATE_LIMITED。
+   实现为房间已满时不消耗普通 joinBucket，而消耗 fullJoinBucket：前 joinBurst 次
+   仍由 sessions.join 返回 ROOM_FULL，之后 RATE_LIMITED。
+   代价：满房与正常 join 各自独立额度（最多 2×joinBurst 次/分钟回填粒度），
+   权限与状态不受影响；09C 可评估合并策略，但必须保留“第 11 人首次仍 ROOM_FULL”。
+2) Content-Type "{}" 旁路与 NODE_ENV=test Origin 白名单已在第一轮 F3/F4 删除，
+   本轮未恢复。
+
+七、未完成 / 未验证
+- 本轮已完成 09A 第三轮修复 F13-F15（M3 握手失败配额泄漏已修、F14 心跳路径补测、F15 文档）。
+- 第三轮修复后的 Qoder 再复核未做。
+- 真机/浏览器未验证：手机端 Origin 行为、429/403/415 文案展示由 09B/09D 处理。
+- 代理层 429/503 未验证；trustProxy 多段 X-Forwarded-For 只取第一段的实现
+  仍无独立断言（31 为单段）；异常顺序未穷举（Qoder N3/N5/N6）。
+- 未手工验证 429、503 ROOM_LIMIT、WS 503 配额（自动化用例 18/19/24 覆盖）。
+- 09B 一键启动/隧道/停止脚本、09C 备份恢复与安全补强、09D 真机矩阵均未开始。
+- 未 commit（按用户要求）。
+
+八、已知问题 / 风险
+1) 限流全部是单进程内存态，重启清零；多进程/多实例部署需外部存储（09C 记录）。
+2) TokenBucket 为惰性 prune：size 达到 1024 时才清 10 分钟未用的 key；
+   “瞬时 1025”是推演值，测试 38 只直接断言清理后的 size，未断言 1025。
+   活跃 key 若长期超过 1024，Map 仍可增长（Qoder N4），09C 可评估周期兜底。
+3) 未认证超时扫描粒度 5s，实际关闭时间在 60-65s 之间。
+4) Origin 只防浏览器跨站，不是身份认证；无 Origin 的非浏览器客户端仍放行。
+5) trustProxy 默认关闭；若在公网直连上开启，客户端可伪造 X-Forwarded-For 绕过
+   按 IP 限流，只能部署在可信反向代理后开启。
+6) 满房 join 与普通 join 使用两个桶，额度独立；满房专用桶同样受 joinBurst/
+   joinPerMinute 限制，不会无限刷。
+7) ConnectionGuard.release 必须传真实 authenticated；漏传或传错会让
+   unauthenticated 计数漂移，最终导致整 IP 新连接 503。
+8) API 命名空间只接受原样路径：任何解码后改变路径的编码形式（如 %2F）一律 404；
+   非 API 的编码静态路径仍走 SPA 回退（与规格一致）。
+9) 握手阶段的配额已由 socket close 回收（F13）；不要再退回“只在 handleUpgrade
+   抛错时释放”的写法，否则缺 Sec-WebSocket-Key 的 400 会永久泄漏（M3）。
+
+九、被验证的提交号
+基线 0f2838e（第三轮修复规格）+ 工作区未提交实现；本轮无新提交（未 commit）。
+工作区改动（09A 初版 + 复核修复）：
+  M apps/server/src/http.ts
+  M apps/server/src/ws.ts
+  M packages/shared/src/protocol.ts
+  ?? apps/server/src/security.ts
+  ?? apps/server/tests/security-harness.ts
+  ?? apps/server/tests/security.test.ts
+  M apps/server/tests/session.test.ts（F4：server(limits) + 显式白名单）
+  M apps/server/tests/crash-recovery.test.ts（F3：仅补 content-type 头）
+  M apps/server/tests/persistence.test.ts（F3：仅补 content-type 头）
+  M apps/server/tests/review06.test.ts（F3：仅补 content-type 头）
+  M apps/server/tests/review06-crash.test.ts（F3：仅补 content-type 头）
+  M handoff/单元09A-成果报告.txt、运行与验收.txt、下一阶段交接.txt、注意事项.txt
+  M handoff/项目当前状态.txt
+
+十、复核修复落点（F1-F15）
+F1 ConnectionGuard 认证归属错误：
+- security.ts:release(ip, authenticated) 只按维度扣减；auth 维度为 0 时不回退到
+  unauth，unauth 维度为 0 时也不动 unauthenticated，杜绝跨维度污染。
+- ws.ts 三处调用：disconnected → release(conn.ip, conn.authenticated)；
+  init 监听注册抛错 → 按 conn 是否为 null 恰好释放一次并 delete/terminate；
+  onUpgrade → socket close 时 releaseIfUnclaimed（握手失败也回收）；握手成功回调
+  里置 released=true 并移除 close 监听，配额归属转交 Connection；403/503 不释放。
+- 测试：既有 15 改传参；新增 33（单元）、34（集成，含 500ms 轮询）。
+F2 命令桶跨房间互限流：
+- ws.ts 命令 key = identity.roomCode + "|" + identity.playerId；
+  经济桶 = 该 key + "|" + type。
+- 测试：新增 35（两房 p1 隔离）。
+F3 Content-Type "{}" 旁路：
+- http.ts 删除 legacyEmptyObject；非空 body 必须 application/json，空 body 仍按 {}。
+- 旧测试只补 headers:{'content-type':'application/json'}，断言未改：
+  crash-recovery.test.ts:31、persistence.test.ts:135/222、
+  review06-crash.test.ts:14/29/52、review06.test.ts:61/71/79。
+- 测试：新增 36（text/plain + "{}" → 415）；手工 curl 同项 PASS（09Afix-manual-curl.log）。
+F4 NODE_ENV=test Origin shim：
+- security.ts loadSecurityLimits 不再读 NODE_ENV，allowedOrigins 仅来自
+  RICHMAN_ALLOWED_ORIGINS。
+- session.test.ts server(limits?: Partial<SecurityLimits>) 注入
+  {...DEFAULT_SECURITY_LIMITS, ...limits}；recover_different_origin 显式传
+  allowedOrigins:["https://different.example"]，断言未改。
+- 测试 32 追加 NODE_ENV=test → allowedOrigins===[]；新增 37（白名单 origin 建连）。
+F5 文档：
+- 四份 09A 交接已按第一轮修复事实改写。
+
+第二轮（Qoder 复核 M1/M2/S1-S4）：
+F6 路由 decodedPath：
+- http.ts 的 /health、POST/GET /api/rooms、/api 前缀全部改用 decodedPath；
+  新增 decodedPath==="/api" 404；API 命名空间要求 url.pathname===decodedPath，
+  编码路径（%2F 等）一律 JSON 404，不回退 index.html。
+- 测试 48；手工 curl /api%2Funknown、/api%2Frooms、/api%2funknown、/api 全 404。
+F7 init 创建阶段释放：
+- ws.ts init 用 let conn: Connection | null = null，Connection 创建、connections.set、
+  四个 ws.on 全部进 try；catch：conn 非 null 按 conn.authenticated 释放一次并
+  delete，conn 为 null 则 release(ip, false)；terminate 后重抛。
+- onUpgrade 的 initialized 语义不变（callback 已执行时由 init 负责）。
+- 测试 39；探针 init now 抛错后 stats={total:0}。
+F8 TokenBucket 惰性 prune：
+- security.ts 增加 PRUNE_AT_SIZE=1024、PRUNE_IDLE_MS=10 分钟；tryTake 开头
+  size>=1024 时 prune(10 分钟)，保留 prune/size 公开方法。
+- 测试 38（1024 旧 key 清空、活跃 hot 保留）。
+F9 满房 join 限流：
+- SecurityRuntime/SecurityOverrides 增加 fullJoinBucket（joinBurst 容量、
+  joinPerMinute 回填）；ws join 按 roomFull 选择 fullJoinBucket。
+- 测试 40（前 10 次 ROOM_FULL、第 11 次 RATE_LIMITED）；rooms.test 第 11 人仍 ROOM_FULL。
+F10 release 主要路径（非“全路径”表述）：
+- 已覆盖：41 替换（REPLACED 后 total=1/unauth=0，关 B 归零）、42 手动 terminate、
+  22 升级前 403 total=0、39 init 抛错；F13 补 49 握手失败、F14 补 50 心跳超时。
+- 未直接 spy release 调用次数（Qoder N1），由统计断言抓双释放/漏释放。
+F11 端到端补测：
+- 43 WS 昵称 \u0000、44 HTTP 昵称 \u0000、45 空 body 201、46 四类响应安全头、
+  47 共用 runtime；另按 F6 增加 48 编码 API 路径。总数 48（37 + 11）。
+F12 文档：
+- 四份交接与项目当前状态已按第二轮事实改写；删除“prune 暂不构成泄漏”的无依据结论。
+
+第三轮（Qoder 修复验证 S1/S2 + Lead 实测 M3）：
+M3 握手失败配额泄漏：
+- 现象：缺 Sec-WebSocket-Key 时 ws 的 abortHandshake 直接 400+destroy，
+  既不抛错也不回调，原 catch 永不执行；guard.total 永久泄漏，20 次即可打满单 IP。
+- 修复 F13：admit 成功后把配额挂到 socket.once("close") 回收；handleUpgrade
+  成功回调里置 released=true 并移除 close 监听（认领给 Connection）；catch 仍
+  调用 releaseIfUnclaimed；403/503 不新增释放。
+- 测试 49：缺 Key → 400，单次与连续 60 次后 guard 归零，随后正常 join 成功；
+  手工探针同样 PASS（09Afix3-manual-probe.log）。
+F14 心跳超时 release 证据：
+- security-harness Peer.open 增加第 4 个可选 ws 选项参数（纯增量，旧调用不变）。
+- 测试 50：autoPong:false + 注入 heartbeatClock，两次 ping 后第三次 tick
+  terminate；waitFor total=0，房间保留离线座位 online=false。

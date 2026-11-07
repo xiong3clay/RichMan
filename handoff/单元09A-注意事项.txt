@@ -1,0 +1,129 @@
+单元 09A 注意事项（服务端加固与限流）
+================================================================
+日期：2026-11-07
+
+1. 阈值表（DEFAULT_SECURITY_LIMITS，改一个就必须同步测试与交接）
+   maxConnectionsTotal 200；maxConnectionsPerIp 20；maxUnauthenticated 60；
+   maxRooms 50；unauthTimeoutMs 60_000；wsMessagesPerSecond 60；
+   commandBurst 20 / commandPerSecond 10；economicBurst 10 / economicPerSecond 5；
+   createRoomBurst 10 / createRoomPerMinute 10；
+   joinBurst 10 / joinPerMinute 20；
+   resumeBurst 5 / resumePerMinute 10；resumePerRoomPerMinute 30；
+   allowedOrigins []；trustProxy false。
+   冻结数值（初始金币等）本轮未触碰。
+
+2. 限流是单进程内存态
+   - TokenBucket / ConnectionGuard 都在 Node 进程内存；重启清零，
+     多进程/多实例部署时每个实例各算各的。
+   - 若未来水平扩展，必须换共享存储或粘性会话，否则限额等于实例数×阈值。
+   - TokenBucket 已做惰性 prune：tryTake 开头若 size>=1024，调用
+     prune(10 分钟)；保留 prune(idleMs)/size() 供维护与测试。
+     测试 38 直接断言清理后 size；"瞬时 1025"是推演值，未直接断言。
+   - ConnectionGuard 的 perIp/unauthPerIp/authenticatedPerIp 仍无周期清理，
+     但 key 数受历史来源 IP 数约束；多实例/超大规模需 09C 评估。
+
+3. 来源 IP 与 trustProxy
+   - 默认 trustProxy=false，用 socket.remoteAddress；去 ::ffff: 前缀、IPv6 小写。
+   - 只有 RICHMAN_TRUST_PROXY=1 才读 X-Forwarded-For 第一段。
+   - 公网直连时绝不能开启：客户端可伪造 XFF 绕过按 IP 限流；只允许在
+     可信反向代理（隧道）且代理覆盖该头时开启。
+   - 校园网客户端隔离场景仍以隧道为主；隧道域名每次重启会变，需要同步
+     RICHMAN_ALLOWED_ORIGINS。
+
+4. Origin 只是防跨站，不是认证
+   - 无 Origin / 空 Origin 放行（非浏览器客户端、旧测试、smoke 脚本）。
+   - 同 Host 或 extra 白名单才放行；Host 缺失 + Origin 存在 => 拒绝。
+   - Origin 通过不代表身份合法；身份仍由 token/恢复码 + epoch 校验。
+
+5. 两条兼容 shim（复核修复 F3/F4 已移除，不得恢复）
+   a) Content-Type "{}" 旁路：已删除。
+      - 现在非空 body 必须 content-type 以 application/json 开头，否则 415；
+        空 body 仍按 {} 处理。
+      - 旧测试只补了 headers:{'content-type':'application/json'}，
+        断言正文未改：crash-recovery.test.ts:31、persistence.test.ts:135/222、
+        review06-crash.test.ts:14/29/52、review06.test.ts:61/71/79。
+      - 测试 36 与手工 curl 均验证 text/plain + "{}" → 415。
+   b) NODE_ENV=test Origin 白名单：已删除。
+      - loadSecurityLimits 完全不读 NODE_ENV；allowedOrigins 只来自
+        RICHMAN_ALLOWED_ORIGINS。
+      - session.test 的 server(limits?: Partial<SecurityLimits>) 显式注入
+        {...DEFAULT_SECURITY_LIMITS, ...limits}；
+        recover_different_origin 传 allowedOrigins:["https://different.example"]，
+        断言未改。
+      - 测试 32 断言 NODE_ENV=test 时 allowedOrigins 为空；测试 37 验证显式白名单可建连。
+
+6. 满房 join 使用独立 fullJoinBucket（契约取舍）
+   - rooms.test 第 11 人 join 期望 ROOM_FULL；必须保留首次满房请求返回 ROOM_FULL。
+   - 现状：房间已满时不消耗 joinBucket，而消耗 fullJoinBucket（容量 joinBurst、
+     回填 joinPerMinute）；前 joinBurst 次仍由 sessions.join 返回 ROOM_FULL，
+     超出后 RATE_LIMITED（测试 40 与手工探针 10×ROOM_FULL + RATE_LIMITED）。
+   - 代价：普通 join 与满房 join 各自独立额度（最坏约 2×joinBurst 次突发）；
+     只影响请求压力，不改变权限与状态。09C 可评估合并策略，但必须保留旧契约。
+
+7. 认证超时
+   - 独立 authClock（默认 5s，unref，close 时 clear），不复用 10s 心跳时钟；
+     旧测试断言心跳 ms=10000，禁止把 authScan 合进心跳。
+   - 未认证超过 60s：先发 error(INVALID_MESSAGE,"连接超时，请重新加入")，
+     再 close(4003,"AUTH_TIMEOUT")。
+   - 扫描粒度 5s，实际关闭在 60-65s；测试 29 用注入 now/authClock 精确验证。
+   - 已认证连接不受该超时影响；心跳仍按 10s/2 次丢包断开。
+
+8. 命令限流
+   - 发生在 processor 之前；超限 sendError(RATE_LIMITED,"操作过于频繁，请稍后重试")
+     并 return，不执行命令、不改状态、不 bump version。
+   - 全局桶 key=房间码|playerId（同一房间同一玩家多连接共享额度，跨房间隔离）；
+     经济桶 key=房间码|playerId|type。
+   - ECONOMIC_COMMANDS 九条：BORROW_BANK、REPAY_BANK、REQUEST_PRIVATE_LOAN、
+     ACCEPT_PRIVATE_LOAN、REFUSE_PRIVATE_LOAN、CANCEL_PRIVATE_LOAN、REPAY_PRIVATE、
+     COLLECT_PRIVATE、SUBMIT_BET；BANK_DUE_DECISION、RESCUE_GIVE_UP、END_ACTION
+     只受全局桶。
+   - 保留每连接 60 条/秒粗限流（wsMessagesPerSecond），不要删除。
+   - join/resume 桶在 transact 之前；失败重试也计数。
+
+9. 昵称
+   - 禁止 C0（\u0000-\u001F）与 DEL（\u007F）；错误文案固定
+     "昵称不能包含控制字符"；长度仍按 Unicode 码点 1～20（emoji 按 1 个）。
+   - 只影响新 join / POST /api/rooms 的 nickname 校验；历史存档不重新校验。
+
+10. 安全响应头与 API 路由
+   - nosniff / no-referrer / X-Frame-Options DENY 必须同时覆盖 JSON 与静态文件。
+   - 新增响应路径要走 sendJson 或 withSecurityHeaders，不要直接 res.writeHead。
+   - 路由判断必须用 decodedPath（/health、/api/rooms、/api 前缀）；API 命名空间
+     只接受 url.pathname===decodedPath 的原样路径。任何编码形式（%2F 等）一律
+     JSON 404，不得别名到合法 API 路由，也不得回退 index.html（测试 48）。
+   - decodedPath==="/api" 同样 JSON 404。
+
+11. 验收与日志
+   - 日志在 artifacts/test-logs/09A-*；不要复制 token、恢复码、原始消息。
+   - Windows 查看日志用 Get-Content / Select-Object，不要用 tail。
+   - 手工 curl 必须写 curl.exe（PowerShell 的 curl 是别名）。
+   - 验收建房会在 apps/server/data/rooms/<code> 落盘，验完应删除测试房间。
+
+12. 绝不重复的错误
+   - 不要把 token / recoveryCode / 原始消息写进日志或错误消息。
+   - 不要降低默认阈值或删除测试来“通过”验收；旧 731 条不得删改跳过。
+   - 不要用 Date.now 直接读时钟；TokenBucket/Guard/测试必须走注入的 now。
+   - 不要让服务监听 127.0.0.1；必须 0.0.0.0 并打印 LAN 地址。
+   - 不要把 Origin 当成认证，也不要因为加了限流就移除 token/epoch 校验。
+   - 不要在 HTTP 与 WS 各自 new 一套 guard/buckets；startServer 必须共享同一 runtime。
+   - 不要忘记 handleUpgrade 失败时 release guard 配额，否则连接计数泄漏。
+   - 不要再用单参数 guard.release(ip)；必须传 release(ip, conn.authenticated)，
+     且 onUpgrade 的同一次 admit 只能 release 一次（released 标志 + socket close 监听认领）。
+   - init 必须把 Connection 创建（含 createdAt/rateStart 的 now() 调用）包进 try；
+     conn===null 时 release(ip,false)，conn!==null 时按 conn.authenticated 释放一次，
+     否则 now 抛错会泄漏配额（Qoder M2，测试 39）。
+   - guard.admit 之后必须有唯一归属：握手失败由 socket.once("close") 回收，
+     握手成功回调里置 released 并移除 close 监听、转交 Connection 释放；
+     禁止双重 release。403/503 路径不得新增释放。
+     任何终止路径（含缺 Sec-WebSocket-Key 的 400）结束后 guard 必须归零（M3，测试 49）。
+   - 不要把命令/经济桶 key 退回纯 playerId：不同房间都有 p1，会互相限流。
+   - 不要恢复 Content-Type "{}" 旁路或 NODE_ENV=test Origin shim。
+   - 不要把 API 路由判断退回未解码的 url.pathname（Qoder M1，测试 48）。
+   - 不要把 TokenBucket 退回只增不减：保留 tryTake 的 size>=1024 惰性 prune。
+
+13. 剩余未验证项（不得当作已验证安全属性）
+   - 代理层（隧道）429/503 未验证；真机 Origin/错误文案/4003 转 09D。
+   - trustProxy 多段 X-Forwarded-For 只取第一段：未独立测试、未在真实代理后验证。
+   - 异常释放顺序未穷举（Qoder N6）；runtime 对象包裹未断言（N7）。
+   - 多进程/多实例限流未验证（当前单进程内存态）。
+   - 429/ROOM_LIMIT 503/WS 配额 503 只有自动化覆盖（18/19/24），未手工复测。

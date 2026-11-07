@@ -1,0 +1,272 @@
+============================================================
+RichMan 单元 09A 独立复核报告（服务加固与限流 + F1–F5）
+============================================================
+复核员：Qoder（独立复核，只读）
+复核时间：2026-11-07
+工作区：D:\Lianjunjie\biancheng\RichMan
+基线：实际 HEAD bf5820e（09A 复核修复规格提交）；09A 实现为工作区未提交改动
+复核方式：真实 test/typecheck/build；真实 server 的 HTTP/WS 路由探针；仓库外
+          server 副本做 F1–F4 变异探针；只读源码，未改源码、未 commit；
+          仅新增本报告。
+
+结论：需修复。
+  M1：编码的 /api 路径（/api%2Funknown、/api%2Frooms）返回 200 index.html，
+      绕过“未知 /api/* 必须 JSON 404，不得回退 index.html”。
+  M2：init() 在 `conn` 创建阶段抛错（注入 now() 抛错）时，onUpgrade 的
+      initialized=true 阻止 release，guard.total 泄漏为 1，违反 F1“init 抛错
+      恰好 release 一次”。
+  S1：TokenBucket.prune()/size() 全仓无运行时调用，桶只增不减；长期运行内存
+      会随唯一 IP/房间/玩家 key 增长，交接“暂不构成泄漏”的说法未验证。
+  S2：满房 join 跳过 joinBucket（ws.ts:267-274），可反复刷满房 join 而不消耗
+      join 配额；实际探针连续 3 次得到 ROOM_FULL 而非 RATE_LIMITED。
+  S3：F1 测试只覆盖 release 的 close/单元场景；升级失败、init 抛错、心跳
+      terminate、被替换四条路径没有 release/统计断言。
+  S4：HTTP/昵称的若干规格只有实现、缺少端到端断言（详见第八节）。
+
+------------------------------------------------------------
+一、真实命令与范围
+------------------------------------------------------------
+$ pnpm -s test
+  Test Files  64 passed (64)
+       Tests  768 passed (768)
+    Duration  7.33s
+TEST_EXIT=0
+
+$ corepack pnpm typecheck
+  $ tsc --noEmit -p tsconfig.json
+TSC_EXIT=0
+
+$ corepack pnpm -s build
+  ✓ 141 modules transformed.
+  apps/web/dist/index.html                   0.49 kB │ gzip:   0.31 kB
+  apps/web/dist/assets/index--JyM_5JG.css   18.07 kB │ gzip:   4.10 kB
+  apps/web/dist/assets/index-CrCvzBNf.js   425.13 kB │ gzip: 124.92 kB
+BUILD_EXIT=0
+
+说明：第一次直接 `pnpm -s build` 时本机 pnpm shim 出现 Permission denied；
+改用文档同样的 corepack pnpm 后 exit 0，以上为真实构建输出。首次错误是
+环境启动器权限问题，不是构建失败。
+
+范围：
+- 新增 apps/server/src/security.ts、security.test.ts、security-harness.ts；
+- 修改 apps/server/src/http.ts、ws.ts、packages/shared/src/protocol.ts；
+- 修改 5 个旧测试：crash-recovery、persistence、review06、review06-crash
+  （仅 content-type 头）与 session（显式 limits/白名单）；
+- 未改 packages/game-core、apps/web、依赖、PROTOCOL_VERSION。
+
+------------------------------------------------------------
+二、must-fix
+------------------------------------------------------------
+M1. 编码 /api 路径回退到 index.html（HTTP 404 规格失败）
+文件/行：
+- apps/server/src/http.ts:193-198（计算 decodedPath）
+- http.ts:207、:221、:225、:231（路由仍用 url.pathname）
+- http.ts:239（静态用 decodedPath）；http.ts:165-174（SPA fallback）
+现象：
+  /api/unknown       -> 404 application/json {"ok":false,"error":"NOT_FOUND"}
+  /api%2Funknown     -> 200 text/html <!doctype html>（index.html）
+  /api%2Frooms       -> 200 text/html（index.html）
+  /api%2funknown     -> 200 text/html
+原因是路由判断看未解码的 url.pathname：`/api%2F...` 不以 `/api/` 开头，
+落到 serveStatic(decodedPath)，而 decodedPath 没有扩展名时触发 SPA fallback。
+规格 09A-服务加固与限流.txt:99-100 要求未知 /api/* 返回 404 JSON 且不得
+回退 index.html；这是明确的 must-fix（不是只影响静态页面：它会把 API
+命名空间伪装成 SPA 200）。
+复现（本次实跑）：
+  node --import tsx - <<'NODE'
+  import { startServer } from './apps/server/src/http.ts';
+  const s = await startServer({ host: '127.0.0.1', port: 0 });
+  for (const p of ['/api/unknown','/api%2Funknown','/api%2Frooms']) {
+    const r = await fetch(`http://127.0.0.1:${s.port}${p}`);
+    console.log(p, r.status, r.headers.get('content-type'));
+  }
+  await s.close();
+  NODE
+建议修法：
+- 所有路由/前缀判断统一用 decodedPath（health、/api/rooms、/api/*），
+  `if (decodedPath.startsWith("/api/")) sendJson(404 NOT_FOUND)`；
+- 保留 decodedPath 给 serveStatic；增加编码路径测试（至少 /api%2Funknown）。
+
+M2. init 在 conn 创建阶段抛错时 guard 配额泄漏
+文件/行：
+- apps/server/src/ws.ts:419-425：Connection 对象的 `createdAt: now()`
+  在 `try` 之前；`try` 从 :425 才开始。
+- ws.ts:506-511：onUpgrade 在调用 init 前就 `initialized = true`；
+  因此 init 在 :425 前抛错时，外层 catch 看到 initialized=true 不再 release。
+- ws.ts:444-451 的 catch 只覆盖 try 内的监听注册。
+现象（独立探针，仓库外副本）：
+  用 `startSecurityServer({}, { now: () => { throw new Error("clock"); } })`
+  打开一个 /ws；连接失败后
+  `s.security.guard.stats()` 为 `{total:1, ...}`，预期是 total=0。
+这直接违反 F1“init 抛错也必须恰好释放一次”；同一个 IP 可因重复失败
+最终耗尽 maxConnections/未认证额度。
+建议修法：
+- 把 `const conn = {... createdAt: now() ...}` 也放进 try；或先在 try 外
+  不读 now（createdAt 在 try 内赋值），catch 中 release(false)、
+  connections.delete/destroy；
+- 或者 initialized 只在 init 成功返回后置 true，并确保 init 内部异常
+  不会双重 release；增加 `now` 抛错的回归测试。
+
+------------------------------------------------------------
+三、should-fix
+------------------------------------------------------------
+S1. TokenBucket 只增不减，prune/size 无运行时调用
+文件/行：
+- apps/server/src/security.ts:78-112（tryTake 创建 Map 项；prune/size）
+- security.ts:271-282（六个桶实例）
+- security.ts:103-112 的 prune 只被 security.test.ts:97 直接调用；
+  grep `prune(`/`.size()` 无 startServer/ws/http 运行时调用点。
+现象/风险：
+- createRoomBucket/joinBucket/resumeBucket 以 IP 为 key；
+  resumeRoomBucket 以房间码为 key；commandBucket/economicBucket 以
+  房间码|玩家|type 为 key。房间销毁、IP 变化后 key 永不删除；
+  唯一 IP/历史房间码/旧玩家组合会持续累积。
+- 交接注意事项:19 写“暂不构成泄漏；地图大小受活跃 key 数约束”，但代码没有
+  任何 prune 定时器，实际是“历史唯一 key 数”而非“活跃 key 数”；该结论未验证。
+建议：
+- 在 startServer/security runtime 加一个 unref 的周期 prune（如 5 分钟，
+  idle 10 分钟），close 时清理；或 tryTake 在 size 超阈值时惰性 prune；
+- 用注入 now 测 runtime 下旧 key 被清、活跃 key 不受影响；
+- 更新交接，不要写“暂不构成泄漏”除非有容量/增长数据。
+
+S2. 满房 join 跳过 joinBucket，存在限流绕过/刷接口风险
+文件/行：apps/server/src/ws.ts:267-274
+  - 先计算 roomFull；`if (!roomFull && !security.joinBucket.tryTake(conn.ip))`
+    才计 bucket；roomFull=true 时不消耗任何 join 额度，随后 transact/
+    sessions.join 返回 ROOM_FULL。
+复核探针（仓库外，joinBurst=1、joinPerMinute=0，房间先填满 10 人）：
+  对第三个新连接连续发送 3 次 join，收到
+  `["ROOM_FULL","ROOM_FULL","ROOM_FULL"]`，没有一次 RATE_LIMITED。
+影响：
+- join 限流可被用于反复刷满房请求；全局 per-connection 60/s、连接总/单 IP
+  上限仍在，因此不是权限/状态绕过，但会造成 CPU/房间队列压力；
+- rooms.test 第 11 人 ROOM_FULL 旧契约与此直接相关（rooms.test.ts:71）。
+建议：
+- 增加独立的 fullJoinBucket（或带保留 ROOM_FULL 的专用计数），满房请求
+  也消耗；首次/前 burst 仍返回 ROOM_FULL 以维持旧测试，超过后 RATE_LIMITED；
+- 或在满房分支仍 tryTake 一个专用的满房桶，不把结果提前返回；
+- 补满房连续 join 测试，断言最终 RATE_LIMITED；保留 rooms.test 契约。
+
+S3. F1 release 全路径测试不足
+文件/行：
+- ws.ts:404-412 close → release(conn.ip, conn.authenticated)
+- ws.ts:444-451 init catch → release(false)
+- ws.ts:458-461 heartbeat terminate → disconnected → release
+- ws.ts:243-248 replaced → close → release
+- ws.ts:506-511 onUpgrade catch → release(false)（initialized 保护）
+- security.test.ts:399-425 只有 33/34：release flag/close；没有
+  upgrade 失败、init 抛错（M2 的外部探针确实泄漏）、心跳 terminate、
+  被替换后的 stats 断言，也没有 markAuthenticated 只一次的集成断言。
+建议：
+- 增加四个集成/单元用例，分别断言 release 恰好一次且 stats.total 归零；
+- 33 已有 release 维度测试，34 已有 close/未认证场景，但不足以覆盖 F1
+  全部路径。
+
+S4. 规格 28 之外的覆盖缺口（实现存在，测试不足）
+- 昵称控制字符：security.test.ts:310-315 只测 NicknameSchema；没有
+  WebSocket join 路径和 HTTP POST /api/rooms 的端到端用例。代码路径：
+  packages/shared/src/protocol.ts:64-72（schema）、http.ts:128-131、
+  ws.ts 的 LobbyJoinSchema；建议各补一条。
+- 空 body 语义：http.ts:110-123 将空 body 当 {}；security.test 的 createRoom
+  helper 总发 "{}"，没有空 body 201 用例。
+- 安全响应头覆盖：security.test.ts:208-217 只断言 /health 与 /；
+  没有 403/415/404/静态资源/SPA 的 headers；sendJson/serveStatic 代码统一，
+  但规格 21 的“所有 JSON 与静态响应”没有端到端证据。
+- startServer 同一 runtime / createRequestHandler 独立：http.ts:186-192、
+  243-263 共用 guard/buckets，但没有测试直接断言 HTTP 建房桶与 WS guard
+  是同一状态；也没有 createRequestHandler 单用的测试。
+- 这些均为测试补强，不改变当前实现；至少 S4 的第一、二、三条建议补。
+
+------------------------------------------------------------
+四、nit
+------------------------------------------------------------
+N1. `GET /api`（无尾斜杠）仍会落到 SPA fallback（http.ts:231 只匹配 /api/）；
+    若把 /api 也视为 API 命名空间，应一并 404。当前规格写 /api/*，可留 nit。
+N2. F1 33/34 未覆盖 **markAuthenticated 只一次**的集成路径（测试 14 是纯
+    guard）；加一条“同连接 bind 不重复减未认证”的检查。
+N3. trustProxy 的多段 X-Forwarded-For 只取第一段有实现，测试 31 只覆盖单段；
+    交接已列为未独立验证。
+N4. 满房 join 的取舍和 prune 的“暂不构成泄漏”说法应写进交接的未验证/09C
+    待办，不能当作已验证安全属性。
+N5. 手动验收未覆盖 429/ROOM_LIMIT 503/WS 配额 503（交接已声明自动化覆盖）；
+    本次自动化通过，但真机/代理层未验证。
+N6. ConnectionGuard.release 在维度计数为 0 时仍会先减 total/perIp（按设计
+    不跨维度），但“total 与各维度是否始终自洽”只有 33/34 场景，没有
+    对重复 release/异常顺序的穷举测试。
+N7. `security.ts` 的 `SecurityOverrides` 可注入 guard/桶；startServer 和
+    createRequestHandler 各包一层 runtime 对象（字段共享），行为正确但
+    未断言对象/状态一致性；仅 nit。
+
+------------------------------------------------------------
+五、变异探针结果表（仓库外副本）
+------------------------------------------------------------
+副本：apps/server/{src,tests} + apps/web/dist（security test 21 需要静态页）；
+基线 37 条全绿。逐项改一处后跑 security.test.ts：
+| 变异 | 改动 | 预期/实际红测试 |
+|---|---|---|
+| F1 release 忽略 authenticated 参数 | `if (authenticated)` 改为按 authenticatedPerIp 猜测 | 33、34 红 |
+| F2 commandKey 去掉房间码 | `identity.playerId` | 35 红 |
+| F3 恢复 "{}" Content-Type 旁路 | `trimmed !== "{}"` | 36 红 |
+| F4 恢复 NODE_ENV=test origin shim | allowedOrigins 注入 different.example | 32 红 |
+F1 变异实际输出：33 release 按真实认证状态、34 同 IP 混合连接关闭 都失败；
+F2 变异：35 两个房间 p1 隔离失败；F3：36 text/plain "{}" 415 失败；
+F4：32 NODE_ENV=test allowedOrigins 为空 失败。
+结论：四组变异都没有“全绿自证”；但 F1 的 init 抛错路径不在仓库测试内，
+我用外部探针单独发现 total=1（M2），因此 F1 仍需补测试与修代码。
+
+------------------------------------------------------------
+六、规格 28 条覆盖表（security.test.ts）
+------------------------------------------------------------
+| # | 规格项 | 测试编号/证据 | 结果 |
+|---|---|---|---|
+| 1-4 | TokenBucket 容量/回填/独立/prune | 1,2,3,4 | PASS |
+| 5-10 | Origin 缺失/同 Host/extra/evil/host 缺失/非法 URL | 5-10 | PASS |
+| 11-15 | Guard 总数/单 IP/未认证/markAuth/release 幂等 | 11-15 | PASS |
+| 16-19 | HTTP Origin/Content-Type/建房桶/房间上限 | 16-19 | PASS |
+| 20 | 未知 /api/* JSON 404、不回退 index.html | 20 正常 /api/unknown PASS；/api%2Funknown FAIL | **FAIL（M1）** |
+| 21 | /health 与静态三安全头 | 21 仅 /health、/；代码 sendJson/serveStatic 统一，但未测 403/415/404/静态资产 | PASS（实现）/ 测试缺口 S4 |
+| 22-27 | WS evil/同源 Origin、per-IP 503、命令/经济/join 限流 | 22-27 | PASS |
+| 28 | 昵称 20 emoji、21/换行/NUL | 28 仅 NicknameSchema | PASS（schema）/ join+HTTP 集成缺口 S4 |
+
+额外 29-37：
+29 未认证 100ms 注入超时 error+4003 PASS；
+30 resume IP 限流 PASS；
+31 resume 房间桶 + trustProxy 单段 XFF PASS；
+32 loadSecurityLimits/NODE_ENV/trustProxy PASS；
+33 release(ip, authenticated) 维度 PASS；
+34 同 IP 认证+未认证 close 不泄漏 PASS（只覆盖 close）；
+35 命令桶房间隔离 PASS；
+36 text/plain "{}" 415 PASS；
+37 显式白名单 Origin 建连 PASS。
+
+------------------------------------------------------------
+七、回归与范围
+------------------------------------------------------------
+- 旧 731 条：git diff HEAD -- '*test*' 只含 5 个允许的旧测试文件
+  （crash-recovery/persistence/review06/review06-crash 仅 content-type 头；
+  session.test 只加 server(limits) 与显式白名单），断言正文未改；
+  security.test.ts 为新文件。旧 731 未删/跳过/放宽。
+- 总数 768 = 731 + security.test 37；实际 64 文件/768 全绿。
+- 依赖/范围：`git diff HEAD -- package.json pnpm-lock.yaml` 为空；无新增依赖；
+  packages/game-core、apps/web、net、steps.ts、协议消息形状未改；
+  packages/shared/src/protocol.ts 只新增 NicknameSchema refine（3 行）。
+- build：141 modules，CSS 18.07 kB、JS 425.13 kB，exit 0；dist 仅本地 assets。
+- 四份 09A 交接与项目当前状态写 64/768、阈值、F1–F5、已知边界；与实测一致。
+- 文档仍有两处需要修正/确认：注意事项:19 的 prune “暂不构成泄漏”无运行时
+  prune 依据（S1）；满房 join 取舍在 09C 待办（S2），不要当作已验证安全属性。
+
+------------------------------------------------------------
+八、最终结论
+------------------------------------------------------------
+需修复。
+1) M1 编码 /api 路径必须改为 decodedPath 路由并补测试；当前
+   /api%2Funknown、/api%2Frooms 返回 200 index.html，直接违反规格 20。
+2) M2 把 init 的 conn 创建包进 release 保护；当前 now() 抛错时
+   guard.total 泄漏为 1；补 init 抛错用例。
+3) S1 prune、S2 满房 join、S3 F1 全路径测试、S4 覆盖缺口按上面建议处理；
+   其中 S2 需要与 rooms.test 第 11 人 ROOM_FULL 旧契约一起设计。
+旧 731/768、F2/F3/F4、类型/构建/范围均 PASS；四组指定变异全部红，
+未出现自证。M1/M2 均已在真实 server/仓库外副本复现，不是读源码猜测。
+
+复核基线：实际 HEAD bf5820e；09A 实现为工作区未提交改动；本轮未改源码、
+未 commit；仅新增本报告，临时探针均在仓库外。
