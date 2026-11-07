@@ -1,4 +1,5 @@
-﻿param(
+﻿[CmdletBinding()]
+param(
     [string]$DataDir = '',
     [switch]$CheckOnly
 )
@@ -22,48 +23,82 @@ $targets = @(
 
 $stopped = @()
 $warnings = @()
+$hasUnresolved = $false
+$hasStopFailure = $false
 $serverPort = 0
 $serverStateExisted = $false
 $serverStopped = $false
 
 foreach ($target in $targets) {
-    $state = Read-RunState $target.path
-    if ($state -eq $null) { continue }
-    if ($target.kind -eq 'server') {
-        $serverStateExisted = $true
-        try { $serverPort = [int]$state.port } catch { $serverPort = 0 }
-    }
-    $process = Get-ProcessInfo $state $target.kind
-    if ($process -eq $null) {
-        $warnings += ('状态文件 ' + $target.path + ' 的 pid 不是存活的 ' + $target.kind + ' 进程，已清理状态（未按端口杀进程）。')
-        if (-not $CheckOnly) { Remove-RunState $target.path }
+    $statePath = $target.path
+    if (-not (Test-Path -LiteralPath $statePath)) { continue }
+    $state = Read-RunState $statePath
+    if ($state -eq $null) {
+        $warnings += ('状态文件存在但无法解析（可能损坏）：' + $statePath + '，未按端口杀进程，请人工检查。')
+        $hasUnresolved = $true
         continue
     }
+    $statePort = 0
+    try { $statePort = [int]$state.port } catch { $statePort = 0 }
+    if ($target.kind -eq 'server') {
+        $serverStateExisted = $true
+        $serverPort = $statePort
+    }
+
+    $runInfo = Get-RunStateProcess $state $target.kind
+    if ($runInfo.status -eq 'stale') {
+        $warnings += ('状态文件 ' + $statePath + ' 的进程已退出，已清理状态（未按端口杀进程）。')
+        if (-not $CheckOnly) { Remove-RunState $statePath }
+        continue
+    }
+    if ($runInfo.status -ne 'running') {
+        $warnings += ('状态文件 ' + $statePath + ' 与进程不匹配（' + $runInfo.reason + '），未杀进程，请人工确认后删除状态文件或手动停止。')
+        $hasUnresolved = $true
+        continue
+    }
+
     if ($CheckOnly) {
-        $stopped += [ordered]@{ kind = $target.kind; pid = $process.Id; running = $true }
+        $stopped += [ordered]@{ kind = $target.kind; pid = $runInfo.pid; port = $statePort; running = $true }
         continue
     }
     try {
-        Stop-Process -Id $process.Id -Force -ErrorAction Stop
-        $stopped += [ordered]@{ kind = $target.kind; pid = $process.Id; running = $false }
-        Write-Output ('已停止 ' + $target.kind + '（pid ' + [string]$process.Id + '）。')
-        Remove-RunState $target.path
+        Stop-Process -Id $runInfo.pid -Force -ErrorAction Stop
+        $stopped += [ordered]@{ kind = $target.kind; pid = $runInfo.pid; port = $statePort; running = $false }
+        Write-Output ('已停止 ' + $target.kind + '（pid ' + [string]$runInfo.pid + '）。')
+        Remove-RunState $statePath
         if ($target.kind -eq 'server') { $serverStopped = $true }
     } catch {
-        $warnings += ('停止 ' + $target.kind + '（pid ' + [string]$process.Id + '）失败：' + $_.Exception.Message)
+        $warnings += ('停止 ' + $target.kind + '（pid ' + [string]$runInfo.pid + '）失败：' + $_.Exception.Message)
+        $hasUnresolved = $true
+        $hasStopFailure = $true
     }
 }
 
 if ($CheckOnly) {
     $result = [ordered]@{
-        ok = $true
+        ok = (-not $hasUnresolved)
         checkOnly = $true
         dataDir = $dataPath
         planned = $stopped
         warnings = $warnings
     }
     Write-CheckJson $result
-    exit 0
+    if ($hasUnresolved) { exit 2 } else { exit 0 }
+}
+
+if ($hasUnresolved) {
+    foreach ($warning in $warnings) { Write-Output ('WARN：' + $warning) }
+    $reason = 'STATE_UNRESOLVED'
+    if ($hasStopFailure) { $reason = 'STOP_FAILED' }
+    $result = [ordered]@{
+        ok = $false
+        reason = $reason
+        stopped = $stopped
+        warnings = $warnings
+        dataDir = $dataPath
+    }
+    Write-CheckJson $result
+    exit 2
 }
 
 if ($stopped.Count -eq 0 -and $warnings.Count -eq 0) {
@@ -99,6 +134,7 @@ if ($portStillUsed) {
     exit 2
 }
 
+foreach ($warning in $warnings) { Write-Output ('WARN：' + $warning) }
 Write-Output '已全部停止。'
 $result = [ordered]@{
     ok = $true

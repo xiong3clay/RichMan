@@ -1,4 +1,5 @@
-﻿param(
+﻿[CmdletBinding()]
+param(
     [int]$Port = 8000,
     [string]$DataDir = '',
     [switch]$Build,
@@ -51,16 +52,16 @@ try {
 }
 
 $existing = Read-RunState $serverStatePath
-$existingProcess = $null
+$existingRun = Get-RunStateProcess $existing 'server'
+$existingProcess = $existingRun.process
 $alreadyRunning = $false
-if ($existing -ne $null) {
-    $existingProcess = Get-ProcessInfo $existing 'server'
-    if ($existingProcess -ne $null) {
-        $existingPort = 8000
-        try { $existingPort = [int]$existing.port } catch { $existingPort = 8000 }
-        $existingHealth = 'http://127.0.0.1:' + [string]$existingPort + '/health'
-        if (Wait-HttpHealth $existingHealth 3) { $alreadyRunning = $true }
-    }
+if ($existingRun.status -eq 'running') {
+    $existingPort = 8000
+    try { $existingPort = [int]$existing.port } catch { $existingPort = 8000 }
+    $existingHealth = 'http://127.0.0.1:' + [string]$existingPort + '/health'
+    if (Wait-HttpHealth $existingHealth 3) { $alreadyRunning = $true }
+} elseif ($existingRun.status -eq 'mismatch' -or $existingRun.status -eq 'unknown') {
+    Write-Output ('提示：server.json 与进程不匹配（' + $existingRun.reason + '），未停止进程、未删除状态。')
 }
 
 $reason = ''
@@ -138,29 +139,52 @@ $logErr = Join-Path $logDir ('server-' + $stamp + '-err.log')
 $env:PORT = [string]$Port
 $env:RICHMAN_DATA_DIR = $dataPath
 
-$process = Start-Process -FilePath 'node' `
-    -ArgumentList @('--import', 'tsx', '--no-warnings', 'apps/server/src/http.ts') `
-    -WorkingDirectory $root -WindowStyle Hidden `
-    -RedirectStandardOutput $logOut -RedirectStandardError $logErr -PassThru
+$process = $null
+$startedAtUtc = ''
+try {
+    $process = Start-Process -FilePath 'node' `
+        -ArgumentList @('--import', 'tsx', '--no-warnings', 'apps/server/src/http.ts') `
+        -WorkingDirectory $root -WindowStyle Hidden `
+        -RedirectStandardOutput $logOut -RedirectStandardError $logErr -PassThru
 
-if (-not (Wait-HttpHealth $healthUrl $TimeoutSec)) {
-    if (Get-Process -Id $process.Id -ErrorAction SilentlyContinue) {
-        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    try {
+        $procInfo = Get-Process -Id $process.Id -ErrorAction Stop
+        $startedAtUtc = $procInfo.StartTime.ToUniversalTime().ToString('o')
+    } catch {
+        $startedAtUtc = ''
     }
-    Write-Output ('服务启动失败（健康检查超时），进程已停止。日志：' + $logOut)
+    if ([string]::IsNullOrWhiteSpace($startedAtUtc)) {
+        throw '无法读取子进程启动时间'
+    }
+
+    if (-not (Wait-HttpHealth $healthUrl $TimeoutSec)) {
+        throw '健康检查超时'
+    }
+
+    $state = [ordered]@{
+        pid = $process.Id
+        startedAtUtc = $startedAtUtc
+        port = $Port
+        logOut = $logOut
+        logErr = $logErr
+    }
+    Write-RunState $serverStatePath $state
+} catch {
+    $message = $_.Exception.Message
+    if ($process -ne $null) {
+        $stoppedNow = Stop-LaunchedProcess -ProcessId $process.Id -StartedAtUtc $startedAtUtc -Kind 'server'
+        if (-not $stoppedNow) {
+            Write-Output ('WARN：无法确认进程 ' + [string]$process.Id + ' 归属，未杀进程，请人工检查。')
+        }
+    }
+    $tmpState = $serverStatePath + '.tmp'
+    if (Test-Path -LiteralPath $tmpState) { Remove-Item -LiteralPath $tmpState -Force -ErrorAction SilentlyContinue }
+    Write-Output ('服务启动失败（' + $message + '），已回收本次子进程（如可确认）。')
+    Write-Output ('日志：' + $logOut)
     Write-Output ('错误日志：' + $logErr)
     Get-Content -LiteralPath $logErr -Tail 20 -ErrorAction SilentlyContinue
     exit 1
 }
-
-$state = [ordered]@{
-    pid = $process.Id
-    startedAtUtc = [DateTime]::UtcNow.ToString('o')
-    port = $Port
-    logOut = $logOut
-    logErr = $logErr
-}
-Write-RunState $serverStatePath $state
 
 Write-Output ('服务已启动：http://127.0.0.1:' + [string]$Port + '/')
 foreach ($ip in (Get-LanAddresses)) {

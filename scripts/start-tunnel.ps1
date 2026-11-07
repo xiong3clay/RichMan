@@ -1,5 +1,7 @@
-﻿param(
+﻿[CmdletBinding()]
+param(
     [int]$Port = 8000,
+    [string]$DataDir = '',
     [string]$Cloudflared = '',
     [int]$TimeoutSec = 90,
     [switch]$CheckOnly
@@ -11,7 +13,7 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'richman-common.ps1')
 
-$dataPath = Resolve-DataDir ''
+$dataPath = Resolve-DataDir $DataDir
 $runDir = Join-Path $dataPath 'run'
 $logDir = Join-Path $dataPath 'logs'
 $tunnelStatePath = Join-Path $runDir 'tunnel.json'
@@ -21,15 +23,12 @@ $localOk = Wait-HttpHealth $healthUrl 5
 $cloudflaredPath = Get-CloudflaredPath $Cloudflared
 
 $existing = Read-RunState $tunnelStatePath
-$existingProcess = $null
+$existingRun = Get-RunStateProcess $existing 'tunnel'
 $existingUrl = ''
-if ($existing -ne $null) {
-    $existingProcess = Get-ProcessInfo $existing 'tunnel'
-    if ($existingProcess -ne $null) {
-        try { $existingUrl = [string]$existing.url } catch { $existingUrl = '' }
-    }
+if ($existingRun.status -eq 'running') {
+    try { $existingUrl = [string]$existing.url } catch { $existingUrl = '' }
 }
-$alreadyRunning = ($existingProcess -ne $null) -and (-not [string]::IsNullOrEmpty($existingUrl))
+$alreadyRunning = ($existingRun.status -eq 'running') -and (-not [string]::IsNullOrEmpty($existingUrl))
 
 if ($CheckOnly) {
     $allOk = $localOk -and ($cloudflaredPath -ne $null) -and (-not $alreadyRunning)
@@ -76,44 +75,65 @@ $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $logOut = Join-Path $logDir ('tunnel-' + $stamp + '.log')
 $logErr = Join-Path $logDir ('tunnel-' + $stamp + '-err.log')
 
-$process = Start-Process -FilePath $cloudflaredPath `
-    -ArgumentList @('tunnel', '--url', ('http://127.0.0.1:' + [string]$Port), '--no-autoupdate') `
-    -WindowStyle Hidden -RedirectStandardOutput $logOut -RedirectStandardError $logErr -PassThru
+$process = $null
+$startedAtUtc = ''
+try {
+    $process = Start-Process -FilePath $cloudflaredPath `
+        -ArgumentList @('tunnel', '--url', ('http://127.0.0.1:' + [string]$Port), '--no-autoupdate') `
+        -WindowStyle Hidden -RedirectStandardOutput $logOut -RedirectStandardError $logErr -PassThru
 
-$deadline = (Get-Date).AddSeconds($TimeoutSec)
-$url = ''
-while (((Get-Date) -lt $deadline) -and [string]::IsNullOrEmpty($url)) {
-    foreach ($file in @($logOut, $logErr)) {
-        if (-not (Test-Path -LiteralPath $file)) { continue }
-        $text = Get-Content -LiteralPath $file -Raw -ErrorAction SilentlyContinue
-        if ($text -eq $null) { continue }
-        $match = [regex]::Match($text, 'https://[a-z0-9-]+\.trycloudflare\.com')
-        if ($match.Success) {
-            $url = $match.Value
-            break
+    try {
+        $procInfo = Get-Process -Id $process.Id -ErrorAction Stop
+        $startedAtUtc = $procInfo.StartTime.ToUniversalTime().ToString('o')
+    } catch {
+        $startedAtUtc = ''
+    }
+    if ([string]::IsNullOrWhiteSpace($startedAtUtc)) {
+        throw '无法读取子进程启动时间'
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $url = ''
+    while (((Get-Date) -lt $deadline) -and [string]::IsNullOrEmpty($url)) {
+        foreach ($file in @($logOut, $logErr)) {
+            if (-not (Test-Path -LiteralPath $file)) { continue }
+            $text = Get-Content -LiteralPath $file -Raw -ErrorAction SilentlyContinue
+            if ($text -eq $null) { continue }
+            $match = [regex]::Match($text, 'https://[a-z0-9-]+\.trycloudflare\.com')
+            if ($match.Success) {
+                $url = $match.Value
+                break
+            }
+        }
+        if ([string]::IsNullOrEmpty($url)) { Start-Sleep -Milliseconds 500 }
+    }
+    if ([string]::IsNullOrEmpty($url)) {
+        throw ('未在 ' + [string]$TimeoutSec + ' 秒内拿到 trycloudflare URL')
+    }
+
+    $state = [ordered]@{
+        pid = $process.Id
+        startedAtUtc = $startedAtUtc
+        port = $Port
+        url = $url
+        log = $logOut
+    }
+    Write-RunState $tunnelStatePath $state
+} catch {
+    $message = $_.Exception.Message
+    if ($process -ne $null) {
+        $stoppedNow = Stop-LaunchedProcess -ProcessId $process.Id -StartedAtUtc $startedAtUtc -Kind 'tunnel'
+        if (-not $stoppedNow) {
+            Write-Output ('WARN：无法确认进程 ' + [string]$process.Id + ' 归属，未杀进程，请人工检查。')
         }
     }
-    if ([string]::IsNullOrEmpty($url)) { Start-Sleep -Milliseconds 500 }
-}
-
-if ([string]::IsNullOrEmpty($url)) {
-    if (Get-Process -Id $process.Id -ErrorAction SilentlyContinue) {
-        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-    }
-    Write-Output ('未在 ' + [string]$TimeoutSec + ' 秒内拿到 trycloudflare URL，已停止 cloudflared。')
+    $tmpState = $tunnelStatePath + '.tmp'
+    if (Test-Path -LiteralPath $tmpState) { Remove-Item -LiteralPath $tmpState -Force -ErrorAction SilentlyContinue }
+    Write-Output ('隧道启动失败（' + $message + '），已回收本次子进程（如可确认）。')
     Write-Output ('日志：' + $logOut + ' / ' + $logErr)
     Get-Content -LiteralPath $logErr -Tail 20 -ErrorAction SilentlyContinue
     exit 1
 }
-
-$state = [ordered]@{
-    pid = $process.Id
-    startedAtUtc = [DateTime]::UtcNow.ToString('o')
-    port = $Port
-    url = $url
-    log = $logOut
-}
-Write-RunState $tunnelStatePath $state
 
 Write-Output '================================================'
 Write-Output ('隧道已开启：' + $url)
