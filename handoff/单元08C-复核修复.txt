@@ -1,0 +1,100 @@
+RichMan 单元 08C 复核修复规格（唯一依据）
+================================================================
+基线：HEAD 8e7eaf7（08C 音频规格）+ 工作区未提交的 08C 实现。
+复核报告：handoff/复核-单元08C.txt（Qoder，334 行，结论「需修复」）。
+Lead 已逐条核实 M1/M2/M3 与 S1/S2/S3 成立（M2 实测 bgm 均值 -21.626、峰值 83、首尾 128）。
+本轮只修下面 9 项；不改引擎/服务端/协议/依赖；旧 703 条测试一条不得删改或放宽。
+
+【范围】
+只改：apps/web/src/App.tsx、apps/web/src/audio/audio.ts、apps/web/tests/audio.test.ts、
+      apps/web/scripts/make-audio.mjs、apps/web/public/audio/*.wav、
+      apps/web/src/audio/manifest.ts（hash/字节）、四份 08C 交接文档。
+不动：packages/**、apps/server/**、apps/web/src/net/**、steps.ts、AudioPanel.tsx 的 UI 结构
+（除非为 S3 测试需要导出纯函数）。
+
+一、M1 必须修：StrictMode 开发环境被 dispose，dev 永不发声
+位置：apps/web/src/App.tsx:185 "useEffect(() => () => audio.dispose(), [audio]);"
+      main.tsx:9 是 React.StrictMode；audio.ts:167-168 unlock 见 disposed 直接 return。
+现象（Qoder 已实测）：Vite dev 下 mount→cleanup→mount 后 controller 永久 disposed，
+首次 pointerdown 的 unlock() 直接 return，所有 Audio 都不创建；production build 正常。
+修法：不要用 React unmount cleanup 调 dispose。改为真实页面离开时释放：
+  useEffect(() => {
+    const onHide = () => audio.dispose();
+    window.addEventListener("pagehide", onHide);
+    return () => window.removeEventListener("pagehide", onHide);
+  }, [audio]);
+要求：不得在 StrictMode 的 cleanup 里 dispose；dev 下 pointerdown 后必须真的 new Audio + play BGM
+（可用 window.Audio 探针自查，或写一条渲染 App 后两次 effect 的测试证明未 disposed）。
+
+二、M2 必须修：bgm-loop.wav 直流偏移 -21.626
+位置：apps/web/scripts/make-audio.mjs:51-58 addNote、:71-96 renderBgm、:111-134 encodeWav。
+原因：主旋律 25% 占空比方波均值 = 2*0.25-1 = -0.5，乘 amplitude=45 得约 -22.5；
+低音 50% 与沙锤抵消不了。
+修法（推荐，保留 25% 音色）：在 addNote 内做逐样本直流补偿
+  const dc = 2 * duty - 1;
+  buffer[target] += (square(time, frequency, duty) - dc) * amplitude * envelope(index, lengthSamples);
+补偿会把正向峰值抬高 1.5 倍（45*1.5=67.5），叠加低音 30 与沙锤 10 = 107.5 会撞
+MAX_AMPLITUDE=100 的钳位。必须同时下调振幅让补偿后峰值仍 ≤100（例如 melody 30、
+bass 20、shaker 6，或等价组合），并在脚本里输出/自检实际峰值与均值。
+也可改用 50% 占空比或整轨去均值 + 两端重新淡入，但必须满足下面的硬指标。
+硬指标（脚本跑完用解码后的 8-bit 数据核）：
+  - |PCM 均值| ≤ 2.0（当前 -21.626）；
+  - 峰值偏差 ≤ 100（不得靠钳位硬切）；
+  - 首样本、末样本均在 128±3（循环接缝不跳）；
+  - 时长仍为 16.000s、字节仍为 352844；
+  - 连跑两次 sha256 完全一致；
+  - 5 个 sfx 的均值也 ≤2.0（当前已合格，不得改坏）。
+随后：更新 apps/web/src/audio/manifest.ts 的 AUDIO_SHA256.bgm / AUDIO_BYTES.bgm，
+同步四份交接里的 sha256 表；audio.test.ts 增加均值断言（所有 6 个文件）。
+
+三、M3 必须修：事件去重窗口 50 < 事件窗口 300，旧音效反复重播
+位置：apps/web/src/App.tsx:204-213（每次 events 变化都 derive 整个 300 条数组）+
+      apps/web/src/audio/audio.ts:257-271 takeNewSfx（recent 只保留 50 个 seq）。
+现象（Qoder 用仓库外探针复现）：第 52 批起，仍留在 300 条窗口里但已滑出 50 个 seq 的音效
+会被当成新事件重播；60 批累计重播 45 次。真实对局超过 50 个音效事件后 win/lose/alert 会乱响。
+修法（二选一，推荐 B）：
+ A. takeNewSfx 改为不按 50 截断，而是保留至少 300 个 seq 的 Set（覆盖 App 的事件窗口）；
+ B. App 维护 playedSfxSeqRef: Set<number>（或 lastSfxSeqRef），derive 仍传完整 300 条
+    （LOAN_REQUESTED→CLOSED 的 requestId 映射需要历史），只播放尚未见过的 seq；
+    events 清空/新局/房间销毁时清空该 Set（seq 会从 1 重新开始）。
+验收：新增回归测试——连续喂 60 批递增事件，同一 seq 只播一次；300 条窗口滚动后旧音效不重播；
+新局（events=[] 后再来 seq 1）能重新播。
+
+四、S1 should-fix：持久化 muted=true 时 unlock 仍播 BGM
+位置：audio.ts:167-183 unlock 里创建后无条件 safePlay(bgm)。
+修法：创建并设置 volume 后只在未静音时播放（if (!current.muted) safePlay(bgm);）；
+配合 setMuted(false) 仍能恢复播放。
+测试：muted=true → unlock → FakeAudio.playCalls=0；setMuted(false) → playCalls=1。
+
+五、S2 should-fix：SFX play() 被 reject 后 active 数组不清理
+位置：audio.ts:135-144 safePlay 只 markUnavailable；:233 active.push 后调用；
+reject 不会触发 onended，失败 Audio 留在 active 直到第 4 个或 dispose。
+修法：让 safePlay 返回是否启动成功（同步 throw 或 promise reject 都算 false），
+playSfx 在 false 时 removeEnded(audio) 并 markUnavailable；补 SFX reject 测试，
+断言 active 不再增长/后续 playSfx 返回 false。
+
+六、S3 测试缺口（与 M3 一起做）
+ 1) 真实两批时序：先收到 LOAN_REQUESTED(seq N)，45 秒后另一批收到 LOAN_REQUEST_CLOSED
+    REFUSED(seq M)，中间夹 300 条窗口滚动，仍能正确播 lose；
+ 2) GAME_OVER winnerId=null → 本人播 lose（引擎只在全员破产时给 null）；
+ 3) ROUND_SETTLED 保持 dormant：测试要明确写「引擎当前无此事件」，不得把
+    ROUND_STARTED 当结算，也不得删掉该分支；
+ 4) 若 App 难以直接渲染测试，可把「按 seq 去重 + 跨批映射」抽成纯函数再测，但
+    derive 仍必须接收完整事件数组。
+
+七、nit（顺手，不阻塞）
+ N1 均值断言并入 A2（见 M2）；
+ N4 补 createAudio 返回 null / 抛异常、SFX reject 的测试；
+ N6 takeNewSfx/去重的重复调用测试；
+ N7 AudioPanel 的 Esc 同时由 panel onKeyDown 与 window keydown 处理，可能双触发 onClose，
+    若改动小可收敛为一个；不改也无妨。
+
+八、交付与验收（Trae 自测后按此报告）
+ 1) node apps/web/scripts/make-audio.mjs 连跑两次：输出 sha256 相同；给出 6 个文件
+    均值/峰值/首尾/时长/字节；
+ 2) pnpm -s test：文件数与条数（应 ≥724+新增），旧 703 未动；
+ 3) pnpm typecheck 0；pnpm -s build 0（记录 CSS/JS 大小）；
+ 4) git diff --name-only HEAD 只应出现上面【范围】内的文件；
+ 5) 不 commit；更新四份 08C 交接（成果报告/运行与验收/注意事项/下一阶段交接）里的
+    测试数、sha256、M1/M2/M3/S1/S2/S3 的修复说明与已知 nit；
+ 6) 在成果报告里明确写：dev 下 pointerdown 后是否真的 new Audio+play（M1 证据）。
