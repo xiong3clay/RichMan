@@ -1,0 +1,107 @@
+单元 08C 音频（配乐 / 音效 / 音量）施工规格
+================================================================
+基线：HEAD 67c6e38，工作区干净，62 文件 / 703 条全绿。
+范围：只改 apps/web/**。可新增 apps/web/public/audio/**、apps/web/src/audio/**、
+apps/web/scripts/make-audio.mjs、apps/web/tests/audio*.test.ts；可改 App.tsx、
+GameView.tsx、LobbyView.tsx、styles.css。不改 packages/**、apps/server/**、
+apps/web/src/net/**、steps.ts 语义、协议；不新增依赖；不 commit。
+旧 703 条测试不得削弱、不得跳过、不得放宽。
+
+用户要求：轻松幽默的配乐；只用自制或明确授权素材，记录来源/许可证；加载失败不阻塞。
+
+一、自制音频素材（不引入任何第三方音频）
+1) 生成脚本 apps/web/scripts/make-audio.mjs：Node 24 内置 fs/path，零依赖，
+   可重复运行，输出到 apps/web/public/audio/。
+2) 合成规则（全部由脚本生成，无外部采样、无随机数）：
+   - 格式：WAV，PCM 8-bit unsigned，单声道，22050 Hz，标准 44 字节头。
+   - 方波（占空比 25% 或 50%），每音 5ms 起音、30ms 释放，峰值振幅 ≤100
+     （8-bit 中值 128），避免爆音；相邻音之间不留直流。
+   - 背景音乐 bgm-loop.wav：16.0 秒无缝循环，C 大调 I–V–vi–IV，120 BPM，
+     每和弦 4 拍；方波主旋律 + 低八度跳跃低音 + 每拍短噪声脉冲（模拟沙锤）；
+     末音 50ms 淡出，循环点电平接近 0，≤420 KB。
+   - 音效（每个 ≤40 KB）：
+     sfx-tap.wav    0.06s，880 Hz 单音（点按/下一步）
+     sfx-submit.wav 0.14s，660→880 Hz 两音（提交成功）
+     sfx-win.wav    0.60s，523/659/784/1047 Hz 上行琶音（赢钱/解除危险）
+     sfx-lose.wav   0.50s，784/659/523 Hz 下行（输钱/借款被拒）
+     sfx-alert.wav  0.45s，440/330 Hz 交替两轮（失信/破产/到期）
+   - 脚本必须打印每个文件的时长、字节数、sha256；重跑字节与 sha256 必须一致。
+3) handoff 记录素材来源声明：“全部由 apps/web/scripts/make-audio.mjs 合成，
+   无第三方采样；随项目仓库分发”，并列出 6 个文件 sha256。
+
+二、播放控制层（可测、失败不阻塞）
+1) apps/web/src/audio/manifest.ts：资源名 → URL；用 import.meta.env.BASE_URL
+   拼 audio/ 路径（build 后 dist/audio/ 可用）。
+2) apps/web/src/audio/audio.ts：
+   export type SfxName = "tap" | "submit" | "win" | "lose" | "alert";
+   export type AudioState = { muted: boolean; bgmVolume: number; sfxVolume: number };
+   export function createAudioController(options?: {
+     storage?: Pick<Storage, "getItem" | "setItem">;
+     createAudio?: (src: string) => HTMLAudioElement | null;
+     now?: () => number;
+   }): AudioController
+   行为要求：
+   - 默认状态 { muted:false, bgmVolume:0.5, sfxVolume:0.7 }，key = richman.audio.v1；
+     读取时校验类型与范围，JSON 损坏/越界回默认并覆盖写入；数值 clamp 0..1，
+     保留两位小数。
+   - unlock()：首次调用才创建并播放 BGM（loop=true，volume=bgmVolume）；
+     重复调用无副作用；autoplay 之前不创建 Audio、不调用 play()。
+   - setMuted(true)：BGM pause；setMuted(false)：若已 unlock 则 resume。
+   - setBgmVolume/setSfxVolume 实时作用并存盘。
+   - playSfx(name)：muted 或 sfxVolume=0 → 返回 false 且不创建 Audio；
+     同一 now() 毫秒内同名只播一次；同时最多 3 个音效（超出丢弃最旧）；
+     play() 返回的 Promise reject 必须 catch，任何构造/播放异常都不得抛出。
+   - 无 Audio 环境（createAudio 返回 null）或异常：置 unavailable=true，
+     不抛错、不影响任何游戏命令。
+   - dispose() 停止并释放 BGM。
+3) 事件→音效纯函数：
+   export function deriveSfxEvents(events: GameEvent[], ownPlayerId: string):
+     Array<{ seq: number; name: SfxName }>
+   - BET_SETTLED：本人净变化 >0 → win，<0 → lose，=0 不播；
+   - BANK_LOAN_DEFAULTED（本人）→ alert；
+   - LOAN_REQUEST_CLOSED 且本人是借款人、reason 为 REFUSED/EXPIRED → lose；
+   - DANGER_RESCUED（本人）→ win；
+   - ROUND_SETTLED → submit（轻提示）；
+   - GAME_OVER：本人仍存活 → win，否则 lose；
+   - 只按本人事件判定，他人输赢不响；调用方按 seq 去重（最近 50 个）。
+
+三、界面
+1) 顶栏/入口页/大厅/对局都加“声音”按钮（aria-label="声音设置"，粗指针 ≥44px），
+   点击打开 .audio-panel：总静音开关、背景音乐滑杆（0–100）、音效滑杆（0–100）、
+   关闭按钮；Esc 与遮罩点击关闭；面板不遮挡吸顶区时可用（fixed + z-index 高于
+   内容、低于教程/规则覆盖层 40）。
+2) 文案：面板底部“首次点击页面后开始播放”；unavailable 时
+   “当前设备无法播放声音，不影响游戏”，滑杆禁用。
+3) 首次用户手势（pointerdown/keydown once）→ controller.unlock()；不自动播放、
+   不请求权限、不联网。
+4) 样式：滑杆在 360px 不横向溢出；按钮命中区 ≥44px；颜色沿用现有主题。
+
+四、测试（apps/web/tests/audio.test.ts，≥14 条）
+A1 manifest 6 个资源都存在；读 WAV 头校验 22050Hz/8-bit/单声道/时长与大小上限；
+A2 现有音频文件 sha256 与 manifest 记录一致（清单写在 audio.ts 或 handoff 均可，
+   测试读文件计算）；
+B1 默认状态；持久化后恢复；损坏 JSON 回默认并覆盖；
+B2 clamp：-1→0、2→1、0.333→0.33；
+B3 unlock 前不创建 Audio；unlock 只创建一次并 play；重复 unlock 无副作用；
+B4 muted 时 playSfx 返回 false 且不创建 Audio；
+B5 play() reject → 不抛、unavailable=true；
+B6 同一毫秒同名只播一次；第 4 个同时音效丢弃最旧；
+C1 BET_SETTLED 本人赢/输/0 三态；他人事件不播；
+C2 BANK_LOAN_DEFAULTED 本人 → alert；非本人不播；
+C3 同 seq 只播一次（去重函数或调用方逻辑）；
+D1 顶栏按钮存在、面板三控件可见、Esc 关闭；
+D2 unavailable 文案与滑杆禁用；
+E1 旧 703 条仍全绿（不新增依赖，不改旧测试）。
+
+五、验收（真实命令，数字写进交接）
+node apps/web/scripts/make-audio.mjs   （重跑两次 sha256 一致）
+pnpm -s test                            （期望 ≥703+14 全绿）
+pnpm typecheck                          （0）
+pnpm -s build                           （0；记录 dist/audio/ 文件与总大小）
+不新增依赖；不改服务端/引擎/协议；不 commit。
+
+六、交接文档（四份）
+单元08C-成果报告.txt / 单元08C-运行与验收.txt / 单元08C-下一阶段交接.txt /
+单元08C-注意事项.txt：写素材生成方式与来源声明、sha256、音量与静音行为、
+自动播放策略（首次手势）、失败降级、真机验收清单（耳机/静音键/后台切换）、
+已知边界（8-bit 音质、无音乐切换、音量滑杆无键盘级进等）。
