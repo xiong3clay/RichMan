@@ -1,0 +1,78 @@
+单元 08B 注意事项（手机适配 + 复核修复）
+================================================================
+1. 绝不能新增普通 “.game-sticky { … }” 规则块
+   styles-05e.test.ts 的 lastBlock(".game-sticky") 取最后一个精确选择器块，
+   要求 position:sticky / top:0 / max-height:45vh / overflow-y:auto 四条逐字存在。
+   横屏覆盖必须写 .game-sticky.game-sticky { max-height:56vh; }；
+   普通块会让旧测试直接变红。.notice-shelf 若覆盖同理用 .notice-shelf.notice-shelf。
+
+2. 移动端金额输入 18px（F1）
+   .amount-input 原 18px，但 560px 的 .input 16px 后写会覆盖；
+   08B 末尾追加 .input.amount-input { font-size:18px }（0,2,0）解决。
+   真实 build 实测 390×844 为 18px；360×640 普通 .input 16px；
+   640×360 桌面 .input 15px。不要再写“18px 不动”而不提特异性覆盖。
+
+3. 安全区（F2）
+   .footer：10px max(18px, safe-right) calc(10px + safe-bottom) max(18px, safe-left)；
+   .rules-sheet：padding-top calc(18px + safe-top)；
+   .tutorial-overlay：四值 max(16px, safe-*)；
+   其后必须有 ≤560 块 .tutorial-overlay padding: var(--safe-top) ... 四值。
+   顺序不能反：窄屏块必须在基础覆盖之后，否则通栏被提前覆盖。
+   所有 env() 必须有 0px 兜底。
+
+4. 100dvh 兜底（F3）
+   .tutorial-panel、.rules-sheet、≤560 面板、横屏面板共 4 处：
+   先 max-height:100vh，再 max-height:100dvh。
+   iOS 15.0–15.3 不支持 dvh；缺兜底会让 max-height 整条失效。
+   T17 断言至少 4 对。
+
+5. 横屏口径（F4）
+   landscape 媒体块追加 .wizard { scroll-margin-top: calc(56vh + 8px) }。
+   640×360 下 Q3 题干/金额框可能不在首屏，需要页面滚动；
+   验收标准是“不被吸顶区完全遮住、按钮可见可点”，不要求题干与确认同屏。
+
+6. 触控与缩放
+   pointer:coarse 下 button/.link/.choice/.topbar-btn min-height:44px，
+   button/.link/.choice touch-action:manipulation，.link min-width:44px。
+   .banner .link 既有 44×44 不要改小。viewport 不得加 user-scalable=no /
+   maximum-scale=1。
+
+7. 窄屏与长金额
+   ≤400px 的 .question 18px 必须写在既有 560px 19px 之后。
+   .stat-value/.top-line/.game-meta/.settle-lines/.settle-line/.settle-balance/
+   .debt-row 统一 tabular-nums + overflow-wrap:anywhere；
+   .settle-row 是死选择器，已删除，不要加回。
+   禁止用 overflow-x:hidden 掩盖溢出。
+
+8. 软键盘与滚动
+   本轮没有新增 src 内的 scrollTo/scrollIntoView/visualViewport（T12 扫 src）。
+   软键盘交给浏览器：Chromium 用 interactive-widget=resizes-content，
+   iOS Safari 忽略该键。截图脚本 apps/web/scripts/mobile-shots.mjs 里的
+   scrollTo 只用于截图取景，不属于应用源码。
+
+9. 可复跑证据（F6）
+   node apps/web/scripts/mobile-shots.mjs（需先 pnpm build）：
+   - 自动在 8012 启动服务（若已有健康服务则复用）；
+   - 本机 Edge 无头 + CDP，真实房间复现 Q1/Q3；
+   - 生成 6 张同名截图 + apps/web/artifacts/mobile-metrics.txt；
+   - 6 个状态必须 scrollWidth<=clientWidth 才写 PASS，复现不了写 SKIP reason。
+   当前 6 状态全 PASS，另有 amount-input 18px / input 16px / desktop 15px 三条 PASS。
+
+10. 测试与 smoke
+   旧 684 条未删/跳过/放宽；08B 初版 14 条 + 复核新增 5 条（T15–T19），共 703 条 / 62 文件。
+   T13/T14 只是 smoke（字符串/白名单），权威证据：
+   git diff --name-only HEAD -- "*test*" → 空；
+   git diff --name-only HEAD -- package.json pnpm-lock.yaml → 空。
+   不要用 T13/T14 单独宣称“旧测试未改/无新依赖”。
+
+11. 截图边界
+   mobile-*.png 来自 build 后 dist + 8012 服务 + Edge 无头；Q1/Q3 是真实房间，
+   不是 Storybook/拼接图。PNG 尺寸已 System.Drawing 核对：
+   360×640、360×640、360×640、390×844、640×360、430×932。
+   无头 Edge 不是实体手机：env 真实数值、软键盘像素遮挡、iOS 地址栏行为未测。
+
+12. 兼容边界
+   iOS 15 以下 100dvh 退化为 100vh（body + 4 处面板均有兜底）。
+   interactive-widget 仅 Chromium 生效；iOS Safari 忽略。
+   200% 字体、8 位金额长局、真机安全区未测，列入运行与验收的真机清单。
+   未 commit。

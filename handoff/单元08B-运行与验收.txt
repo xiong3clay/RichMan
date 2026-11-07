@@ -1,0 +1,92 @@
+单元 08B 运行与验收说明（手机适配 + 复核修复）
+================================================================
+环境（本机实测）：
+- Node v24.18.0
+- pnpm 11.7.0
+- Windows PowerShell 5.1
+- Edge（本机）无头模式用于截图与 CDP 指标
+
+一、命令与真实结果
+pnpm install
+pnpm typecheck
+pnpm -s test
+pnpm -s build
+node apps/web/scripts/mobile-shots.mjs
+pnpm dev            # 可选：手动验收 0.0.0.0:8000
+
+实测：
+- pnpm typecheck：tsc --noEmit -p tsconfig.json，exit 0
+- pnpm -s test：62 文件 / 703 条全部通过，6.68s
+  （旧 684 + 08B 初版 14 + 复核新增 5）
+- pnpm -s build：138 modules，index-8_zW1uiN.css 16.51 kB（gzip 3.89 kB），
+  index-BH0A3_xm.js 417.72 kB（gzip 122.44 kB），558ms
+- node apps/web/scripts/mobile-shots.mjs：6 状态全 PASS + 3 条 font check PASS
+
+二、可复跑截图与 metrics
+脚本：apps/web/scripts/mobile-shots.mjs
+- 先执行 pnpm build；
+- 脚本自动在 8012 启动服务（若已有健康服务则复用），用本机 Edge 无头 + CDP；
+- 生成/覆盖 6 张同名截图；
+- Q1/Q3 用真实房间（两个 WS 玩家建房/加入/准备/开始，房主借 5,000 分银行
+  贷款并推进到第 2 轮，浏览器用 sessionToken 恢复）；
+- 无法复现的状态会写 SKIP reason，不写 PASS。
+
+metrics 文件：apps/web/artifacts/mobile-metrics.txt
+state=entry viewport=360x640 scrollWidth=360 clientWidth=360 PASS
+state=tutorial viewport=360x640 scrollWidth=360 clientWidth=360 PASS
+state=game-q1 viewport=360x640 scrollWidth=360 clientWidth=360 PASS
+state=game-q3 viewport=390x844 scrollWidth=390 clientWidth=390 PASS
+state=landscape viewport=640x360 scrollWidth=640 clientWidth=640 PASS
+state=rules viewport=430x932 scrollWidth=430 clientWidth=430 PASS
+check=amount-input-font value=18px viewport=390x844 PASS
+check=input-font-mobile value=16px viewport=360x640 PASS
+check=input-font-desktop value=15px viewport=640x360 PASS
+
+三、截图尺寸（System.Drawing 实测）
+- mobile-entry-360x640.png        360×640，21041 bytes
+- mobile-tutorial-360x640.png     360×640，31104 bytes
+- mobile-game-q1-360x640.png      360×640（字节随房间号/倒计时文案变化，以尺寸为准）
+- mobile-game-q3-390x844.png      390×844（同上）
+- mobile-landscape-640x360.png    640×360（同上）
+- mobile-rules-430x932.png        430×932，70761 bytes
+
+四、手动验收方式
+1. pnpm build && pnpm dev，浏览器访问 http://localhost:8000/。
+2. DevTools 设备模拟 360×640、390×844、430×932、640×360。
+3. 检查每个页面 documentElement.scrollWidth <= clientWidth。
+4. 首次进入教程（localStorage 无 richman.tutorial.seen.v1）；
+   入口页可手动开教程/规则；对局 self-actions 也有入口。
+5. Q3 金额步：先在前一轮借银行贷款或私人合同，下一轮行动到 Q3，
+   选“还银行贷款/催收”进入金额框；金额框 computed font-size 应为 18px。
+6. 规则页：单个可滚动面板；顶部标题不被 safe-top 压住（真机刘海下验证）。
+
+五、F1–F4 复核修复验收点
+- F1：390×844 下 .amount-input computed font-size = "18px"；
+  360×640 普通 .input = "16px"；640×360 桌面 .input = "15px"。
+- F2：.footer 有 safe-bottom/left/right；.rules-sheet 有 safe-top；
+  .tutorial-overlay 四值 safe-*；≤560 覆盖块在基础覆盖之后，窄屏仍通栏。
+- F3：4 处面板 max-height 都有 100vh 兜底，再跟 100dvh。
+- F4：横屏 .wizard scroll-margin-top: calc(56vh + 8px)；
+  横屏 Q3 题干/金额框可能需滚动，按钮可见可点即通过。
+
+六、真机验收清单（由用户执行，不计入自动化）
+1. iPhone Safari：
+   - 刘海与底部手势条不遮按钮；地址栏收起/展开不跳动；
+   - 金额输入框聚焦后键盘不遮输入框与“确认”按钮。
+2. Android Chrome：
+   - 软键盘弹出时吸顶区仍可见；返回键不误触退出。
+3. 竖屏 360、横屏 640×360：
+   - 无横向滚动；横屏下操作卡/按钮仍可点。
+4. 系统字体放大到 200%：
+   - 按钮文字不裁切、不溢出（含结算卡 .settle-line/.settle-balance）。
+5. 长局（金币 ≥ 8 位）：
+   - 金额不换行错位；tabular-nums + overflow-wrap 生效。
+
+七、已知边界
+- 无头 Edge 不是实体手机；env() 真实安全区、软键盘像素遮挡、
+  iOS 地址栏行为未测量。
+- iOS 15 以下 100dvh 不支持时退化为 100vh（body 与 4 处面板均有兜底）。
+- interactive-widget 仅 Chromium 生效；iOS Safari 忽略。
+- 横屏 640×360 下 Q3 题干/金额框可能需要滚动；按 F4 口径验收。
+- 200% 字体、8 位金额长局未做实体手机截图；已列入真机清单。
+- 未 commit。

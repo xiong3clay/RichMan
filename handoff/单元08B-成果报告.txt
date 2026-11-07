@@ -1,0 +1,103 @@
+单元 08B 成果报告（手机适配 + 复核修复）
+================================================================
+日期：2026-11-07
+状态：F1–F7 复核修复完成，自动化与可复跑 metrics 通过。
+基线：HEAD 7fe92f9（08B 规格提交）；08B 实现仍为工作区未提交改动。
+本轮结束：62 文件 / 703 条；未 commit。
+
+一、复核修复项
+F1（M1）移动端金额输入 18px：
+- styles.css 在 08B 段落末尾追加 .input.amount-input { font-size:18px }，
+  特异性 0,2,0 稳定胜过 560px 的 .input 16px；
+- 真实 build 实测 390×844 的 .amount-input computed font-size = "18px"；
+  360×640 普通 .input = "16px"，640×360 普通 .input = "15px"；
+- 交接已删除“18px 不动”的错误说法，改为“靠 .input.amount-input 特异性覆盖”。
+F2（M2）安全区补全：
+- .footer padding: 10px max(18px, safe-right) calc(10px + safe-bottom) max(18px, safe-left)；
+- .rules-sheet padding-top: calc(18px + safe-top)；
+- .tutorial-overlay padding: 四值 max(16px, safe-*)；
+- 其后追加 ≤560 的 .tutorial-overlay padding: var(--safe-top) ... 四值，
+  顺序在基础覆盖之后，窄屏仍通栏；无刘海时行为与旧版一致。
+F3（S1）100dvh 兜底：
+- .tutorial-panel、.rules-sheet、≤560 面板、横屏面板共四处，
+  每处 max-height:100dvh 前加 max-height:100vh（T17 断言≥4 对）。
+F4（S2）横屏口径：
+- landscape 媒体块追加 .wizard { scroll-margin-top: calc(56vh + 8px) }；
+- 验收口径：横屏 640×360 下 Q3 题干/金额框可能需要滚动，
+  “不被吸顶区完全遮住、按钮可点”为通过，不要求题干与确认同屏。
+F5（S3）测试补强：
+- mobile-08b.test.ts 追加 T15–T19，共 19 条；
+- T8 删掉死选择器 .settle-row，改用真实 .settle-lines/.settle-line/.settle-balance，
+  并断言 GameView.tsx 确实出现这些类名；
+- T13/T14 保留为 smoke；权威证据是 `git diff --name-only HEAD -- "*test*"` 为空。
+F6（S4）可复跑证据：
+- 新增 apps/web/scripts/mobile-shots.mjs（Node 内置 fetch/WebSocket + 本机 Edge + CDP，
+  无新依赖）；自动启动 8012 静态/WS 服务，真实房间复现 Q1/Q3/横屏；
+- 生成/覆盖 6 张同名截图，并写 apps/web/artifacts/mobile-metrics.txt；
+- 6 个状态全部 PASS，另附 3 条 computed font 检查 PASS。
+F7 文档校正：
+- 基线 7fe92f9；M1/M2/F3/F4/F5/F6、703 条、metrics 路径、T13/T14 smoke 均写入四份交接。
+
+二、改动文件
+- apps/web/index.html（08B 已改，未回退）
+- apps/web/src/styles.css
+- apps/web/tests/mobile-08b.test.ts（新增，19 条）
+- apps/web/scripts/mobile-shots.mjs（新增）
+- apps/web/artifacts/mobile-*.png（6 张，覆盖）
+- apps/web/artifacts/mobile-metrics.txt（新增）
+- handoff/单元08B-*.txt（四份）
+- handoff/项目当前状态.txt
+未改 packages/**、apps/server/**、apps/web/src/net/**、steps.ts 语义、协议、依赖。
+
+三、验收命令与真实结果
+pnpm -s test
+  Test Files  62 passed (62)
+       Tests  703 passed (703)
+    Duration  6.68s
+（旧 684 + 08B 初版 14 + 复核新增 5 = 703；旧测试未删/跳过/放宽）
+pnpm typecheck
+  $ tsc --noEmit -p tsconfig.json
+  typecheck exit: 0
+pnpm -s build
+  ✓ 138 modules transformed.
+  apps/web/dist/index.html                   0.49 kB │ gzip:   0.31 kB
+  apps/web/dist/assets/index-8_zW1uiN.css   16.51 kB │ gzip:   3.89 kB
+  apps/web/dist/assets/index-BH0A3_xm.js   417.72 kB │ gzip: 122.44 kB
+  ✓ built in 558ms
+
+四、可复跑 metrics（apps/web/artifacts/mobile-metrics.txt）
+state=entry viewport=360x640 scrollWidth=360 clientWidth=360 PASS
+state=tutorial viewport=360x640 scrollWidth=360 clientWidth=360 PASS
+state=game-q1 viewport=360x640 scrollWidth=360 clientWidth=360 PASS
+state=game-q3 viewport=390x844 scrollWidth=390 clientWidth=390 PASS
+state=landscape viewport=640x360 scrollWidth=640 clientWidth=640 PASS
+state=rules viewport=430x932 scrollWidth=430 clientWidth=430 PASS
+check=amount-input-font value=18px viewport=390x844 PASS
+check=input-font-mobile value=16px viewport=360x640 PASS
+check=input-font-desktop value=15px viewport=640x360 PASS
+
+五、截图（apps/web/artifacts/，System.Drawing 实测）
+- mobile-entry-360x640.png        360×640，21041 bytes
+- mobile-tutorial-360x640.png     360×640，31104 bytes
+- mobile-game-q1-360x640.png      360×640（字节随房间号/倒计时文案变化，以尺寸为准）
+- mobile-game-q3-390x844.png      390×844（同上）
+- mobile-landscape-640x360.png    640×360（同上）
+- mobile-rules-430x932.png        430×932，70761 bytes
+截图来自 pnpm build 后的 dist + 8012 服务 + Edge 无头 + CDP；
+Q1/Q3 用真实房间（两个 WS 玩家建房/加入/准备/开始，房主借银行到第 2 轮，
+浏览器用 sessionToken 恢复）。不是 Storybook/拼接图。
+
+六、权威回归证据
+git diff --name-only HEAD -- "*test*"        → 空（旧测试未改；新 mobile-08b 为未跟踪新文件）
+git diff --name-only HEAD -- package.json pnpm-lock.yaml → 空（无依赖变化）
+T13/T14 只是 smoke；真实执行旧 styles-05e/styles-tutorial 在 703 全绿中覆盖。
+
+七、已知边界
+- 无头 Edge 不是实体手机：刘海/圆角/底部手势条的真实 env() 数值、
+  软键盘像素级遮挡、iOS Safari 地址栏收起/展开未测量。
+- iOS 15 以下 100dvh 不支持时，面板有 100vh 兜底；body 也有双行。
+- interactive-widget 仅 Chromium 生效；iOS Safari 忽略。
+- 横屏 640×360 的 Q3 题干/金额框可能不在首屏，需页面滚动；
+  按钮可见可点，按 F4 口径通过。
+- 未用 overflow-x:hidden 掩盖新问题。
+- 未 commit。

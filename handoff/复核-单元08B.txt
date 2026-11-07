@@ -1,0 +1,378 @@
+============================================================
+RichMan 单元 08B 独立复核报告（手机适配）
+============================================================
+复核员：Qoder（独立复核，只读）
+复核时间：2026-11-07
+工作区：D:\Lianjunjie\biancheng\RichMan
+指定基线：HEAD 46e72f7
+实际基线：HEAD 7fe92f9（46e72f7 之后仅多出 08B 规格与状态文档提交；
+          08B 代码改动仍全部未提交；本报告以实际 HEAD + 工作区为复核对象）
+复核方式：真实 test/typecheck/build；源码逐行核对；仓库外临时副本做 CSS/HTML
+          变异探针；真实 build 产物装入 iframe 实测 computed style 与 scrollWidth；
+          只读，未改源码、未 commit；本轮只新增本报告。
+
+结论：需修复。
+  M1：移动端 .amount-input 实际被压成 16px，与 S4“18px 不动”相反，handoff
+      还宣称“18px 不动”；测试 T5 未覆盖。
+  M2：安全区只覆盖了 .app 与 .tutorial-head；fixed .footer、规则页顶部和横屏
+      覆盖层左右没有 safe-area，和“刘海/底部手势条不压文字与按钮”的目标冲突；
+      S2/S9 本身没有覆盖这些 fixed 元素，需要补规格或补实现。
+  S1：三处 100dvh 面板限高没有 100vh 兜底；iOS 15.0–15.3 上教程/规则面板
+      可能失去 max-height。
+  S2：640×360 横屏 Q3 的题干/金额输入不在首屏，只能滚动查看；按“不完全遮住”
+      字面算过，按“关键操作可用”口径不达标，规格/实现需要二选一。
+  S3：T5 未覆盖 .amount-input，T8 的 .settle-row 是死选择器，T13/T14 属于
+      测试文件/依赖表自证；测试有效性需要加强。
+  S4：6 张截图尺寸正确，build 资源名也对得上；但 Q1/Q3/横屏没有可复跑
+      scrollWidth 证据，PNG 本身不能证明“无横向滚动”或“来自 dist”。
+
+------------------------------------------------------------
+一、实跑结果（真实输出）
+------------------------------------------------------------
+$ pnpm -s test
+  Test Files  62 passed (62)
+       Tests  698 passed (698)
+    Start at  01:13:18
+    Duration  8.94s (import 39%, tests 38%, transform 22%, worker 1%)
+TEST_EXIT=0
+
+$ pnpm typecheck
+$ tsc --noEmit -p tsconfig.json
+TSC_EXIT=0
+
+$ pnpm -s build
+vite v8.3.5 building client environment for production...
+✓ 138 modules transformed.
+apps/web/dist/index.html                   0.49 kB │ gzip:   0.31 kB
+apps/web/dist/assets/index-BFhtr8O-.css   15.98 kB │ gzip:   3.80 kB
+apps/web/dist/assets/index-CUkxwTvb.js   417.72 kB │ gzip: 122.44 kB
+✓ built in 207ms
+BUILD_EXIT=0
+
+与 handoff 核对：
+- 62 文件 / 698 条、138 modules、CSS 15.98 kB、JS 417.72 kB、
+  两个产物名 index-BFhtr8O-.css / index-CUkxwTvb.js 均一致。
+- 报告写的 6.57s / 323ms 是另一次运行；本次 8.94s / 207ms，不影响结果。
+- 实际 HEAD 是 7fe92f9，不是指定 46e72f7；`git diff 46e72f7..HEAD` 只含
+  08B 规格与项目状态，08B 实现仍是工作区未提交改动。
+
+------------------------------------------------------------
+二、S1–S9 与 index.html 逐条核对
+------------------------------------------------------------
+S1 通过。
+- apps/web/src/styles.css:1-5 四个 --safe-* 全部是
+  env(safe-area-inset-*, 0px)。
+- T3（mobile-08b.test.ts:74-87）通过；变异删掉四个变量后只有 T3 变红，
+  其余文本型测试仍绿，说明 T3 确实是变量存在性守卫。
+
+S2 部分通过（fixed footer 未覆盖，见 M2）。
+- styles.css:28-32 `.app` 四值简写映射正确：
+  padding: 24px max(16px, right) calc(80px + bottom) max(16px, left)。
+- 用 360×640 / 390×844 / 640×360 iframe 实测：
+  360/390 为 24/12/80/12；640×360 为 12/16/40/16；
+  把 --safe-left/right/bottom 模拟为 20px 后，360 为 24/20/100/20，
+  640×360 为 12/20/60/20。映射与 400px 覆盖顺序均正确。
+- styles.css:18-19 body 先 100vh 后 100dvh，顺序正确；T7 与变异均通过。
+- 但 `.footer`（styles.css:435-445）是 position:fixed; left/right/bottom:0;
+  padding:10px 18px，没有 safe-bottom/left/right。真实 build 的 360/390/430
+  iframe 实测 footer padding 四边均为 10px/18px，rect.bottom 等于视口底；
+  .app 的 80px 底部内边距不会移动 fixed 元素。详见 M2。
+
+S3 通过。
+- styles.css:483-497 `.game-sticky` 的 padding 为
+  calc(8px + var(--safe-top)) 0 4px；position:sticky/top:0/max-height:45vh/
+  overflow-y:auto 四条仍在同一原块。
+- styles-05e.test.ts:22-28 的 lastBlock(".game-sticky") 仍取到 483 行原块，
+  4 条旧断言全绿；全文只有 483 行一个普通 `.game-sticky {`，没有新增普通块。
+- 变异把 1306 行复合选择器改成普通 `.game-sticky {` 后：
+  mobile T4、mobile T9、styles-05e 的 sticky 用例同时变红，证明旧契约确实在守。
+- 真实 build 在 safe-top=20px 下 sticky padding-top=28px；640×360 下
+  max-height=201.6px，360×640 下 288px，390×844 下 379.8px。
+
+S4 未通过（M1）。
+- styles.css:711-717 `.amount-input` 是 font-size:18px；
+  styles.css:1276-1283 的 @media(max-width:560px) 又写
+  `.input, select, textarea { font-size:16px; }`。
+- 所有金额输入都是 class="input amount-input"（如 GameView.tsx:1421-1426、
+  :1153-1158、:877-882）。两个类选择器特异性相同，1276 行在 711 行之后，
+  所以 ≤560px 时 .amount-input 实际是 16px，不是 S4 要求的 18px。
+- 真实浏览器/iframe 实测：360×640 与 390×844 下
+  getComputedStyle(.amount-input).fontSize = "16px"；
+  640×360（不命中 560 断点）才是 "18px"。
+- docs 与实现相反：单元08B-成果报告.txt:15、单元08B-注意事项.txt:17 都写
+  “.amount-input 18px 不动”；实际移动端被改成 16px。
+
+S5 通过（源码契约层面）。
+- styles.css:1285-1303 的 @media(pointer:coarse) 有 min-height:44px、
+  touch-action:manipulation、.link min-width:44px；T6 通过。
+- 变异删除 min-height:44px 后只有 T6 变红；.banner .link 的 44×44 原块
+  （styles.css:733-739）未被改。
+- 真机触控/双击缩放未测，属于无头边界。
+
+S6 部分通过。
+- styles.css:1305-1327 使用 `.game-sticky.game-sticky { max-height:56vh; }`；
+  T9 通过，普通 `.game-sticky` 未新增，05E 旧测试未破。
+- 640×360 实测 max-height=201.6px；screenshot 中 header 约一行，
+  但 Q3 题干/金额输入不在首屏（见 S2）。
+- .app 在横屏下上 12 / 下 40+safe，教程/规则全宽、教程操作两列均已落地。
+
+S7 通过。
+- styles.css:1329-1341 的 400px 断点位于 560px 的 .question 19px 之后；
+  360/390 实测 .app 左右为 12px；T10 通过。
+- .panel/.wizard 左右 12px 已写；变异删 400px 的 .app 左右 safe 后 T10 变红。
+
+S8 部分通过。
+- styles.css:1347-1352 的选择器组含 tabular-nums + overflow-wrap:anywhere，
+  T8 通过。
+- 但 `.settle-row` 在 src 中没有任何元素使用（grep 只有 CSS 这一处）；
+  实际结算结构是 `.settle-line`（GameView.tsx:1802-1813）和
+  `.settle-balance`（:1761-1770），二者 computed overflow-wrap 仍是 normal。
+  13 位数字在 360px、14px 字号下本次实测未溢出，但 200% 字体/更长标签
+  没有覆盖；S8 的实际结算行保护是缺的（见 S3/nit）。
+- .stat-value/.top-line/.game-meta/.debt-row 存在且已覆盖。
+
+S9 部分通过。
+- styles.css:1357-1367 的 .tutorial-head safe-top 与
+  .tutorial-actions/.rules-sheet safe-bottom 存在；T11 通过。
+- .tutorial-head 的 16px 原 padding 简写在 1024-1032，08B 的 padding-top
+  在 1357，属同一选择器后写；用 --safe-top:20px 实测 padding-top=36px，
+  没有被原简写抵消，正确。
+- .rules-sheet 在可滚动容器里的 padding-bottom 有效：360/390/430 实际
+  padding-bottom=16px；把 safe-bottom 模拟为 20px 后为 36px，
+  scrollHeight 2429 > clientHeight 638，底部安全区确实进滚动内容。
+- 但是 .rules-sheet 没有 safe-top；真实 build 在 430×932 的实测是
+  rect.top=0、padding-top=18px，screenshot mobile-rules-430x932.png 的
+  “规则说明”就在顶端 18px 处。iPhone 14 Pro Max 的 safe-top 约 47–59px，
+  标题和“关闭规则”会落在 Dynamic Island 区域；详见 M2。
+- ≤560 的 .tutorial-overlay padding:0（styles.css:1169-1178），
+  横屏覆盖层左右也没有 safe-left/right；见 M2。
+
+index.html 通过。
+- index.html:5 的 viewport 含 width=device-width、initial-scale=1、
+  viewport-fit=cover、interactive-widget=resizes-content；
+  不含 user-scalable=no / maximum-scale。
+- index.html:6 theme-color=#0f1720；T1/T2 通过，变异删 interactive-widget /
+  theme-color 后分别 T1/T2 变红。
+
+------------------------------------------------------------
+三、must-fix
+------------------------------------------------------------
+M1. 移动端 .amount-input 实际字号 16px，违反 S4 且与交接文档相反
+文件/行：
+- apps/web/src/styles.css:711-717（.amount-input 18px）
+- apps/web/src/styles.css:1276-1283（@media max-width:560 的 .input 16px）
+- apps/web/src/GameView.tsx:1421-1426（Q3 金额输入 class="input amount-input"）
+- handoff/单元08B-成果报告.txt:15、单元08B-注意事项.txt:17（错误宣称 18px 不动）
+复现：
+1) 用当前 build 在 360×640 或 390×844 打开 Q3 金额步；
+2) 执行
+   getComputedStyle(document.querySelector('.amount-input')).fontSize
+   -> "16px"；在 640×360（不命中 560）-> "18px"。
+   也可用任意带 class="input amount-input" 的元素验证，CSS 层结果相同。
+原因：.input 与 .amount-input 都是 0,1,0 特异性；560 媒体块在文件后面，
+后写覆盖先写。S4 明确要求 amount-input 18px 不动，且 iOS 16px 规则的目的
+（避免聚焦放大）用 18px 也能达到。
+修法任选：
+- 把媒体选择器改成 `.input:not(.amount-input), select, textarea`；或
+- 在 560 块之后追加 `.input.amount-input { font-size: 18px; }`。
+同时补测试：T5 现在只看 `.input` 的 16px 和桌面 15px，不看 .amount-input；
+追加 computed/层叠断言或至少断言移动块不覆盖 .amount-input。
+
+M2. 安全区覆盖不完整：fixed footer、规则页顶部、横屏覆盖层左右
+文件/行：
+- apps/web/src/styles.css:435-445（.footer: fixed; bottom:0; padding:10px 18px）
+- apps/web/src/styles.css:1104-1118（.rules-sheet 原 padding:18px 20px 20px）
+- apps/web/src/styles.css:1365-1367（08B 只追加 rules-sheet padding-bottom）
+- apps/web/src/styles.css:999-1008、1169-1178（.tutorial-overlay；≤560 padding:0）
+- index.html:5（viewport-fit=cover，env 在真机会非 0）
+复现/证据：
+1) 真实 build 的 430×932 iframe：`.rules-sheet` rect.top=0、
+   padding-top=18px；screenshot mobile-rules-430x932.png 的标题就在顶端。
+2) 把 --safe-top 模拟为 20px 后，.tutorial-head padding-top=36px，
+   .rules-sheet 仍是 18px；两条东西的 safe-top 处理不一致。
+3) 360/390/430 实测 .footer position:fixed、padding 10px/18px、
+   rect.bottom=视口底；把 --safe-bottom 模拟为 20px 后仍是 10px。
+   .app 的 80+safe 底部内边距只作用于正常流，不影响 fixed footer。
+4) 横屏 640×360 时 .tutorial-panel/.rules-sheet 宽 100%（S6），
+   overlay 只有 16px 内边距；iPhone 横屏 safe-left/right 约 44px，
+   内容仍可能压在刘海/圆角下。
+为什么违反规格：单元08B-手机适配.txt 目标 1 明确要求
+“刘海/圆角/底部手势条不压住文字与按钮（必须用 env() 安全区）”。
+S9 只列了 tutorial-head 的 top 和 rules 的 bottom，S2 只列了 .app，
+没有覆盖 fixed footer / rules 顶部 / 横屏覆盖层左右；这是规格缺口，
+但按目标 1 验收会失败。
+修法任选（不自行改代码）：
+A. 补实现：.footer 加 padding-bottom: calc(10px + safe-bottom) 和左右
+   max(18px, safe-left/right)；.rules-sheet 加 padding-top:
+   calc(18px + safe-top)；≤560 的 tutorial/rules 面板或 overlay 增加
+   safe-left/right（例如 overlay 的 padding 取 max(0/16px, safe-*)）。
+B. 修订规格：明确 fixed footer、rules 顶部、横屏左右为“已记录边界”，
+   真机清单接受；但这和当前目标 1 的“不压住文字与按钮”冲突，需 Lead 决定。
+
+------------------------------------------------------------
+四、should-fix
+------------------------------------------------------------
+S1. 100dvh 面板限高在旧 iOS 没有 100vh 兜底
+文件/行：styles.css:1016（.tutorial-panel max-height:100dvh）、
+:1108（.rules-sheet）、:1177（≤560 两块）、:1318（横屏两块）。
+现象：只有 body 在 18-19 行有 100vh + 100dvh 双行；这四处面板只有
+100dvh。iOS 15.0–15.3 不支持 dvh 时 max-height 整条失效，教程/规则面板
+可能超出视口，关闭按钮/底部操作被裁掉。交接注意事项只写“body 两行并存”，
+不能推出面板也退化。
+建议二选一：
+- 每处 100dvh 前加一行 max-height:100vh（最直接）；或
+- 用 .tutorial-overlay { overflow:auto } + 面板 max-height:100% /
+  height 兜底，避免依赖 dvh。
+这是兼容性修复，不影响现代浏览器。
+
+S2. 640×360 横屏 Q3 的题干/金额输入需滚动，验收口径不明确
+文件/行：styles.css:1305-1327（56vh）、:621-625（.wizard scroll-margin-top:96px）、
+screenshot apps/web/artifacts/mobile-landscape-640x360.png。
+实测/观察：
+- 640×360 下 .game-sticky.game-sticky max-height=201.6px；
+- screenshot 里只看到 Q3 卡下半部（“全部还款/确认还款/返回”），
+  题干与金额框不在首屏；交接运行与验收:67-68 也承认“金额输入需滚动”。
+按“关键操作卡不被吸顶区/软键盘完全遮住”的字面：卡片仍有一部分可见，
+不是“完全遮住”，可判通过；按“金额输入+确认按钮可用”的验收意图：
+输入被移出首屏，且 .wizard 的 scroll-margin-top:96px 小于 56vh=201.6px，
+浏览器自动聚焦/键盘滚动时可能把输入留在吸顶区下方。
+建议二选一：
+- 收紧验收口径：要求 Q3 题干+输入+确认至少在页面滚动可达（并补一条
+  scrollWidth/rect 探针），接受“需滚动”；
+- 或降低横屏 sticky 上限/折叠通知架，或把 .wizard scroll-margin-top
+  改为随横屏 sticky 高度变化，使输入和确认更容易同屏。
+本轮不自行改代码；这是可用性与规格裁决项。
+
+S3. 测试有效性：T5/T8 有缺口，T13/T14 自证
+- T5（mobile-08b.test.ts:98-103）只断言移动 .input 16px + 桌面 .input 15px。
+  变异把 .amount-input 由 18px 改成 12px，3 个探针文件 22 条仍全绿；
+  当前真实的 16px 覆盖也全绿。建议补 .amount-input 的 computed/层叠断言。
+- T8（:119-125）要求 .settle-row 组存在；但 .settle-row 在 src 中无元素
+  （grep 只在 CSS:1350），实际结算用 .settle-line/.settle-balance。
+  S8 的“长金额不撑宽”没有覆盖真实结算行；建议把真实类加入组，
+  或在 GameView 结算卡上补 13 位数字的浏览器宽度断言。
+- T13（:160-172）读的是测试文件文本：它证明字符串还在，不证明旧断言真的
+  执行；如果旧测试被改弱但把旧字符串留在注释里，T13 仍可能绿。
+  建议保留为“旧文件未被删除”的 smoke，但不要作为独立证据；用
+  `git diff --exit-code HEAD -- apps/web/tests/styles-05e.test.ts ...`
+  或 CI 运行旧测试作为权威。
+- T14（:174-199）是硬编码依赖白名单：新增依赖并同步白名单时它仍绿，
+  不是“相对 HEAD 无新增”的证明。建议保留白名单，同时在交接/CI 用
+  `git diff --exit-code HEAD -- package.json pnpm-lock.yaml` 复核。
+- T1–T12 的变异探针结果见第六节；它们对“删掉对应声明”是能变红的，
+  但不能覆盖上面的层叠/真实 DOM 类问题。
+
+S4. 截图与“无横向滚动”证据
+- 6 张 PNG 尺寸/字节与 handoff 一致；build 产物名/大小也与 handoff 一致
+  （见第一节），因此“来自 build 的 UI”目前没有反证。
+- 但 PNG 不含 asset 名，不能独立证明一定来自 dist；这点交接说“来自
+  build”是自述。
+- 360px 没有横向滚动：本次用真实 build 的 iframe 实测
+  mobile-entry / tutorial / rules 在 360/390/430 的
+  documentElement.scrollWidth == clientWidth（360/390/430），
+  这三态通过；Q1/Q3/横屏只有 screenshot，没有可复跑指标。
+  正确证据是每个状态执行
+  `document.documentElement.scrollWidth <= document.documentElement.clientWidth`
+  （Playwright/CDP），不是截图目视。建议把该断言加进自动化或至少在
+  handoff 保存 CDP 输出；Q1/Q3 需补测。
+- 200% 字体、8 位金额、iOS 键盘、iOS 15.0–15.3 的 dvh 未测；
+  这与交接的“真机清单”一致，但不能把无头截图当作已验收。
+
+------------------------------------------------------------
+五、nit
+------------------------------------------------------------
+N1. `.settle-row` 是死选择器（styles.css:1350），实际结算类
+    `.settle-line`/`.settle-balance` 没有被 S8 组覆盖；建议顺手改名/补类，
+    但当前 13 位、14px 的 360px 探针未溢出，故不列 must-fix。
+N2. 交接的基线写 46e72f7，实际 HEAD 是 7fe92f9；不影响代码，但复核/提交
+    记录应对齐实际 HEAD（或注明 08B 规格提交）。
+N3. 交接的“iOS 15 以下 100dvh 退化为 100vh”只对 body 成立；见 S1。
+N4. 截图 mobile-landscape 的 Q3 首屏看不到题干/金额框，交接已承认需滚动；
+    如果 Lead 接受“需滚动”，建议把验收口径写明，避免下一轮再争。
+N5. 规则页顶部/固定 footer 的安全区是规格 S2/S9 未列的 fixed 元素；
+    属于“规格与目标 1 的冲突”，修法与取舍见 M2。
+
+------------------------------------------------------------
+六、测试变异探针（仓库外临时副本）
+------------------------------------------------------------
+方法：复制 apps/web/{index.html,src/styles.css,tests/mobile-08b.test.ts,
+styles-05e.test.ts,styles-tutorial.test.ts} 到仓库外；每次从仓库原始文件
+重置，改一处后跑 3 个测试文件（22 条），结束后临时文件与仓库逐字节一致，
+仓库未产生改动。
+
+结果：
+- 删 :root 四个 --safe-* 变量 -> T3 红；其余绿。
+- 移动 .input 16px 改回 15px -> T5 红；其余绿。
+- 删 pointer:coarse 的 min-height:44px -> T6 红；其余绿。
+- 把 .game-sticky.game-sticky 改成普通 .game-sticky -> T4、T9、
+  styles-05e 的 sticky 用例红；其余绿。
+- 删 .tutorial-head 的 safe-top -> T11 红。
+- 删 .rules-sheet 的 safe-bottom -> T11 红。
+- 把 body 的 100dvh 放到 100vh 前 -> T7 红。
+- 删 400px 的 .app safe-left/right -> T10 红。
+- 删 viewport interactive-widget -> T1 红。
+- 删 theme-color -> T2 红。
+- 把 .amount-input 18px 改成 12px -> 22 条全绿（T5 缺口，见 M1/S3）。
+
+结论：T1–T12 对“对应声明被删”是有效的；T4/T9 对复合选择器尤其有效；
+但 T5 不证明 .amount-input，T8 只证明死选择器，T13/T14 是自证；
+不能把“62 文件/698 条全绿”当成 S4/S8 的完整证明。
+
+------------------------------------------------------------
+七、截图与兼容性结论
+------------------------------------------------------------
+截图（System.Drawing 实测）：
+- mobile-entry-360x640.png 360x640 21041 bytes
+- mobile-tutorial-360x640.png 360x640 31104 bytes
+- mobile-game-q1-360x640.png 360x640 26745 bytes
+- mobile-game-q3-390x844.png 390x844 39519 bytes
+- mobile-landscape-640x360.png 640x360 22739 bytes
+- mobile-rules-430x932.png 430x932 70761 bytes
+尺寸/字节与 handoff 一致；build 产物为 index-BFhtr8O-.css 15.98kB +
+index-CUkxwTvb.js 417.72kB，和 handoff 对得上。实际 build 的
+entry/tutorial/rules 在 360/390/430 实测 scrollWidth=clientWidth；
+Q1/Q3/横屏仍需 CDP/Playwright 指标，截图本身不能证明。
+
+兼容性风险：
+- interactive-widget=resizes-content 只有 Chromium 支持；Android Chrome
+  弹键盘时布局视口缩小，sticky 吸顶区通常留在顶部，但软键盘+sticky 的
+  实际位置需要真机确认；iOS Safari 忽略该键，键盘可能覆盖底部，
+  当前无 JS（T12 正确）也没有 visualViewport 监听。可接受的做法是保留
+  交接里的真机清单并逐项记录；若要主动缓解，可评估 CSS-only 的
+  focus-within/scroll-margin 方案，但不能在本轮擅自加 JS 滚动。
+- iOS 15.0–15.3 没有 dvh：body 有 100vh 兜底，教程/规则面板没有（S1）。
+- env()=0 的桌面标签页安全：所有 env 有 0px 兜底，变量存在，T3 通过。
+- 所有 10 个 <input> 都带 class="input"（金额输入带 "input amount-input"），
+  src 中没有裸 input/select/textarea；16px 规则覆盖了所有 input，
+  但 .amount-input 被覆盖成 16px（M1）。
+- 固定 footer 和 fixed 覆盖层的 safe-area 见 M2；这两处是纯 CSS 可修的，
+  不需要 JS。
+
+------------------------------------------------------------
+八、范围与回归
+------------------------------------------------------------
+- git status：已改 3 个跟踪文件 apps/web/index.html、apps/web/src/styles.css、
+  handoff/项目当前状态.txt；新增 mobile-08b.test.ts、6 张 PNG、4 份 08B
+  handoff。没有改 packages/**、apps/server/**、apps/web/src/net/**、
+  steps.ts、协议或 package.json/pnpm-lock.yaml（git diff 为空）。
+- 旧 684 条：git diff --name-only HEAD -- '*test*' 为空；没有旧测试删除/
+  跳过/放宽；698 = 684 + 14。新测试中没有 .skip/.todo/.only。
+- 旧 05E/08A 契约：styles-05e.test.ts 4 条、styles-tutorial.test.ts 4 条
+  全绿；没有普通 .game-sticky 新块；复合选择器的变异会让旧 05E 变红，
+  说明风险仍在测试保护内。
+- 未新增依赖；T14 与 git diff 双向核对通过；无 commit。
+
+------------------------------------------------------------
+九、最终结论
+------------------------------------------------------------
+需修复。
+1) 先关 M1：移动端 .amount-input 实际 16px（S4 要求 18px，文档还写反），
+   修 CSS 层叠并补 T5 的 .amount-input 断言。
+2) 再处理 M2：fixed footer、规则页顶部、横屏覆盖层左右的 safe-area
+   缺口；要么补 CSS，要么由 Lead 修订 S2/S9 并接受真机边界。
+3) S1（100dvh 面板兜底）、S2（横屏 Q3 验收）、S3（T5/T8/T13/T14）、
+   S4（scrollWidth/截图证据）建议在提交前一并处理或明确记录。
+4) 其余自动化、旧契约、范围/依赖回归通过；没有改协议/服务端/引擎。
+
+复核基线：实际 HEAD 7fe92f9（指定 46e72f7 之后的 08B 规格提交）；
+08B 实现为工作区未提交改动；本轮未改源码、未 commit。

@@ -1,0 +1,229 @@
+============================================================
+RichMan 单元 08B 复核修复验证报告
+============================================================
+复核员：Qoder（独立复核，只读）
+复核时间：2026-11-07
+工作区：D:\Lianjunjie\biancheng\RichMan
+实际 HEAD：b6efd8b（08B 复核修复规格提交）
+实现状态：08B 实现与修复仍为工作区未提交改动
+复核方式：真实 test/typecheck/build；真实 build iframe 的 computed style；
+          仓库外 CSS/GameView 变异探针；独立运行 mobile-shots.mjs（临时端口 8013/9228、
+          临时 data 目录）；只读源码，未改源码、未 commit；只新增本报告。
+
+结论：可提交。
+  F1–F7 全部 PASS；未发现新的 must-fix。
+  有 6 条不阻塞的 nit（双重安全区、T17 只数对数、T18 源码 smoke、脚本只测 390
+  的金额字号、截图字节随动态房间变化、原 08B 规格文件仍写旧基线），见第五节。
+
+------------------------------------------------------------
+一、实跑结果（真实输出）
+------------------------------------------------------------
+$ pnpm -s test
+  Test Files  62 passed (62)
+       Tests  703 passed (703)
+    Start at  11:22:44
+    Duration  7.03s (import 44%, tests 42%, transform 13%, worker 1%)
+TEST_EXIT=0
+
+$ pnpm typecheck
+$ tsc --noEmit -p tsconfig.json
+TSC_EXIT=0
+
+$ pnpm -s build
+vite v8.3.5 building client environment for production...
+✓ 138 modules transformed.
+apps/web/dist/index.html                   0.49 kB │ gzip:   0.31 kB
+apps/web/dist/assets/index-8_zW1uiN.css   16.51 kB │ gzip:   3.89 kB
+apps/web/dist/assets/index-BH0A3_xm.js   417.72 kB │ gzip: 122.44 kB
+✓ built in 274ms
+BUILD_EXIT=0
+
+与交接核对：62 文件 / 703 条、138 modules、index-8_zW1uiN.css、
+index-BH0A3_xm.js、大小均与 handoff 一致；本次 7.03s / 274ms 与 handoff 的
+6.68s / 558ms 是不同运行，不影响结论。
+
+------------------------------------------------------------
+二、F1–F7 逐条验收
+------------------------------------------------------------
+F1 PASS（移动金额输入 18px）
+- styles.css:711-717 原 .amount-input 18px；
+  styles.css:1276-1283 的 @media(max-width:560px) .input 16px 先写；
+  styles.css:1380-1382 的 .input.amount-input { font-size:18px } 后写，
+  特异性 0,2,0，稳定覆盖 560 块。全文没有把 .amount-input 设为 16px 的规则。
+- 真实 build（asset index-8_zW1uiN.css）iframe 实测：
+  360×640 与 390×844 的 getComputedStyle(.amount-input).fontSize 都是 "18px"；
+  360/390 普通 .input 为 "16px"；640×360 普通 .input 为 "15px"。
+- mobile-metrics.txt:8 也记录 390×844 amount-input-font=18px PASS。
+- T15（mobile-08b.test.ts:206-215）通过；仓库外删除 .input.amount-input 规则后
+  T15 变红，其余 T16–T19 仍绿（详见 F5）。
+
+F2 PASS（安全区补全）
+- styles.css:1385-1387 .footer：
+  padding: 10px max(18px, safe-right) calc(10px + safe-bottom) max(18px, safe-left)。
+  模拟 --safe-* = 20px 后 computed：10px / 20px / 30px / 20px
+  （top/right/bottom/left），safe-bottom 与左右都进入 padding；
+  safe=0 时为 10/18/10/18，旧桌面行为不变。
+- styles.css:1389-1391 .rules-sheet padding-top: calc(18px + safe-top)：
+  safe=0 为 18px，safe-top=20px 为 38px；padding-bottom 仍为 16px/36px。
+- styles.css:1393-1396 .tutorial-overlay 四值 max(16px, safe-*)：
+  safe=0 时 360×640 为 0（全屏通栏），640×360 为 16px；
+  safe=20 时各视口均为 20px 四边。
+- styles.css:1400-1402 的 ≤560 覆盖块在 1393 基础块之后；
+  实测 360×640、safe=0 时 overlay padding=0（不是 16px），说明顺序确实生效，
+  窄屏仍通栏。若顺序反了，360 会得到 16px，这里没有发生。
+- 双重计入 nit：overlay 的 safe-top 与 rules-sheet/tutorial-head 的 safe-top
+  会叠加。safe=20px 时 rules-sheet 计算 padding-top 38px，而其父 overlay 还有
+  20px；内容相对视口顶实际是 58px。tutorial-head 36px + overlay 20px = 56px。
+  不造成遮挡/不可达，只是 notch 机上安全区被计两次，见第五节 N1。
+- T16 通过；删除 footer safe-bottom 后 T16 变红（其他 T15/T17/T18/T19 绿）。
+
+F3 PASS（100dvh 兜底）
+- CSS 中 max-height:100dvh 共 4 处，均在 max-height:100vh 之后：
+  1016/1017（.tutorial-panel）、1109/1110（.rules-sheet）、
+  1179/1180（≤560 两块）、1321/1322（横屏两块）。
+- grep 结果：max-height:100dvh 恰好 4 处，没有第五处未兜底。
+- T17（:231-234）通过；仓库外删掉一处 max-height:100vh 后 T17 变红，
+  其他 T15/T16/T18/T19 绿。
+- T17 只断言“至少 4 对”，不断言 dvh 总数与每处 dvh 都有前一行；
+  当前 4/4 全部成对，测试只覆盖当前状态。见 N2。
+
+F4 PASS（横屏 scroll-margin）
+- styles.css:621-625 基础 .wizard scroll-margin-top:96px；
+  styles.css:1326-1328 在 @media(max-height:480px) and (orientation:landscape)
+  内写 .wizard { scroll-margin-top: calc(56vh + 8px) }。
+  两者特异性相同（0,1,0），landscape 在文件后，后写胜出。
+- 实测：640×360（landscape=true）computed scroll-margin-top=209.6px；
+  360×640（非 landscape）为 96px。没有被基础规则覆盖。
+- T19（:244-249）通过；仓库外删除 landscape 的 .wizard 块后 T19 变红。
+- 横屏 screenshot 仍然只显示 Q3 卡片下半部（题干/金额框需滚动），
+  与 F4 的“不被完全遮住、按钮可点”口径一致；交接已写明该口径。
+
+F5 PASS（T15–T19 有效性）
+仓库外复制 styles.css/GameView.tsx/mobile-08b.test.ts/styles-05e/styles-tutorial，
+逐项改一处后跑 3 个测试文件（27 条，基线全绿）：
+1) 删 .input.amount-input -> T15 红，T16–T19 绿。
+2) 删 footer safe-bottom -> T16 红，T15/T17/T18/T19 绿。
+3) 删一处 max-height:100vh 兜底 -> T17 红，T15/T16/T18/T19 绿。
+4) GameView 的 className="settle-lines" 改成 className="settle-row"
+   -> T18 红，T15/T16/T17/T19 绿。
+5) 删 landscape 的 .wizard scroll-margin -> T19 红，T15–T18 绿。
+变异后临时文件恢复为仓库原文；仓库无改动。
+- T15/T16/T17 是源码字符串测试；F1/F2/F3 的 computed/grep 另行验证。
+- T18 仍是 GameView/CSS 源码字符串自证（不是真实 DOM），只能算 smoke；
+  T19 也是源码测试，但 F4 已用 computed 209.6px 另证。
+- T13/T14 的 smoke 注释已在测试文件 :4-5 标明；权威证据是
+  git diff --name-only HEAD -- '*test*' 为空 + package/lock diff 为空。
+- 698 -> 703 与新增 T15–T19 一致（19 条 mobile-08b；总 62 文件/703 条）。
+
+F6 PASS（可复跑证据）
+脚本：apps/web/scripts/mobile-shots.mjs。
+- 真启动服务：ensureServer()（:49-64）在本机 8013（我用临时端口）执行
+  node --import tsx apps/server/src/http.ts，使用临时 RICHMAN_DATA_DIR；
+  若已有健康服务则复用，不写死输出。
+- 真 CDP：Cdp（:177-207）、Target.createTarget/attach（:247-250）、
+  Emulation.setDeviceMetricsOverride（:269-271）、Page.captureScreenshot（:288）。
+- Q1/Q3 真房间：setupGame()（:122-170）用 POST /api/rooms、两个 WS Peer
+  建房/加入/准备/开始/借 5000 分/推进到第 2 轮，浏览器用 sessionToken 恢复；
+  本次生成截图显示“房间 0518 / 第 2 轮”，不是固定图。
+- 我实际运行：
+  RICHMAN_MOBILE_PORT=8013 RICHMAN_MOBILE_EDGE_PORT=9228 \
+    node apps/web/scripts/mobile-shots.mjs
+  输出 6 个状态全 PASS，metrics 文件内容为：
+  entry 360×640 360/360 PASS；tutorial 360×640 360/360 PASS；
+  game-q1 360×640 360/360 PASS；game-q3 390×844 390/390 PASS；
+  landscape 640×360 640/640 PASS；rules 430×932 430/430 PASS；
+  check=amount-input-font value=18px viewport=390x844 PASS；
+  check=input-font-mobile value=16px viewport=360x640 PASS；
+  check=input-font-desktop value=15px viewport=640x360 PASS。
+- 截图尺寸复核：entry 360×640 21041、tutorial 360×640 31104、
+  q1 360×640 26769、q3 390×844 39830、landscape 640×360 22766、
+  rules 430×932 70761 bytes；均正确。
+- 清理复核：8013 /health 返回 000；没有 richman-mobile-* 临时 data；
+  没有 remote-debugging-port=9228 的 Edge 进程。脚本自身 finally 也 kill
+  Edge/服务并 rm 临时目录（:365-375）。
+- 我本次重生成的 q1/q3/landscape 字节数与 handoff（26764/39790/22762）
+  有几字节差异，来自动态房间/计时文案；尺寸与 PASS 状态一致，见 N5。
+
+F7 PASS（文档校正）
+- 四份 08B 交接与项目状态均写基线 7fe92f9；实际 HEAD b6efd8b 是 08B 修复规格
+  提交，实现本体的基线 7fe92f9 正确。
+- 703 与实际 test 输出一致；旧 684 + 初版 14 + 新增 5 = 703。
+- “18px 不动”作为实现声明的错误说法已删除/改为“靠 .input.amount-input
+  特异性覆盖”；唯一出现“18px 不动”的是注意事项的禁止性说明（:13），
+  不是当前实现声明。
+- 横屏“Q3 题干/金额框可能需滚动、按钮可见可点”口径写入注意事项:29-32、
+  运行与验收:69-70、成果报告:100-101、下一阶段交接:48-49。
+- mobile-shots.mjs 为 UTF-8，中文注释正常；grep \xEF\xBF\xBD 无匹配，
+  没有“�?”乱码。F7 无 must-fix。
+- 备注 nit：原始规格 handoff/单元08B-手机适配.txt:4 仍写基线 46e72f7
+  （该文件是历史规格，不是本轮交接）；四份交接/状态文档已写 7fe92f9。
+
+------------------------------------------------------------
+三、截图与 metrics 复核
+------------------------------------------------------------
+- 6 张 mobile-*.png 由本次 mobile-shots.mjs 重新生成，尺寸全部正确；
+  Q1/Q3 截图显示真实房间 0518、第 2 轮，Q3 有“金额（分）”输入；
+  landscape 截图仍是“全部还款/确认还款/返回”可见、题干/金额在上方需滚动，
+  与 F4 口径一致。
+- metrics 文件 6 个 scrollWidth<=clientWidth 全 PASS，3 条 font 检查全 PASS；
+  这是本次独立跑出的文件，不是只采信 handoff。
+- 真实 build 的 CSS 资源为 /assets/index-8_zW1uiN.css；F1 的 360/390
+  computed 18px 即用这份 build 的 iframe 再加 .input.amount-input 测得。
+- 仍属无头 Edge 边界：真机 env() 数值、软键盘像素遮挡、iOS 地址栏、
+  200% 字体、8 位金额长局未测；交接已列入真机清单。
+
+------------------------------------------------------------
+四、回归检查
+------------------------------------------------------------
+- git diff --name-only HEAD -- '*test*'               -> 空
+- git diff --name-only HEAD -- package.json pnpm-lock.yaml apps/web/package.json
+                                                       -> 空
+- git diff --name-only HEAD -- packages apps/server apps/web/src/net '**/steps.ts'
+                                                       -> 空
+- 旧 684 条未删/未跳过/未放宽；62 文件/703 条全绿。
+- styles-05e.test.ts（4 条，含 .game-sticky 四声明）全绿；
+  styles-tutorial.test.ts（4 条，含覆盖层/T14 契约）全绿。
+- 全文只有一个普通 .game-sticky { 块（styles.css:483）；横屏是
+  .game-sticky.game-sticky（:1310），没有新增普通块。
+- 只有 apps/web/index.html、apps/web/src/styles.css、项目状态为跟踪修改；
+  新增 test/script/artifacts/handoff 为未跟踪文件；没有服务端/引擎/协议改动。
+- 未新增依赖；mobile-shots.mjs 只用 Node 内置 fetch/WebSocket 和本机 Edge。
+
+------------------------------------------------------------
+五、新 must-fix 与 nit
+------------------------------------------------------------
+新 must-fix：无。
+
+nit（均不阻塞）：
+N1 安全区双重计入：在 safe-top=20px 的探针里，.rules-sheet 自身 padding-top
+   38px，父 .tutorial-overlay 又有 20px，内容相对视口顶为 58px；
+   .tutorial-head 36px + overlay 20px = 56px。没有遮挡/不可达，只是刘海机上
+   多一层空白。若 Lead 要精确 18px+safe 可去掉 overlay 的同一方向 safe，
+   或让子面板不再加 safe；不影响当前验收。
+N2 T17 只数“至少 4 对” max-height，不断言全 CSS 的 100dvh 总数/每处成对。
+   当前 grep 恰好 4 处且 4/4 成对，所以 F3 通过；未来若新增第 5 处未兜底，
+   T17 仍可能绿。建议改成 dvh 总数 === 成对数，或列出四个选择器逐一断言。
+N3 T18 仍靠 GameView.tsx/CSS 源字符串自证，不是真实 DOM/布局断言；按工单
+   已明确只能算 smoke。T15/T16/T17/T19 也都是源码字符串测试；F1/F2/F4
+   已用 computed 另行验证，F3 已用 grep 另行验证。
+N4 mobile-shots.mjs 的金额字号检查只覆盖 390×844；F1 要求的 360×640
+   金额字号是本次用真实 build iframe 手工测到 18px，脚本未覆盖。建议在脚本
+   增加 360 的 .amount-input check（不影响当前结论）。
+N5 我重跑 mobile-shots 后 q1/q3/landscape 的 PNG 字节数比 handoff 记录
+   分别多几字节（动态房间号/倒计时文本导致），尺寸和 PASS 状态一致；
+   文档若要精确记录，可把 bytes 视为动态值或重新采一次。
+N6 原始规格 handoff/单元08B-手机适配.txt:4 仍写基线 46e72f7；四份 08B
+   交接与状态文档均写 7fe92f9。若 F7 的“文档”包含历史规格，可补一行
+   历史说明；不影响实现/回归。
+
+------------------------------------------------------------
+六、最终结论
+------------------------------------------------------------
+可提交。
+F1/F2/F3/F4/F5/F6/F7 全部 PASS；F6 的 metrics 已由我独立复跑，6 个状态
+scrollWidth<=clientWidth 全 PASS、3 条 font check 全 PASS；Q1/Q3 是真实房间，
+脚本不是写死输出。旧 684 条未削弱、无依赖/引擎/协议越界。
+上述 6 条均为 nit；没有需要修复的 must-fix。
+
+复核基线：实际 HEAD b6efd8b（实现基线 7fe92f9）；08B 修复为工作区未提交改动；
+本轮未改源码、未 commit；仅新增本报告，mobile-shots 重跑覆盖了 artifacts。

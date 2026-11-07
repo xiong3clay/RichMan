@@ -1,0 +1,67 @@
+单元 08B 下一阶段交接（手机适配 + 复核修复）
+================================================================
+基线：HEAD 7fe92f9（08B 规格提交）；08B 实现为工作区未提交改动。
+本轮结束后 62 文件 / 703 条。
+
+一、代码入口与结构
+- apps/web/index.html：
+  viewport 含 width=device-width、initial-scale=1、viewport-fit=cover、
+  interactive-widget=resizes-content；theme-color #0f1720；未禁用缩放。
+- apps/web/src/styles.css：
+  1) :root 四个 --safe-*，env(..., 0px)。
+  2) body min-height:100vh + 100dvh（dvh 在后）。
+  3) .app 左右 max(16px/12px, safe-*)，底部 calc(80px/40px + safe-bottom)。
+  4) .game-sticky 原块 padding calc(8px + safe-top)，四声明逐字保留。
+  5) 08B 区块：560px 输入 16px；pointer:coarse 44px/touch-action；
+     横屏 .game-sticky.game-sticky 56vh + .wizard scroll-margin；
+     ≤400px 收边距；长金额真实结算类；教程/规则 safe-top/bottom。
+  6) 复核追加：.input.amount-input 18px；.footer/.rules-sheet/.tutorial-overlay
+     安全区；4 处 max-height:100vh 兜底。
+- apps/web/tests/mobile-08b.test.ts：19 条（T1–T19）；T13/T14 只是 smoke。
+- apps/web/scripts/mobile-shots.mjs：可复跑截图 + metrics，Node 内置 fetch/WebSocket，
+  自动启动 8012 服务，使用 build 后 dist，无新依赖。
+
+二、CSS 不变量
+- .game-sticky 的 position:sticky / top:0 / max-height:45vh / overflow-y:auto
+  四声明逐字保留；横屏覆盖必须用 .game-sticky.game-sticky，绝不能新增普通块。
+- .notice-shelf 若覆盖同理用 .notice-shelf.notice-shelf。
+- .banner .link 的 44×44 不动。
+- 覆盖层 fixed + z-index 40；.tutorial-overlay 窄屏 safe padding 块必须
+  在基础覆盖之后，否则窄屏不再通栏。
+- 所有 env() 必须有 0px 兜底。
+- 不用 overflow-x:hidden 掩盖横向溢出；修 min-width/换行/列宽。
+- 移动金额输入保持 18px：靠 .input.amount-input 特异性覆盖，不是改 560px 块。
+- 面板 max-height 必须先 100vh 再 100dvh（4 处）。
+
+三、数据流与协议
+- 无协议/服务端/存档变化；PROTOCOL_VERSION=1。
+- 手机适配是 CSS + meta；教程/规则、game 状态、网络层均未改。
+- 软键盘交给浏览器：Chromium 用 interactive-widget；iOS Safari 忽略；
+  没有 JS scrollTo/scrollIntoView/visualViewport（T12 扫 src）。
+
+四、下一单元入口
+- 08C 音频：
+  - 与教程/规则无耦合；不要给 TutorialOverlay/RulesSheet 增加网络请求/滚动脚本。
+  - 素材来源/许可证单独记录；加载失败不阻塞。
+- 09 加固/跨网/一键发布包：
+  - 真机清单仍待用户执行；无头截图只证明 CSS 契约与 scrollWidth。
+  - 横屏验收口径：Q3 题干/金额框可能需滚动，按钮可见可点即可；
+    若未来要同屏，需再评估 56vh sticky 上限。
+  - 200% 字体、8 位金额长局、iOS 15.0–15.3 需真机/浏览器降级验证。
+
+五、已知边界
+- 无头 Edge 非真机；env 真实安全区、软键盘像素遮挡、iOS 地址栏未测。
+- iOS 15 以下 100dvh 退化为 100vh；4 处面板与 body 均有兜底。
+- interactive-widget 仅 Chromium。
+- 截图/metrics 由 mobile-shots.mjs 生成；若状态无法复现写 SKIP，不写 PASS。
+
+六、权威回归证据
+- git diff --name-only HEAD -- "*test*" → 空（旧测试未改；新测试为未跟踪新文件）。
+- git diff --name-only HEAD -- package.json pnpm-lock.yaml → 空（无依赖变化）。
+- T13/T14 是 smoke，不替代真实执行旧测试。
+
+七、回退方式
+- 还原 apps/web/index.html 的 viewport/theme-color。
+- 还原 styles.css 的 :root/body/app/game-sticky 与 08B/F1-F4 追加块。
+- 删除 mobile-08b.test.ts、mobile-shots.mjs、mobile-*.png、mobile-metrics.txt。
+- 旧 684 条与 08A 测试不受影响。
