@@ -1,0 +1,169 @@
+RichMan 单元 09A 第四轮测试补强 独立复核
+================================================
+复核员：Qoder（只读复核；未改源码/测试，未 commit）
+日期：2026-11-07
+复核对象：
+  - 工作区未提交改动：apps/server/tests/security.test.ts、四份 09A 交接、项目当前状态
+  - 09A 实现已提交 eeec8ca；当前 HEAD 2dc10f8；09B 实现 6491fe9、文档 39dc1b9
+复核依据：handoff/单元09A-复核修复4.txt、handoff/单元09A-复核修复4报告.txt、
+          handoff/复核-单元09A-第三轮验证.txt、当前 security.test.ts / ws.ts / security-harness.ts
+
+结论：PASS（第四轮补强满足 F16-F20 要求，可提交）
+      F18 的 handleUpgrade 同步抛错分支仍无自动化测试，只能按“未验证项”对待；文档已如实标注，不构成阻塞。
+
+一、逐项结论
+A1 测试 49 是否证明“基线连接总数只减一次”
+    PASS。变异 1 在仓库外副本上真实变红，输出见第三节。
+A2 测试 50 是否同时证明“autoPong=true 保活、autoPong=false 才关闭并保留离线座位”
+    PASS。正段/反段都在测试内；把反段改成 autoPong=true 后真实变红，输出见第四节。
+A3 F18 同步抛错分支无测试时，文档是否在三处写明未验证，且未为测试重构生产代码
+    PASS。成果报告、注意事项、下一阶段交接均有“无自动化测试、依赖代码审查”的记录；
+    生产代码未改，见第五节。
+A4 旧测试是否未改，总数是否 781 + 5 = 786
+    PASS。工作区测试差异只在 security.test.ts；tests 1-48 无改动。
+    实测 65 文件 / 786 条通过，见第六节。
+A5 全量测试、类型检查、构建是否通过
+    PASS。TEST_EXIT=0、TSC_EXIT=0、BUILD_EXIT=0，见第六节。
+
+二、复核环境与方法
+环境：Windows PowerShell 5.1.26100.9711；Node v24.18.0；corepack pnpm；Vitest 5.0.5。
+方法：
+  1) 读当前 security.test.ts（50 条）、ws.ts 的 onUpgrade/init/heartbeat、security-harness.ts。
+  2) 在仓库外建副本 D:\Lianjunjie\biancheng\richman-09a-fourthprobe：
+     复制当前 apps/server/{src,tests}+apps/web/dist，node_modules 用 junction 指向仓库；
+     复制前用 diff -q 核对副本的 security.test.ts 与 ws.ts 均与仓库一致：
+       TEST_IDENTICAL
+       WS_IDENTICAL
+  3) 副本先跑基线 50/50，再做两组指定变异；变异只改副本，不碰仓库。
+  4) 仓库内复跑全量 test/typecheck/build。
+  5) 复核结束后删除副本，仓库只新增本报告。
+
+三、变异 1：去掉 released 守卫、让 releaseIfUnclaimed 连续 release 两次
+修改位置（副本 apps/server/src/ws.ts，仓库同位置 ws.ts:516-521）：
+  原实现：
+    let released = false;
+    const releaseIfUnclaimed = (): void => {
+      if (released) return;
+      released = true;
+      security.guard.release(ip, false);
+    };
+  变异后：
+    let released = false;
+    const releaseIfUnclaimed = (): void => {
+      security.guard.release(ip, false);
+      security.guard.release(ip, false);
+    };
+运行：
+  cd D:\Lianjunjie\biancheng\richman-09a-fourthprobe
+  corepack pnpm -s vitest run apps/server/tests/security.test.ts
+实际结果（MUTATION1_EXIT=1）：
+  × 49 握手失败只释放一次：基线连接 total 不变，60 次后 A 仍可 ready 517ms
+  FAIL apps/server/tests/security.test.ts > 09A security > 49 握手失败只释放一次：基线连接 total 不变，60 次后 A 仍可 ready
+  Error: 等待条件超时
+   ❯ waitFor apps/server/tests/security.test.ts:57:50
+   ❯ apps/server/tests/security.test.ts:681:5
+  Test Files  1 failed (1)
+  Tests  1 failed | 49 passed (50)
+
+为什么变红：
+  测试 49 先建立真实连接 A，等待 guard.total=1、perIp=1；再发一次缺
+  Sec-WebSocket-Key 的升级请求，admit 使 total 临时到 2，close 应只释放这次
+  无效握手，total 回到 1。没有 released 守卫时一次 close 释放两次，会把 A 的
+  配额也扣掉，测试在 security.test.ts:681 等待 total 仍为 1 时超时。
+  因此该变异证明测试 49 能抓住“双释放/漏守卫”，而不是只验证最终归零。
+
+四、变异 2：把测试 50 反段的 autoPong:false 改成 true
+修改位置（副本 apps/server/tests/security.test.ts:738；与仓库同文件同位置）：
+  const closePeer = trackPeer(await Peer.open(closeServer.port, closeRoom, {}, { autoPong: false }));
+  改为：
+  const closePeer = trackPeer(await Peer.open(closeServer.port, closeRoom, {}, { autoPong: true }));
+运行：
+  corepack pnpm -s vitest run apps/server/tests/security.test.ts
+实际结果（MUTATION2_EXIT=1）：
+  × 50 心跳：autoPong 默认保活，autoPong:false 才超时关闭并释放 1831ms
+  FAIL apps/server/tests/security.test.ts > 09A security > 50 心跳：autoPong 默认保活，autoPong:false 才超时关闭并释放
+  Error: 连接未在时限内关闭
+   ❯ Timeout._onTimeout apps/server/tests/security.test.ts:65:43
+  Test Files  1 failed (1)
+  Tests  1 failed | 49 passed (50)
+
+为什么变红：
+  反段依赖客户端不回 pong，服务端连续 missedPongs>=2 后在第三次 tick 关闭。
+  把 autoPong 改回 true 后客户端自动回 pong，连接不会关闭，waitForClose 在
+  1500ms 后抛“连接未在时限内关闭”。正段（默认 autoPong=true）仍为 OPEN、
+  online=true、total=1；反段才应关闭、保留 offline 座位、total=0。
+  该变异证明测试 50 不是只测“最终会断开”，而是真的区分了 autoPong 两种行为。
+
+五、测试语义与 F18 文档
+1) 测试 49（当前 security.test.ts:669-701）实际覆盖：
+   - 建真实连接 A 并 join，guard.total=1、perIp=1；
+   - 一次缺 Sec-WebSocket-Key 的升级返回 400；
+   - 之后 total/perIp 仍为 1；
+   - 再连续 60 次无效升级，仍为 1；
+   - A 仍 OPEN，并能在 ready 后收到 room 消息；
+   - 最后关闭 A，total 归零。
+   结论：它证明无效握手只减自己那一次，基线连接的总数不被多减；不是 spy
+   release 调用次数，而是用 total/perIp + A 可用性间接证明，足以抓住双释放。
+2) 测试 50（当前 security.test.ts:703-758）实际覆盖：
+   - 正段：默认 autoPong=true，3 次 tick，每次等 ping + 50ms；
+     断言 OPEN、房间 online=true、guard.total=1；
+   - 反段：autoPong:false，前两次 tick 也留 50ms，第三次 tick 后 waitForClose；
+     断言连接关闭、房间座位保留但 online=false、guard.total=0。
+   结论：正反两段真实区分 autoPong 行为；变异 2 已证明反段能变红。
+3) F18（handleUpgrade 同步抛错分支）：
+   - 成果报告“七、未完成/未验证”明确写：仍无自动化测试、onUpgrade 无可注入缝隙、
+     按 F18 不重构生产代码、依赖代码审查；
+   - 注意事项“13. 剩余未验证项”写：无自动化测试、补测试需可注入 upgrade 执行器、
+     当前路径依赖代码审查；
+   - 下一阶段交接“六、下一单元入口”写：同步抛错分支无自动化测试，依赖代码审查；
+   - 成果报告“十、复核修复落点”F18 也再次记录。
+   结论：三处以上均如实标注为未验证；未发现为测试而改生产代码。
+   复核未自行构造该分支测试，也未把该分支当作已验证安全属性。
+
+六、旧测试、全量与构建
+1) 工作区测试差异：
+   git diff --name-only -- 'apps/**/tests/**' 'packages/**/tests/**'
+   实际输出只有：
+     apps/server/tests/security.test.ts
+   git diff -U0 的 hunk 只在：
+     - 约 line 62：新增 waitForClose helper；
+     - 约 line 669：测试 49 改写；
+     - 约 line 703：测试 50 改写。
+   tests 1-48 没有任何改动；没有删测试、skip、放宽断言。
+2) 仓库内全量：
+   corepack pnpm -s test
+   实际输出：
+     Test Files  65 passed (65)
+     Tests  786 passed (786)
+     Duration  8.17s
+     TEST_EXIT=0
+   （786 = 旧 731 + security.test 50 + 09B scripts.test 5；09A 第四轮只加严 49/50，
+     未新增测试文件。）
+3) 类型检查与构建：
+   corepack pnpm -s typecheck -> TSC_EXIT=0（无诊断）。
+   corepack pnpm -s build -> BUILD_EXIT=0；141 modules transformed；
+     index--JyM_5JG.css 18.07 kB、index-CrCvzBNf.js 425.13 kB；built in 250ms。
+4) 工作区测试文件与副本的基线：
+   副本 50/50 通过（baseline EXIT=0）；仓库全量 786 通过；两者一致。
+
+七、文档与提交状态（非阻塞备注）
+- 09A 成果报告、运行与验收、注意事项的条数/基线已改为 50 条、eeec8ca/39dc1b9/
+  “以 git log 为准”，与事实一致；09A 运行与验收的 F16/F17 变异记录与本轮复核结果一致。
+- 09A 下一阶段交接.txt:3 仍写“基线：aabf407；本轮实现未提交”。这是 09A 初版交接的
+  历史头，不影响第四轮结论；但提交第四轮修复单时建议顺手改成 eeec8ca/当前 HEAD，
+  避免下一位复核员误读。
+- 当前 HEAD=2dc10f8（第四轮修复单规格提交），09A 第四轮实现/测试/文档仍在工作区，
+  与“未提交”状态一致；本报告不 commit。
+
+八、未验证项（不得在本轮宣称为已验证）
+1) handleUpgrade 同步抛错分支（ws.ts catch）：无自动化测试，依赖代码审查（F18）。
+2) 代理层（隧道）429/503、trustProxy 多段 X-Forwarded-For 只取第一段：未独立验证。
+3) 真机/浏览器手机端 Origin、429/415/403 文案、4003 超时：转 09D。
+4) 多进程/多实例限流：当前单进程内存态，未验证。
+5) 429、ROOM_LIMIT 503、WS 配额 503 只有自动化覆盖（18/19/24），未手工复测。
+
+九、清理声明
+- 仓库外副本 richman-09a-fourthprobe 已删除；
+- 复核期间未修改仓库源码/测试，未 commit；
+- 本次复核新增文件：本报告（实现方的 单元09A-复核修复4报告.txt 是复核前已有的未跟踪文件，
+  不计入本次新增）。

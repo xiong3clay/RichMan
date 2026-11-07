@@ -122,8 +122,15 @@
    - 不要把 TokenBucket 退回只增不减：保留 tryTake 的 size>=1024 惰性 prune。
 
 13. 剩余未验证项（不得当作已验证安全属性）
+   - handleUpgrade 同步抛错分支（ws.ts catch releaseIfUnclaimed + destroy）
+     无自动化测试：onUpgrade 的 wss/security 是闭包局部，没有可注入缝隙；
+     按第四轮 F18 未重构生产代码。补测试需先引入可注入的 upgrade 执行器；
+     当前该路径依赖代码审查（Qoder S1）。
    - 代理层（隧道）429/503 未验证；真机 Origin/错误文案/4003 转 09D。
    - trustProxy 多段 X-Forwarded-For 只取第一段：未独立测试、未在真实代理后验证。
    - 异常释放顺序未穷举（Qoder N6）；runtime 对象包裹未断言（N7）。
    - 多进程/多实例限流未验证（当前单进程内存态）。
    - 429/ROOM_LIMIT 503/WS 配额 503 只有自动化覆盖（18/19/24），未手工复测。
+   - 测试 49/50 已在第四轮加严：49 用“基线连接只减一”抓双释放，
+     50 用正段 autoPong 默认保活 + 反段 autoPong:false 抓 autoPong 变异；
+     仓库外两组变异均真实变红（见 单元09A-复核修复4报告.txt）。

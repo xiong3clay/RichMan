@@ -15,19 +15,20 @@
   [richman] 局域网： http://10.25.226.102:8000/
   [richman] 健康检查： /health
 
-二、自动化验收命令（真实执行，第三轮修复后）
+二、自动化验收命令（真实执行，第四轮测试补强后）
 1) corepack pnpm -s test
-   输出：Test Files 64 passed (64)；Tests 781 passed (781)；Duration 8.40s；
-   退出码 0。日志：artifacts/test-logs/09Afix3-test.log
+   输出：Test Files 65 passed (65)；Tests 786 passed (786)；Duration 7.92s；
+   退出码 0。日志：artifacts/test-logs/09Afix4-test.log
+   （786 = 旧 731 + security.test 50 + 09B scripts.test 5；本单未新增测试，
+     只加严 49/50。）
 2) corepack pnpm -s typecheck
-   输出：无诊断；退出码 0。日志：artifacts/test-logs/09Afix3-typecheck.log
+   输出：无诊断；退出码 0。日志：artifacts/test-logs/09Afix4-typecheck.log
 3) corepack pnpm -s build
-   输出：✓ 141 modules transformed；dist/index-CrCvzBNf.js 425.13 kB；
-   index--JyM_5JG.css 18.07 kB；built in 239ms；退出码 0。
-   日志：artifacts/test-logs/09Afix3-build.log
+   输出：沿用 09B 提交 6491fe9 的构建（141 modules、JS 425.13 kB、
+   CSS 18.07 kB）；本单只改测试与文档，未改生产代码。
 4) 单文件：corepack pnpm -s vitest run apps/server/tests/security.test.ts
    输出：security 50 passed；退出码 0。
-   日志：artifacts/test-logs/09Afix3-security.log
+   日志：artifacts/test-logs/09Afix4-security.log
 
 三、手工验收（真实服务 + curl.exe）
 说明：服务用 `corepack pnpm -s start` 后台启动；以下命令在另一个终端执行。
@@ -182,3 +183,20 @@ Windows PowerShell 中必须用 curl.exe（curl 是 Invoke-WebRequest 别名）�
 七、清理
 - 停止服务：停止 `corepack pnpm -s start` 进程。
 - 删除验收房间：apps/server/data/rooms/1232、8737、7375（均已删）。
+
+八、第四轮测试加严与变异探针（真实执行）
+1) 仓库内基线：
+   corepack pnpm -s vitest run apps/server/tests/security.test.ts
+   → 50 passed，退出码 0（09Afix4-security.log）。
+2) 仓库外副本（D:\Lianjunjie\biancheng\richman-mutation-09a4，
+   apps/server/{src,tests}+apps/web/dist，junction node_modules）：
+   基线 50/50 绿（09Afix4-mutation-baseline.log）。
+3) 变异 1：releaseIfUnclaimed 去掉 released 守卫、连续 release 两次
+   → FAIL 49 “握手失败只释放一次：基线连接 total 不变，60 次后 A 仍可 ready”
+   Error: 等待条件超时（security.test.ts:681），49 passed / 1 failed
+   （09Afix4-mutation1.log）。
+4) 变异 2：测试 50 的 autoPong:false 改成 true
+   → FAIL 50 “心跳：autoPong 默认保活，autoPong:false 才超时关闭并释放”
+   Error: 连接未在时限内关闭（security.test.ts:65），49 passed / 1 failed
+   （09Afix4-mutation2.log）。
+5) 副本已删除，仓库未改生产代码。

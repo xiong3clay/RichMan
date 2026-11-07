@@ -1,6 +1,6 @@
 RichMan 项目当前状态
 更新日期：2026-11-07
-更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复；07A/07B/07C 由 Trae 实现，Qoder 三轮复核，Lead 验收；08A/08B/08C 由 Trae 实现并完成复核修复；09A 已提交 6f38ab7（F1–F15 三轮复核修复；Qoder 第三轮复核判测试 49/50 强度不足，待补强）；09B 由 Trae 实现，Lead 真实验收通过、待提交）
+更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复；07A/07B/07C 由 Trae 实现，Qoder 三轮复核，Lead 验收；08A/08B/08C 由 Trae 实现并完成复核修复；09A 已提交 eeec8ca（第四轮测试补强 F16–F20 待提交）；09B 已提交 6491fe9（文档 39dc1b9））
 
 【版本】
 方案版本：V1.3.3（V1.3.2 + 引导式界面 + 连接实测）
@@ -9,9 +9,9 @@ RichMan 项目当前状态
 游戏版本：未发布，目标 V1.0
 
 【进度与范围】
-已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（已提交 6f38ab7）、09B（代码验证通过，工作区未提交）。
-当前子任务：09C 备份恢复、安全测试补强与文档/许可证/版本记录（尚未开始）。09B 基线 793bb83，
-按用户要求本轮不 commit。
+已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（已提交 eeec8ca，其后交接 6f38ab7）、09B（已提交 6491fe9，文档 39dc1b9）。
+当前子任务：09A 第四轮测试补强（F16–F20）已完成、待 Lead 提交；下一单元 09C 备份恢复、
+安全测试补强与文档/许可证/版本记录（尚未开始）。本轮按用户要求不 commit。
 08C 已提交 d7b67f8 并通过 Qoder 二次验证（63 文件/731 条、typecheck/build 0、6 个 WAV + 播放器/事件音效），真机音频未测。
 09A 完成 64 文件/781 条；09B 后实测 65 文件/786 条（旧 781 未削弱 + scripts.test 5），typecheck/build 0。
 一键脚本：scripts/start-lan.ps1、start-tunnel.ps1、stop.ps1、status.ps1 + richman-common.ps1；
@@ -193,26 +193,29 @@ https://diego-rotary-inclusive-hughes.trycloudflare.com（2026-11-06 21:5x 重�
    N2/N3/N7 旧 nit 未处理；真机音频未测。
    07C 已完成并验收（54 文件/646 条）：全部还款/全部催收、返回上一步、房主销毁房间；
    遗留：360px 真机截图未采集、销毁仅单进程验证、S-B 毫秒竞态无端到端用例（有判定单测 + peer 兜底）。
-0d) 09A 已完成代码验证并完成三轮复核修复 F1–F15（工作区未提交，基线 0f2838e）：
+0d) 09A 已完成代码验证并完成四轮复核修复 F1–F20（09A 实现已提交 eeec8ca；
+   第四轮测试补强工作区未提交，基线与提交号以 git log 为准）：
    security.ts + HTTP/WS 加固 + 昵称控制字符；F1 release(ip,authenticated)/conn.authenticated；
    F2 命令桶 key=房间码|玩家ID；F3 删除 Content-Type "{}" 旁路；
    F4 删除 NODE_ENV Origin shim、session.test 显式注入白名单；
    F6 路由改用 decodedPath、编码 API 路径一律 404；F7 init 创建阶段恰好释放一次；
    F8 TokenBucket 1024/10 分钟惰性 prune；F9 满房 fullJoinBucket；
    F13 握手失败配额挂 socket close 回收（M3）；F14 心跳超时 release 证据。
-   64 文件/781 条、typecheck/build 0；28 条必测全覆盖，另补 22 条（29–50）。
+   65 文件/786 条、typecheck/build 0；28 条必测全覆盖，另补 22 条（29–50）。
    手工 curl（三安全头、evil Origin 403、/api/unknown 404、同源 201、text/plain 415、
    text/plain+"{}" 415、json+"{}" 201、编码 API 路径 404）与 tsx 探针
    （init now 抛错 total=0、满房 10×ROOM_FULL+RATE_LIMITED、缺 Sec-WebSocket-Key→400
     且 60 次后 guard 归零、随后正常 join）全 PASS；四份 handoff 已写。
-   Qoder 第三轮复核 handoff/复核-单元09A-第三轮验证.txt 结论「需修复」：F13/F14 生产代码
-   已逐路径核实正确，但测试 49/50 在变异下不变红（M1 未先造 total=2 证明只减 1；
-   M2 未等 pong 处理证明 autoPong:false），另 S1 handleUpgrade 同步抛错路径无测试、
-   S2 成果报告条数 48→50 未改；补强单 handoff/单元09A-复核修复4.txt（待 Trae 执行）。
+   第四轮测试补强 F16–F20（handoff/单元09A-复核修复4.txt）：
+   49 改为“基线连接 total=1 → 无效握手后仍 1 → 60 次仍 1、A 仍可 ready”，
+   双释放变异真实变红；50 改为正段 autoPong 默认保活（tick 间等 pong+50ms）+
+   反段 autoPong:false 才关闭，autoPong:true 变异真实变红。
+   两组变异日志 09Afix4-mutation1/2.log；仓库外副本已删除；未改生产代码。
+   F18 handleUpgrade 同步抛错路径仍无测试（无注入缝隙，未重构），列入未验证项。
    遗留：429/503/WS 配额未手工复测（自动化 18/19/24 覆盖）；
    代理层 429/503 未验证；trustProxy 多段 XFF 未独立验证；手机端 Origin 与错误文案转 09D；
    限流为单进程内存态。验收房间 1232、8737、7375 已从 apps/server/data/rooms 清理。
-0e) 09B 一键启动/隧道/停止/状态脚本已完成代码验证（工作区未提交，基线 793bb83）：
+0e) 09B 一键启动/隧道/停止/状态脚本已完成并提交 6491fe9（交接 39dc1b9）：
    新增 scripts/richman-common.ps1、start-lan.ps1、start-tunnel.ps1、stop.ps1、
    status.ps1、apps/server/tests/scripts.test.ts（5 条），README 增加一节。
    65 文件/786 条、typecheck/build 0；真实验收 start-lan→health 200→

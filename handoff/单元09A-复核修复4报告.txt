@@ -1,0 +1,80 @@
+单元 09A 复核修复4 报告（测试 49/50 强度补强）
+================================================================
+日期：2026-11-07
+依据：handoff/复核-单元09A-第三轮验证.txt（Qoder，结论「需修复」M1/M2/S1/S2）
+规格：handoff/单元09A-复核修复4.txt（F16–F20）
+范围：只改 apps/server/tests/security.test.ts 与 09A/09B 交接文档、项目状态；
+      未改 apps/server/src/**、packages/**、apps/web/**、协议、依赖；未 commit。
+
+一、结论
+- 测试 49 已改为“先建真实连接 A（total=1）→ 无效握手只减自己 → 再 60 次仍 1、
+  A 仍 OPEN 且可 ready”。双释放变异会使 total 变 0，49 真实变红。
+- 测试 50 已改为正反两段：正段 autoPong 默认 true，3 次 tick 每次等 ping +
+  50ms 稳定窗口，断言仍 OPEN/online/total=1；反段 autoPong:false 才关闭、
+  座位保留 offline、total=0。autoPong 改成 true 的变异会使反段超时，50 真实变红。
+- handleUpgrade 同步抛错分支无可注入缝隙，按 F18 未重构生产代码，已记录为未验证项。
+- 文档条数与基线已同步；全量 65 文件 / 786 条、typecheck 0。
+
+二、改动文件
+- apps/server/tests/security.test.ts：重写测试 49/50，新增 waitForClose helper。
+- handoff/单元09A-成果报告.txt：基线、50 条摘要、49/50 说明、第四轮 F16–F20、未验证项。
+- handoff/单元09A-运行与验收.txt：实跑条数、49/50 加严与变异探针输出。
+- handoff/单元09A-注意事项.txt：F18 未验证项、49/50 加严说明。
+- handoff/单元09A-下一阶段交接.txt：09C 补 F18 未验证项。
+- handoff/项目当前状态.txt：09A 四轮状态、条数、09B 已提交事实。
+- 新增：handoff/单元09A-复核修复4报告.txt（本文件）。
+
+三、验收命令与真实结果
+1) corepack pnpm -s test
+   65 文件 / 786 条全部通过；TEST_EXIT=0；Duration 7.92s。
+   日志：artifacts/test-logs/09Afix4-test.log
+2) corepack pnpm -s typecheck
+   TSC_EXIT=0；日志：artifacts/test-logs/09Afix4-typecheck.log
+3) corepack pnpm -s vitest run apps/server/tests/security.test.ts
+   50 passed；退出码 0；日志：artifacts/test-logs/09Afix4-security.log
+
+四、变异探针（仓库外副本）
+副本：D:\Lianjunjie\biancheng\richman-mutation-09a4
+  apps/server/{src,tests} + apps/web/dist + junction node_modules；
+  配置 vitest.config.ts（别名指向仓库 packages/shared、packages/game-core）；
+  运行：corepack pnpm exec vitest run --config <副本>\vitest.config.ts。
+基线：50/50 PASS（09Afix4-mutation-baseline.log）。
+
+变异 1：ws.ts 的 releaseIfUnclaimed 去掉 released 守卫，连续 release 两次
+  结果：49 passed / 1 failed；失败用例：
+    FAIL apps/server/tests/security.test.ts > 09A security >
+      49 握手失败只释放一次：基线连接 total 不变，60 次后 A 仍可 ready
+    Error: 等待条件超时
+      ❯ waitFor security.test.ts:57:50
+      ❯ security.test.ts:681:5
+  日志：artifacts/test-logs/09Afix4-mutation1.log
+  说明：无效握手 admit 后 total=2，close 双释放把 total 减到 0；
+  新断言要求 total===1，因此 waitFor 超时并变红。
+
+变异 2：把测试 50 的 { autoPong: false } 改成 { autoPong: true }
+  结果：49 passed / 1 failed；失败用例：
+    FAIL apps/server/tests/security.test.ts > 09A security >
+      50 心跳：autoPong 默认保活，autoPong:false 才超时关闭并释放
+    Error: 连接未在时限内关闭
+      ❯ Timeout._onTimeout security.test.ts:65:43
+  日志：artifacts/test-logs/09Afix4-mutation2.log
+  说明：正段每次 tick 后等待 ping + 50ms 让 pong 被服务端处理；
+  反段 autoPong=true 时连接不再超时，waitForClose 1.5s 超时变红。
+
+副本已删除（MUTATION_COPY_REMOVED=True），仓库未改生产代码。
+
+五、F18（handleUpgrade 同步抛错）
+- onUpgrade 里的 wss 与 security 是闭包局部，startServer 没有注入
+  handleUpgrade 执行器的缝隙；测试无法在不改生产语义/不新增依赖的情况下触发
+  `wss.handleUpgrade(...)` 同步抛错。
+- 按规格未重构 ws.ts。已在以下位置记录未验证：
+  handoff/单元09A-注意事项.txt 第 13 节；
+  handoff/单元09A-下一阶段交接.txt 09C 待办；
+  handoff/单元09A-成果报告.txt 第七节。
+- 补测试的前置条件：引入可注入的 upgrade 执行器（例如 LobbyWsOptions 增加
+  handleUpgrade 钩子），属于生产代码改动，应另开单元/修复单。
+
+六、未完成 / 未验证
+- 第四轮补强后的 Qoder 再复核未做。
+- handleUpgrade 同步抛错分支仍依赖代码审查（F18）。
+- 真机、代理层 429/503、多段 XFF 等既有未验证项不变。

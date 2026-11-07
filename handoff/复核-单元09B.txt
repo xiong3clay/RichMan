@@ -1,0 +1,385 @@
+RichMan 单元 09B 一键启动 / 隧道 / 停止 / 状态脚本 独立复核
+================================================
+复核员：Qoder（只读复核；未改源码/测试，未 commit）
+日期：2026-11-07
+复核对象：
+  - scripts/richman-common.ps1、start-lan.ps1、start-tunnel.ps1、stop.ps1、status.ps1
+  - apps/server/tests/scripts.test.ts（5 条）
+  - README「一键启动 / 停止」一节
+  - handoff/单元09B-成果报告.txt、运行与验收.txt、下一阶段交接.txt、注意事项.txt
+提交状态：实现 6491fe9；文档 39dc1b9；当前 HEAD 2dc10f8
+规格：handoff/单元09B-一键启动与停止脚本.txt
+
+结论：FAIL（需修复）
+      主链路（start-lan → /health → status → 幂等 → stop）和真实隧道可用，
+      但存在两个可复现的必须修复项：
+      M1 stop 只按 PID + 进程名白名单停止，PID 复用时误杀无关 node/cloudflared；
+      M2 start-tunnel 没有 -DataDir 且会静默忽略，导致 stop -DataDir 漏停隧道。
+      另有 3 个代码应该修复项（S1-S3）、1 个测试充分性问题（S4）和若干文档缺口。
+
+一、结论摘要
+必须修复：
+  M1 PID 复用误杀无关进程（scripts/richman-common.ps1:110-131 + stop.ps1:36-48）
+  M2 start-tunnel 无 -DataDir 且静默忽略，stop 漏停隧道（start-tunnel.ps1:1-14）
+应该修复：
+  S1 健康检查只看 HTTP 2xx/3xx，不校验 service=richman（common.ps1:74-89）
+  S2 Write-RunState 失败后子进程残留、无状态（start-lan.ps1:141-163）
+  S3 状态文件坏 JSON 时 stop 静默打印“未在运行”并 exit 0（common.ps1:25-35）
+  S4 scripts.test.ts 只覆盖 CheckOnly/文件检查，不能防住 M1/M2（scripts.test.ts:81-139）
+测试充分性单独结论：
+  5/5 通过，满足规格“至少 5 条”的最低要求，但不足以自证一键脚本安全；
+  没有完整生命周期、start-tunnel 功能、PID 复用、DataDir 一致性、伪健康、
+  状态写失败清理的测试。M1/M2 均能通过现有 5 条测试。
+
+二、复核环境与真实运行范围
+环境：
+  Windows PowerShell 5.1.26100.9711（C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe）
+  Node v24.18.0；corepack pnpm；cloudflared D:\Lianjunjie\tools\cloudflared.exe
+  pwsh 7 未安装（Get-Command pwsh -> PWSH7_NOT_INSTALLED），因此只实测了 PS 5.1。
+运行范围：
+  - 只使用随机空闲端口 18772-18782 和临时目录 D:\Lianjunjie\biancheng\richman-09b-probe；
+  - 未启动/停止 8000 端口，未写 apps/server/data；
+  - 真实 cloudflared 隧道只开在 18782，测完立即 stop；
+  - 所有临时目录和测试进程已清理（见第十一节）。
+基础检查：
+  - 五个 .ps1 首三字节均为 EF BB BF；
+  - 入口脚本首行 param(；
+  - scripts.test.ts 的 5 条包含在仓库 65 文件/786 条全量通过中；
+  - 全量 TEST_EXIT=0（786/786）、typecheck EXIT=0、build EXIT=0（141 modules）。
+
+三、必须修复 M1：PID 复用会误杀无关进程
+位置：
+  scripts/richman-common.ps1:110-131 Get-ProcessInfo
+  scripts/stop.ps1:36-48 取到进程后直接 Stop-Process
+代码事实：
+  Get-ProcessInfo 只做两件事：
+    1) Get-Process -Id <state.pid> 是否存活；
+    2) ProcessName 是否等于 node（server）或 cloudflared（tunnel）。
+  state 里虽然写了 startedAtUtc，但 Get-ProcessInfo 完全没有读取它，
+  也没有比较进程启动时间、命令行或端口归属。
+  white-list 只能区分“进程类型”，不能区分“是不是这次启动的那个进程”。
+
+复现步骤：
+  1) 在临时目录启动一个与 RichMan 无关的 node 进程（probe-sleep.js，PID 44404）；
+  2) 在临时 dataDir 的 run/server.json 写入：
+       {"pid":44404,"startedAtUtc":"2020-01-01T00:00:00Z","port":19999,...}
+     实际该 node 进程的 StartTime 是：
+       ACTUAL_START=2026-11-07T13:10:36Z
+  3) 执行：
+       powershell -ExecutionPolicy Bypass -File scripts/stop.ps1 -DataDir <临时目录>
+实际结果：
+  已停止 server（pid 44404）。
+  已全部停止。
+  {"ok":true,"stopped":[{"kind":"server","pid":44404,"running":false}],"warnings":[],"dataDir":"..."}
+  DUMMY_ALIVE=false
+  即：状态文件里的 startedAtUtc 与真实进程启动时间相差 6 年，stop 仍然杀了它。
+  另一轮用 PID 48196 复现同样结果。
+
+为什么是必须修复：
+  - 规格第 50-51 行明确把“进程名白名单”当作“防 PID 复用误杀”，实现没有达到这个目标；
+  - Windows PID 会复用；dataDir 里的 server.json/tunnel.json 会跨重启保留。
+    重启后另一个 node 应用/cloudflared 拿到旧 PID 时，stop 会把它当成本服务杀掉；
+  - 这不是“按端口杀陌生进程”，但仍然是“按过期 PID 杀陌生进程”，
+    与“绝不杀无关进程”的安全目标冲突；
+  - start-lan 的 alreadyRunning 判断和 status 的 processRunning 也复用同一个
+    Get-ProcessInfo，会产生同样的误判（只是那两处不杀进程）。
+
+建议修复：
+  - 在 Get-ProcessInfo 中比较 state.startedAtUtc 与 $process.StartTime（允许 1-2 秒
+    误差；跨时区统一用 UTC），不一致返回 $null 并让调用方 WARN；
+  - 或者保存并比较命令行/可执行文件路径（server 必须含
+    `--import tsx` 与 `apps/server/src/http.ts`；tunnel 必须是 cloudflared 路径）；
+  - 不匹配时不要 Stop-Process，也不要静默删除状态；打印“状态文件与进程不匹配，
+    可能 PID 已复用，未杀进程，请人工检查”，并保留状态文件供排查；
+  - 修复后 M1 的测试：起一个无关 node，写同 PID 但旧 startedAtUtc 的状态，
+    stop 必须不杀它。
+
+四、必须修复 M2：start-tunnel 没有 -DataDir，且静默忽略
+位置：
+  scripts/start-tunnel.ps1:1-6 参数只有 -Port、-Cloudflared、-TimeoutSec、-CheckOnly；
+  scripts/start-tunnel.ps1:14 $dataPath = Resolve-DataDir ''
+  （start-lan.ps1、stop.ps1、status.ps1 都有 -DataDir）
+代码事实：
+  start-tunnel.ps1 没有 [CmdletBinding()]，是简单脚本；在 Windows PowerShell 5.1 下，
+  未知命名参数会进入 $args 而不是报错。因此 `start-tunnel.ps1 -DataDir X` 不会提示
+  参数不存在，而是完全忽略 X，继续按 RICHMAN_DATA_DIR 或默认 apps/server/data 解析。
+  实测 CheckOnly 没有参数错误，输出照常。
+
+复现 1（-DataDir 被忽略）：
+  在 tunnelB/run/tunnel.json 放一个真实存活的假 cloudflared 状态
+  （pid 28984，url=https://probe.trycloudflare.com）；
+  执行：
+    powershell -File scripts/start-tunnel.ps1 -CheckOnly -Port 18775 -DataDir tunnelA
+  实际：
+    {"ok":false,"reason":"LOCAL_SERVER_DOWN",...,"alreadyRunning":{"ok":true,"running":false,"url":""}}
+  它没有看到 tunnelB 的状态，说明 -DataDir tunnelA 被忽略，读的是默认/环境目录。
+  再执行：
+    RICHMAN_DATA_DIR=tunnelB powershell -File scripts/start-tunnel.ps1 -CheckOnly -Port 18775
+  实际：
+    {"ok":false,"reason":"ALREADY_RUNNING",...,"alreadyRunning":{"ok":false,"running":true,"url":"https://probe.trycloudflare.com"}}
+  只有环境变量能生效，-DataDir 不能。
+
+复现 2（stop 漏停隧道）：
+  powershell -File scripts/stop.ps1 -DataDir tunnelA
+  实际：
+    未在运行（没有找到 server.json / tunnel.json）。
+    {"ok":true,"stopped":[],"warnings":[],"dataDir":"...tunnelA"}  exit 0
+  powershell -File scripts/stop.ps1 -DataDir tunnelB
+  实际：
+    已停止 tunnel（pid 28984）。
+    {"ok":true,"stopped":[{"kind":"tunnel","pid":28984,"running":false}],...}  exit 0
+  即 stop -DataDir tunnelA 时隧道进程仍然活着；换到它真正写入的目录才停掉。
+
+真实使用后果：
+  1) 用户按 handoff/单元09B-运行与验收.txt:108 的“换端口/数据目录：加 -Port 8001、
+     -DataDir D:\richman-data”执行：
+       start-lan -DataDir X
+       start-tunnel -DataDir X
+     但 tunnel 状态和日志实际写到默认 apps/server/data/run/tunnel.json、logs/tunnel-*；
+  2) 随后 stop -DataDir X 只看到 server.json，停掉本地服务，却把 cloudflared 和
+     公网隧道留在运行状态；用户以为“全停”，公网入口仍然存在；
+  3) 反过来不带 -DataDir 的 stop 会停隧道但看不到 X 里的 server，也会漏停。
+  这不只是文档问题，是一键停止的安全/一致性问题。
+
+规格冲突说明：
+  09B 规格第 15 行说数据目录“可被 -DataDir / RICHMAN_DATA_DIR 覆盖”；
+  第 88 行 start-tunnel 的参数表却没有 -DataDir。实现选择了第 88 行，但没有防呆，
+  导致第 15 行、README:43-44、运行与验收:108 的承诺失效。
+  无论最终选“给 start-tunnel 加 -DataDir”还是“明确只支持环境变量”，都必须：
+    - 未知 -DataDir 不能静默忽略（至少报错并提示改用 RICHMAN_DATA_DIR）；
+    - stop/status/start-lan/start-tunnel 的目录解析规则写成同一套；
+    - 文档只保留与实现一致的说法。
+
+建议修复：
+  - start-tunnel.ps1 增加 [string]$DataDir = ''，改为 Resolve-DataDir $DataDir；
+  - 五个入口脚本加 [CmdletBinding()]，让未知参数直接报错；
+  - README、09B 运行与验收、注意事项同步“所有脚本都支持 -DataDir”；
+  - 增加测试：start-lan/start-tunnel/stop 使用同一个临时 dataDir，stop 必须停掉
+    两个状态文件（start-tunnel 可用假 cloudflared 进程，避免真实公网）。
+
+五、应该修复 S1：健康检查只认 HTTP 状态，不认 RichMan 身份
+位置：
+  scripts/richman-common.ps1:74-89 Wait-HttpHealth 只判断 2xx/3xx；
+  scripts/start-lan.ps1:55-62 用它判断已有 server.json 是否 ALREADY_RUNNING；
+  scripts/status.ps1:27-30 只要 body 能解析成 JSON 就置 serverOk=true，
+  不校验 body.service / body.ok。
+事实：
+  服务端 /health 的响应明确带 service:"richman"（apps/server/src/http.ts:214-218），
+  但脚本没有使用这个身份字段。
+
+复现：
+  1) 在 18774 启动一个普通 node HTTP 服务，/health 返回 200 + {"hello":"world"}；
+  2) 在临时 dataDir 写 server.json，pid 指向该 node，port=18774；
+  3) start-lan -CheckOnly -Port 18773 -DataDir <临时目录>：
+       {"ok":false,"reason":"ALREADY_RUNNING",...,
+        "alreadyRunning":{"ok":false,"running":true}}
+       exit 1
+  4) status -Port 18774 -DataDir <临时目录> -Json：
+       {"ok":true,...,"server":{"ok":true,"port":18774,"rooms":0,"connections":0,"reason":""},
+        "tunnel":{...}}
+       exit 0
+  用 text/plain 200 时 start-lan 仍判 ALREADY_RUNNING；status 会因 JSON 解析失败而报错，
+  但 start-lan 的误判与 body 类型无关。
+
+为什么应该修复：
+  - 同端口有别的 HTTP 服务、或状态文件过期的 PID 恰好指向另一个 node 时，
+    start-lan 会拒绝启动并说“已在运行”，status 会把陌生服务报成 RichMan 健康；
+  - 与 M1 叠加时，stop 还可能杀错 node；
+  - 修复成本低：Wait-HttpHealth 解析 JSON，要求 ok===true 且 service==='richman'；
+    status 同样要求；隧道 URL 的 /health 也是同一个服务，可复用同一判断。
+
+六、应该修复 S2：Write-RunState 失败后子进程残留、无状态
+位置：
+  scripts/start-lan.ps1:141-163 Start-Process → Wait-HttpHealth → Write-RunState；
+  scripts/start-tunnel.ps1:95-116 同样的“先起进程、后写状态”结构；
+  scripts/richman-common.ps1:37-51 Write-RunState。
+
+复现（start-lan）：
+  1) 临时 dataDir 下把 `run` 建成普通文件而不是目录；
+  2) 执行 start-lan -Port 18778 -DataDir <临时目录> -TimeoutSec 10；
+  3) 健康检查通过后，Write-RunState 写 run\server.json.tmp 抛异常：
+       使用“3”个参数调用“WriteAllText”时发生异常:
+       “未能找到路径 ...\run\server.json.tmp 的一部分。”
+       位置 richman-common.ps1:46
+  4) 脚本 FAIL_EXIT=1、没有 server.json，但 netstat 显示：
+       0.0.0.0:18778 LISTENING 24268
+     Get-CimInstance 确认命令行是：
+       node.exe --import tsx --no-warnings apps/server/src/http.ts
+     即启动成功的服务器还在监听，stop 因为没有状态文件而找不到它。
+     复核时只杀了这个自己启动的 24268，未动其他 node。
+
+对照（健康检查失败路径是好的）：
+  start-lan -Port 18777 -TimeoutSec 0：
+    FAIL_EXIT=1
+    服务启动失败（健康检查超时），进程已停止。日志：...
+    没有 server.json，18777 无 LISTENING。
+  说明“让健康检查立即超时”的失败路径会清理子进程且不写状态；
+  S2 专指“健康检查已通过、随后写状态失败”的路径，规格/文档没有覆盖。
+
+为什么应该修复：
+  - 磁盘满、目录权限变化、run 被同名文件占用等都可能让 Write-RunState 抛错；
+  - 结果是一个仍在 0.0.0.0 监听的服务器，没有状态文件，stop 无法发现；
+  - start-tunnel 同一结构失败时，会留下 cloudflared 和公网隧道（按代码路径；
+    本次未实跑该分支，避免再开公网隧道做破坏性写失败）。
+
+建议修复：
+  - 用 try/catch 包住 Start-Process 之后的全部步骤；任何异常都 Stop-Process
+    刚启动的子进程（核对 StartTime/命令行），删除 .tmp 和半写状态，打印日志后
+    以非 0 退出；
+  - start-tunnel 同理，异常时停止 cloudflared；
+  - 增加“run 是文件”或“状态目录不可写”的测试。
+
+七、应该修复 S3：状态文件坏 JSON 时 stop 静默当作“未在运行”
+位置：
+  scripts/richman-common.ps1:25-35 Read-RunState，JSON 解析失败返回 $null；
+  scripts/stop.ps1:30-39 把 $null 当成“没有状态文件”。
+
+复现：
+  1) 启动一个无关 node（PID 42380）；
+  2) 写 badjson/run/server.json 内容 `{not valid json`；
+  3) stop -DataDir badjson：
+       未在运行（没有找到 server.json / tunnel.json）。
+       {"ok":true,"stopped":[],"warnings":[],"dataDir":"..."}  exit 0
+  4) 实际 DUMMY_ALIVE=true，坏状态文件仍在。
+为什么应该修复：
+  - 原子写降低了坏文件概率，但磁盘异常/手工编辑仍可能发生；
+  - 当服务实际在跑而状态文件坏了时，stop 打印“未在运行”并 exit 0，用户会误以为
+    已停止；不要求它按端口杀进程，但至少应该 WARN 并返回非 0，提示人工检查。
+建议：
+  - stop 先 Test-Path；文件存在但 Read-RunState 返回 null 时，WARN
+    “状态文件存在但无法解析，未按端口杀进程，请人工检查”并 exit 2/3；
+  - status 同样显示“状态文件损坏”，而不是当作没有隧道/服务。
+
+八、测试充分性（单独结论）
+现状：
+  apps/server/tests/scripts.test.ts:81-139 只有 5 条：
+    1) 文件存在 + BOM + 入口 param(；
+    2) start-lan -CheckOnly 空闲端口 ok=true；
+    3) start-lan -CheckOnly 端口占用 PORT_IN_USE/exit 1；
+    4) stop -CheckOnly 空目录 ok=true/不创建 run；
+    5) status -CheckOnly 无服务 ok=false/exit 1。
+  这 5 条是真实的 spawnSync 调用，不是空测试；全量 786 通过，满足规格最低 5 条。
+不足：
+  - 没有 start-tunnel 的功能测试（只检查文件/BOM）；
+  - 没有 start → health → status → stop → 端口释放的完整生命周期；
+  - 没有 PID 复用/startedAtUtc 测试（M1 会通过现有测试）；
+  - 没有 start-lan/start-tunnel/stop 共用同一 DataDir 的测试（M2 会通过现有测试）；
+  - 没有“陌生 HTTP 200/JSON”伪健康测试（S1 会通过）；
+  - 没有写状态失败后的孤儿清理测试（S2 会通过）；
+  - 09B 成果报告里的真实验收链是人工执行，没有进入自动化回归。
+结论：
+  5/5 通过不等于“安全自证”。对于 stop 这种会终止进程的脚本，现有测试不足；
+  修复 M1/M2 时必须补对应回归测试，建议至少加：
+    a) 无关 node + 旧 startedAtUtc 状态 → stop 不杀；
+    b) 假 cloudflared 状态 + 同一个临时 DataDir → start-tunnel/stop 一致；
+    c) 随机端口完整生命周期（start/health/status/stop/无监听）；
+    d) 普通 JSON 200 服务 + 状态 → start-lan 不 ALREADY_RUNNING、status 不 ok；
+    e) run 为文件/状态写失败 → 子进程被清理。
+  测试仍用 Windows-only、随机端口、临时目录，避免 8000 和 apps/server/data。
+
+九、已通过的验收项（本轮亲手跑出）
+1) 生命周期（随机端口 18781，临时 dataDir）：
+   START_EXIT=0
+   服务已启动：http://127.0.0.1:18781/
+   局域网：http://10.25.226.102:18781/
+   HTTP/1.1 200 OK
+   x-content-type-options: nosniff / referrer-policy: no-referrer /
+   x-frame-options: DENY
+   STATUS_EXIT=0
+   {"ok":true,"port":18781,...,"server":{"ok":true,"port":18781,"rooms":0,"connections":0,"reason":""},
+    "tunnel":{"ok":false,"url":"","processRunning":false}}
+   幂等：IDEMPOTENT_EXIT=0，“已在运行 http://127.0.0.1:18781/ ...”
+   STOP_EXIT=0
+   已停止 server（pid 48188）。
+   {"ok":true,"stopped":[{"kind":"server","pid":48188,"running":false}],...}
+   NO_LISTENER_18781；run 目录为空；logs/server-*.log 保留。
+2) 真实 cloudflared 隧道（18782，临时 dataDir 用 RICHMAN_DATA_DIR 指定）：
+   TUNNEL_EXIT=0
+   隧道已开启：https://poetry-finds-wish-bike.trycloudflare.com
+   状态：PID=37928 URL=https://poetry-finds-wish-bike.trycloudflare.com
+   隧道 /health 首次 DNS 未就绪（curl 连续 000 约 20 秒），随后：
+     HTTP/1.1 200 OK
+   同源 POST /api/rooms + text/plain：
+     HTTP/1.1 415 Unsupported Media Type
+     （说明 Origin 已被服务端接受，只是 Content-Type 被拒）
+   恶意 Origin POST：
+     HTTP/1.1 403 Forbidden
+   同源 WS 升级：
+     HTTP/1.1 101 Switching Protocols
+     Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+   status -Json：
+     STATUS_EXIT=0
+     {"ok":true,...,"tunnel":{"ok":true,"url":"https://poetry-finds-wish-bike.trycloudflare.com","processRunning":true}}
+   stop：
+     STOP_EXIT=0
+     已停止 tunnel（pid 37928）。
+     已停止 server（pid 46848）。
+   NO_LISTENER_18782；无 cloudflared 残留。
+   说明：隧道 URL 每次重启都会变，本 URL 只作本次证据；浏览器手机端未测（转 09D）。
+3) 编码与语法：
+   五个 .ps1 均 EF BB BF；Windows PowerShell 5.1.26100.9711 实测可运行；
+   scripts.test.ts 5 条通过；全量 65 文件/786 条、typecheck 0、build 0。
+4) CheckOnly 副作用：
+   stop -CheckOnly 空目录 / status -CheckOnly 空目录：均不创建目录（DIR_CREATED=false）；
+   start-lan -CheckOnly 会创建数据目录并写删探针（规格要求），复核后目录中无探针残留。
+5) 失败路径（健康检查）：
+   start-lan -TimeoutSec 0：exit 1、无 server.json、无监听；失败时会停止刚启动的子进程。
+6) 停止范围：
+   未发现按端口杀陌生进程的代码；stop 只读取两个状态文件。问题在 M1 的 PID 复用，
+   不是按端口误杀。
+7) 状态/日志位置：
+   生命周期与真实隧道的 run/*.json、logs/*.log 都落在指定 dataDir（隧道用
+   RICHMAN_DATA_DIR 指定）；未写仓库根或静态目录。
+
+十、可选项 / nits（不阻塞本次结论）
+N1 stop -CheckOnly 的计划项没有端口：
+   scripts/stop.ps1:42-45 只输出 kind/pid/running；规格第 115 行要求“只打印将停止的
+   pid/端口”。建议把 state.port 加进 planned。
+N2 status 的 -Port 不读 server.json 的 port：
+   scripts/status.ps1:9 的 healthUrl 只由 -Port 拼出。start-lan -Port 8001 后直接跑
+   `status`（缺省 8000）会报服务不健康，即使状态文件里写的是 8001。
+   建议：status 在未显式传 -Port 时从状态文件取 port，或至少在文档中强调必须带 -Port。
+N3 文档陈旧/不一致：
+   - handoff/单元09B-成果报告.txt:3-4、:116-117 仍写“基线 793bb83；本轮实现未 commit /
+     本轮无新提交”；实际实现已在 6491fe9，文档在 39dc1b9。
+   - handoff/单元09B-下一阶段交接.txt:3 同样写“基线 793bb83；本轮实现未提交”。
+   - handoff/单元09B-运行与验收.txt:108 把 -DataDir 说成四个脚本通用；start-tunnel
+     实际不支持（M2）。
+   - README.md:38-45 的 start-tunnel 参数行没有 -DataDir，但 :43-44 又有通用的
+     “可用 -DataDir 覆盖”表述；建议明确 start-tunnel 是环境变量还是新增参数。
+   这些不影响代码主链路，但会误导下一位使用者/复核员，建议随 M2 一起改。
+N4 失败/超时路径 Stop-Process 只按 PID：
+   scripts/start-lan.ps1:148（健康失败）和 scripts/start-tunnel.ps1:101（URL 超时）
+   对刚启动的 $process.Id 直接 Stop-Process；PID 在几十秒内被复用的概率极低，
+   但建议和 M1 一样先核对 StartTime/命令行，保持所有终止路径一致。
+N5 Write-RunState 失败会留下 .tmp：
+   scripts/richman-common.ps1:46-48 先写 .tmp 再 Move-Item；Move 失败时没有清理 .tmp。
+   低概率，建议 catch 后删除 .tmp（和 S2 一起处理）。
+N6 PS 5.1 管道捕获行为：
+   复核时实际用 `powershell ... start-lan.ps1 | iconv` 触发过一次挂起：
+   start-lan 的 node 子进程继承了管道句柄，命令一直等到服务被 stop 才返回。
+   09B 注意事项第 5 节和成果报告已记录此行为；直连/双击/文件重定向不受影响。
+   这不是本轮新缺陷，但 CI/自动化必须重定向到文件，不能把脚本输出直接接管道。
+
+十一、未验证项（不得当作已验证）
+1) pwsh 7 未安装，未实测；只验证了 Windows PowerShell 5.1。
+2) 真机手机浏览器经 LAN/隧道访问未测；本次只做了 curl /health、curl POST 与
+   curl 的 WS 101 升级，不等于手机 UI/Origin 全链路（09D）。
+3) 防火墙入站规则未实际添加（需管理员）；计划任务未迁移；非 Windows 未测。
+4) start-tunnel 的 Write-RunState 失败分支只做了代码审查，未实跑（避免在公网
+   隧道上制造孤儿）；start-lan 的同类分支已实跑并复现（S2）。
+5) start-tunnel 在“无 -DataDir、无环境变量”时写默认 apps/server/data 的行为未实跑
+   （按约束不写 apps/server/data）；M2 的证据来自 -DataDir 被忽略和 stop 漏停的
+   CheckOnly/假进程测试。
+6) status 缺省 -Port 与 state.port 不一致（N2）只做了代码审查，未额外起 8001 实跑。
+7) start-lan -Build 路径、dist 缺失路径未实跑；不影响本轮脚本安全结论。
+8) 隧道 /health 的 DNS 延迟：本次观察到约 20 秒 000 后 200；脚本 30 秒 WARN
+   属预期，文档已提示重试，但仍依赖校园 DNS/网络。
+9) 日志轮转、多实例并发、隧道服务端 429/503 未验证（09C/09D）。
+
+十二、清理声明
+- 已 stop 所有复核实起的 server/cloudflared；1877x/1878x/50000/19999 均无 LISTENING；
+- 已删除临时目录 richman-09b-review、richman-09b-probe（含假 cloudflared、日志、状态）；
+- 未修改仓库源码/测试/脚本/README/09B 交接，未 commit；
+- 本次复核新增两份报告：本文件与 handoff/复核-单元09A-第四轮验证.txt
+  （实现方已有的未跟踪 09A 修复报告不计入本次新增）。
