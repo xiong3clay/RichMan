@@ -1,0 +1,173 @@
+单元 09A 服务加固：输入校验、连接/房间上限、Origin 与限流
+================================================================
+基线：HEAD facbbe6（08C 文档已提交；实现 d7b67f8）。本单元只做“服务端加固 + 测试”，
+不动引擎规则、不改前端交互、不改协议版本号（PROTOCOL_VERSION 仍为 1）。
+
+一、范围与文件
+允许修改/新增：
+- packages/shared/src/protocol.ts（只加昵称控制字符校验）
+- packages/shared/src/rules.ts（只加 SERVER_DEFAULTS.security 常量，可选）
+- apps/server/src/security.ts（新增：令牌桶、Origin 判定、连接配额、配置读取）
+- apps/server/src/http.ts（Origin、Content-Type、房间上限、建房限流、安全响应头、/api 404）
+- apps/server/src/ws.ts（升级前 Origin/配额、认证超时、命令与经济命令限流、加入/恢复限流）
+- apps/server/tests/security.test.ts（新增，>= 20 条）
+- apps/server/tests/security-harness.ts（如需复用启动/连接辅助，可新增）
+- handoff/单元09A-*.txt 四份
+禁止：改 packages/game-core/**、apps/web/**、协议消息形状、存档 schema、旧测试断言。
+不得新增 npm 依赖（只用 node 内置 + 已有 ws/zod/vitest）。
+
+二、配置与阈值（写进 apps/server/src/security.ts，可被测试注入）
+export interface SecurityLimits {
+  maxConnectionsTotal: number;        // 200
+  maxConnectionsPerIp: number;        // 20
+  maxUnauthenticated: number;         // 60
+  maxRooms: number;                   // 50
+  unauthTimeoutMs: number;            // 60_000
+  wsMessagesPerSecond: number;        // 60（粗粒度，保留现状）
+  commandBurst: number;               // 20
+  commandPerSecond: number;           // 10
+  economicBurst: number;              // 10
+  economicPerSecond: number;          // 5
+  createRoomBurst: number;            // 10
+  createRoomPerMinute: number;        // 10
+  joinBurst: number;                  // 10
+  joinPerMinute: number;              // 20
+  resumeBurst: number;                // 5
+  resumePerMinute: number;            // 10
+  resumePerRoomPerMinute: number;     // 30
+  allowedOrigins: readonly string[];  // 额外允许的完整 origin
+  trustProxy: boolean;                // 默认 false
+}
+export const DEFAULT_SECURITY_LIMITS: SecurityLimits = {...};
+export function loadSecurityLimits(env: NodeJS.ProcessEnv): SecurityLimits;
+环境变量（都要写进交接文档）：
+- RICHMAN_ALLOWED_ORIGINS：逗号分隔，如 https://abc.trycloudflare.com
+- RICHMAN_TRUST_PROXY=1：只有显式设置时才读 X-Forwarded-For 第一段作为来源 IP
+- RICHMAN_MAX_CONNECTIONS / RICHMAN_MAX_CONNECTIONS_PER_IP / RICHMAN_MAX_ROOMS：
+  可选正整数覆盖默认值；非法值忽略并回退默认（不得抛错导致服务起不来）
+来源 IP 判定：trustProxy=false 用 socket.remoteAddress（去掉 IPv4-mapped ::ffff: 前缀，
+IPv6 归一化小写）；trustProxy=true 且 X-Forwarded-For 存在时取第一个非空段。
+Origin 判定：Origin 不是身份认证，只防任意网页跨站建立已认证连接。
+
+三、纯函数/类接口（security.ts，必须可单测、时间可注入）
+1) class TokenBucket {
+     constructor(capacity: number, refillPerMs: number, now: () => number);
+     tryTake(key: string): boolean;
+     prune(idleMs: number): void;   // 清掉长时间不用的 key，防止 map 无限增长
+     size(): number;
+   }
+   语义：每 key 初始满桶；按经过毫秒线性回填，上限 capacity；tryTake 成功扣 1。
+   同一毫秒内连续调用必须正确累计；不允许用 Date.now 直接读时钟。
+2) export function isAllowedOrigin(
+     origin: string | undefined,
+     host: string | undefined,
+     extra: readonly string[],
+   ): boolean;
+   - origin 缺失/空串 => true（非浏览器客户端、旧测试、smoke 脚本放行）
+   - origin 必须是可解析的 http/https URL，否则 false
+   - 与 Host 同源（host 头小写比较，含端口）=> true
+   - 与 extra 中某一项规范化后完全相同 => true
+   - 其余（含 http://evil.example）=> false
+   - host 缺失且 origin 存在、又不在 extra => false
+3) class ConnectionGuard {
+     constructor(limits: SecurityLimits, now: () => number);
+     admit(ip: string): { ok: true } | { ok: false; code: 'TOO_MANY_CONNECTIONS' | 'TOO_MANY_UNAUTHENTICATED' };
+     markAuthenticated(ip: string): void;
+     release(ip: string): void;
+     stats(): { total: number; unauthenticated: number; perIp: Record<string, number> };
+   }
+   判定顺序：总数 -> 单 IP -> 未认证数；admit 成功即计数 +1，失败不计数。
+   release 必须幂等（重复 release 不把计数减成负数）。
+4) 常量经济命令集合：
+   ECONOMIC_COMMANDS = BORROW_BANK, REPAY_BANK, REQUEST_PRIVATE_LOAN,
+   ACCEPT_PRIVATE_LOAN, REFUSE_PRIVATE_LOAN, CANCEL_PRIVATE_LOAN,
+   REPAY_PRIVATE, COLLECT_PRIVATE, SUBMIT_BET
+   （BANK_DUE_DECISION、RESCUE_GIVE_UP、END_ACTION 不算经济命令，但受全局命令限流）
+
+四、HTTP 改动（apps/server/src/http.ts）
+1) 所有响应加安全头：x-content-type-options: nosniff、referrer-policy: no-referrer、
+   x-frame-options: DENY。静态文件与 JSON 都要加（sendJson 与 serveStatic 统一走一个 helper）。
+2) POST /api/rooms：
+   - Origin 校验（isAllowedOrigin(origin, host, limits.allowedOrigins)），失败 403
+     {ok:false,error:"ORIGIN_NOT_ALLOWED"}；
+   - Content-Type：请求体非空且 content-type 不以 application/json 开头 => 415
+     {ok:false,error:"UNSUPPORTED_MEDIA_TYPE"}；
+   - 建房限流：按来源 IP 令牌桶（createRoomBurst / createRoomPerMinute），超限 429
+     {ok:false,error:"RATE_LIMITED"}；
+   - 房间上限：manager.roomCount() >= maxRooms => 503 {ok:false,error:"ROOM_LIMIT"}；
+   - 判定顺序：Origin -> Content-Type -> 限流 -> 房间上限 -> 创建。
+3) GET /api/rooms 保持只读；未知 /api/* 返回 404 {ok:false,error:"NOT_FOUND"}，
+   不得回退到 index.html。
+4) /health 返回字段不减少；可新增 limits 计数（可选）。
+5) createRequestHandler / startServer 增加可选注入：
+   security?: { limits?: SecurityLimits; guard?: ConnectionGuard; createRoomBucket?: TokenBucket;
+                joinBucket?: TokenBucket; resumeBucket?: TokenBucket; resumeRoomBucket?: TokenBucket };
+   测试用临时 limits 小值；缺省用 loadSecurityLimits(process.env)。
+   注意：startServer 里创建的 guard/buckets 必须传给 ws 与 http 同一实例。
+
+五、WebSocket 改动（apps/server/src/ws.ts）
+1) upgrade 前（url.pathname === "/ws" 判定之后、handleUpgrade 之前）：
+   - Origin 失败：直接写 HTTP/1.1 403 + Connection: close 并 socket.destroy()，不升级；
+   - guard.admit(ip) 失败：HTTP/1.1 503，不升级；reason 用 code 字符串；
+   - 未认证连接超时：连接满 unauthTimeoutMs 仍未 bind => sendError(conn,
+     "INVALID_MESSAGE", "连接超时，请重新加入") 后 ws.close(4003, "AUTH_TIMEOUT")；
+     用一个 5s 的 interval 扫描（与心跳共用方式，必须 unref 且 close 时清理）。
+2) bind 成功后 guard.markAuthenticated(conn.ip)；ws close 时 guard.release(conn.ip)，
+   确保幂等、异常重复 close 不重复扣减。
+3) 认证玩家命令限流（在 handle 的 command.success 分支、进入 processor 之前）：
+   - 全局：key = playerId，桶 capacity=commandBurst，refill=commandPerSecond/1000；
+   - 经济命令：key = playerId + "|" + command.type，桶 capacity=economicBurst，
+     refill=economicPerSecond/1000；
+   - 任一失败 => sendError(conn,"RATE_LIMITED","操作过于频繁，请稍后重试") 并 return，
+     不得执行命令、不得改状态。
+   - 保留现有每连接 60 条/秒粗限流，不删除。
+4) join / resume 限流（handleLobby 的 join/resume 分支、transact 之前）：
+   - join：按 IP 的 joinBucket；
+   - resume：按 IP 的 resumeBucket + 按房间的 resumeRoomBucket；
+   - 超限 => sendError(conn,"RATE_LIMITED","尝试过于频繁，请稍后重试") 并 return。
+   同一连接加入失败后重试也要计数。
+5) 日志卫生：不得 console.log 原始消息、token、恢复码；错误信息只带 code。
+6) 不改变已认证后的任何权限语义；Origin 通过不等于身份认证。
+
+六、共享校验（packages/shared/src/protocol.ts）
+NicknameSchema 增加：不得包含 C0 控制字符（\u0000-\u001F）与 DEL（\u007F），
+错误信息“昵称不能包含控制字符”；仍按 Unicode 码点 1~20 计数。
+不要改其他 schema、不要改协议版本。
+
+七、必测（apps/server/tests/security.test.ts，>= 20 条，全部要能在修复前变红）
+纯函数：
+1. TokenBucket 容量内连续取成功，超出失败；2. 回填后恢复；3. 不同 key 独立；
+4. prune 后 size 下降且不影响活跃 key。
+Origin：
+5. 无 Origin 放行；6. 同 Host 放行（含端口）；7. 额外白名单放行；
+8. http://evil.example 拒绝；9. Host 缺失 + Origin 存在拒绝；10. 非法 URL 拒绝。
+ConnectionGuard：
+11. 总数上限；12. 单 IP 上限；13. 未认证上限；14. markAuthenticated 后未认证数下降；
+15. release 幂等且计数不为负。
+HTTP：
+16. POST /api/rooms 跨站 Origin 403；17. 非 JSON Content-Type 415；
+18. 建房超过 createRoomBurst 连续请求 => 429；19. 房间数达 maxRooms => 503；
+20. /api/unknown 404 且不是 index.html；21. /health 与静态响应带三个安全头。
+WS：
+22. 升级带 Origin: http://evil.example 被 403 拒绝（用 ws 客户端 capture 'unexpected-response' 或 error）；
+23. 带同 Host Origin 能连上；24. 连接数超 per-IP 上限被 503；
+25. 同一玩家命令突发超过 commandBurst 收到 RATE_LIMITED，且状态 version 不变；
+26. 经济命令单独更严的桶生效（例如 10 连发 BORROW_BANK，第 11 条被限流）；
+27. join 限流：同 IP 连续 join 超 joinBurst 后收到 RATE_LIMITED。
+昵称：
+28. 20 个 emoji 通过；21 个码点拒绝；含 "\n" 或 "\u0000" 拒绝。
+
+八、验收命令（必须真实执行并写进成果报告）
+- pnpm -s test（旧 731 条不得删改跳过；总条数 = 731 + 新增）
+- pnpm -s typecheck
+- pnpm -s build
+- 手工：起服务后用 curl 验证 /health 安全头、POST 跨站 Origin 403、/api/unknown 404；
+  用 node 一行 ws 脚本验证 evil origin 被拒。
+- 记录 artifacts/test-logs/ 下日志路径（不复制 token）。
+
+九、交接与边界
+- 四份 handoff/单元09A-成果报告.txt、运行与验收、下一阶段交接、注意事项；
+  写清阈值表、环境变量、所有新增错误码、未做项（09B 脚本、09C 备份恢复、09D 真机矩阵）。
+- 已知取舍：Origin 只防浏览器跨站，不是认证；trustProxy 默认关闭；
+  未认证超时是 60s；限流是单进程内存态，重启清零（可接受，写进注意事项）。
+- 不改前端；若前端出现 429/403 文案，由 09B/09D 统一处理，不在本单元扩写。
