@@ -132,7 +132,7 @@ it('stale_owner_not_revived: 连续rename后失败与大厅座位复用不能使
   const h=await diskHarness();let newcomer:Peer|undefined;
   try{
     const base=`http://127.0.0.1:${h.server().port}`;
-    const {roomCode:code}=await (await fetch(base+'/api/rooms',{method:'POST',body:'{}'})).json();
+    const {roomCode:code}=await (await fetch(base+'/api/rooms',{method:'POST',headers:{'content-type':'application/json'},body:'{}'})).json();
     const a=await h.connect(code),b=await h.connect(code);
     h.store.options.failAt='after_rename';a.p.send({type:'leave'});
     expect(await a.p.next('error')).toMatchObject({code:'ERROR_PAUSED'});
@@ -219,7 +219,7 @@ it('cold_start_and_rematch: 空目录启动，反复再开只保存当前局comm
 it('empty_lobby_deleted: 大厅最后一人leave删除目录，重启不能复活空房间', async()=>{
   const h=await diskHarness();
   try{
-    const base=`http://127.0.0.1:${h.server().port}`;const {roomCode:code}=await (await fetch(base+'/api/rooms',{method:'POST',body:'{}'})).json();
+    const base=`http://127.0.0.1:${h.server().port}`;const {roomCode:code}=await (await fetch(base+'/api/rooms',{method:'POST',headers:{'content-type':'application/json'},body:'{}'})).json();
     const a=await h.connect(code),b=await h.connect(code);a.p.send({type:'leave'});await b.p.next('room',m=>m.players.length===1);
     b.p.send({type:'leave'});
     for(let i=0;i<100&&h.server().manager.getRoom(code)!==null;i++)await new Promise(r=>setTimeout(r,5));

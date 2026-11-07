@@ -7,6 +7,13 @@ import { SERVER_DEFAULTS, PROTOCOL_VERSION, NicknameSchema } from "@richman/shar
 import { RoomManager } from "./rooms/manager.js";
 import { attachLobbyWebSocket } from "./ws.js";
 import type { LobbyWsOptions } from './ws.js';
+import {
+  clientIp,
+  createSecurityRuntime,
+  isAllowedOrigin,
+  loadSecurityLimits,
+} from "./security.js";
+import type { SecurityOverrides, SecurityRuntime } from "./security.js";
 import { FileRoomStore } from './storage/file-store.js';
 import { loadAllRooms } from './rooms/recovery.js';
 
@@ -37,6 +44,8 @@ export interface ServerOptions {
   manager?: RoomManager;
   /** /health 的实时计数，缺省返回 0/0。 */
   stats?: () => { connections: number; rooms: number };
+  /** 09A：测试可注入小阈值；缺省 loadSecurityLimits(process.env)。 */
+  security?: SecurityOverrides;
 }
 
 export interface StartedServer {
@@ -44,17 +53,31 @@ export interface StartedServer {
   host: string;
   port: number;
   manager: RoomManager;
+  security: SecurityRuntime;
   connections: () => number;
   close: () => Promise<void>;
 }
 
+const SECURITY_HEADERS = {
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "no-referrer",
+  "x-frame-options": "DENY",
+} as const;
+
+function withSecurityHeaders(headers: http.OutgoingHttpHeaders = {}): http.OutgoingHttpHeaders {
+  return { ...SECURITY_HEADERS, ...headers };
+}
+
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
   const text = JSON.stringify(body);
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(text) });
+  res.writeHead(status, withSecurityHeaders({
+    "content-type": "application/json; charset=utf-8",
+    "content-length": Buffer.byteLength(text),
+  }));
   res.end(text);
 }
 
-function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
+function readBodyText(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -67,18 +90,7 @@ function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
       }
       chunks.push(chunk);
     });
-    req.on("end", () => {
-      const text = Buffer.concat(chunks).toString("utf8").trim();
-      if (text === "") {
-        resolve({});
-        return;
-      }
-      try {
-        resolve(JSON.parse(text));
-      } catch {
-        reject(new Error("BAD_REQUEST"));
-      }
-    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
 }
@@ -88,9 +100,27 @@ async function handleCreateRoom(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   manager: RoomManager,
+  security: SecurityRuntime,
 ): Promise<void> {
+  if (!isAllowedOrigin(req.headers.origin, req.headers.host, security.limits.allowedOrigins)) {
+    sendJson(res, 403, { ok: false, error: "ORIGIN_NOT_ALLOWED" });
+    return;
+  }
   try {
-    const body = await readJsonBody(req);
+    const text = await readBodyText(req);
+    const trimmed = text.trim();
+    const contentType = String(req.headers["content-type"] ?? "").toLowerCase();
+    if (trimmed !== "" && !contentType.startsWith("application/json")) {
+      sendJson(res, 415, { ok: false, error: "UNSUPPORTED_MEDIA_TYPE" });
+      return;
+    }
+    let body: unknown = {};
+    if (trimmed !== "") {
+      try { body = JSON.parse(trimmed); } catch {
+        sendJson(res, 400, { ok: false, error: "BAD_REQUEST" });
+        return;
+      }
+    }
     if (body === null || typeof body !== "object" || Array.isArray(body)) {
       sendJson(res, 400, { ok: false, error: "BAD_REQUEST" });
       return;
@@ -98,6 +128,15 @@ async function handleCreateRoom(
     const nickname = (body as Record<string, unknown>)["nickname"];
     if (nickname !== undefined && !NicknameSchema.safeParse(nickname).success) {
       sendJson(res, 400, { ok: false, error: "INVALID_NICKNAME" });
+      return;
+    }
+    const ip = clientIp(req, security.limits);
+    if (!security.createRoomBucket.tryTake(ip)) {
+      sendJson(res, 429, { ok: false, error: "RATE_LIMITED" });
+      return;
+    }
+    if (manager.roomCount() >= security.limits.maxRooms) {
+      sendJson(res, 503, { ok: false, error: "ROOM_LIMIT" });
       return;
     }
     sendJson(res, 201, { ok: true, roomCode: await manager.createRoomPersisted() });
@@ -129,7 +168,7 @@ function serveStatic(res: http.ServerResponse, requested: string, staticDir: str
           fs.readFile(path.join(staticDir, "index.html"), (err2, html) => {
             if (err2) sendJson(res, 404, { ok: false, error: "NOT_FOUND", hint: "尚未构建前端：先运行 pnpm build" });
             else {
-              res.writeHead(200, { "content-type": MIME[".html"] ?? "text/html; charset=utf-8" });
+              res.writeHead(200, withSecurityHeaders({ "content-type": MIME[".html"] ?? "text/html; charset=utf-8" }));
               res.end(html);
             }
           });
@@ -139,7 +178,7 @@ function serveStatic(res: http.ServerResponse, requested: string, staticDir: str
       sendJson(res, 404, { ok: false, error: "NOT_FOUND", hint: "尚未构建前端：先运行 pnpm build" });
       return;
     }
-    res.writeHead(200, { "content-type": MIME[path.extname(filePath)] ?? "application/octet-stream" });
+    res.writeHead(200, withSecurityHeaders({ "content-type": MIME[path.extname(filePath)] ?? "application/octet-stream" }));
     res.end(data);
   });
 }
@@ -149,6 +188,8 @@ export function createRequestHandler(opts: ServerOptions = {}): http.RequestList
   const startedAt = opts.startedAt ?? Date.now();
   const manager = opts.manager ?? new RoomManager();
   const stats = opts.stats ?? (() => ({ connections: 0, rooms: 0 }));
+  const limits = opts.security?.limits ?? loadSecurityLimits(process.env);
+  const security = createSecurityRuntime(limits, opts.wsOptions?.now ?? (() => Date.now()), opts.security);
   return (req, res) => {
     let url: URL;
     let decodedPath: string;
@@ -163,7 +204,14 @@ export function createRequestHandler(opts: ServerOptions = {}): http.RequestList
       sendJson(res, 400, { ok: false, error: "BAD_REQUEST" });
       return;
     }
-    if (req.method === "GET" && url.pathname === "/health") {
+    // 编码路径不得别名到 API 路由（如 /api%2Frooms 解码后看似 /api/rooms）；
+    // API 命名空间只接受原样路径，否则一律 JSON 404，绝不回退 index.html。
+    const apiNamespace = decodedPath === "/api" || decodedPath.startsWith("/api/");
+    if (apiNamespace && url.pathname !== decodedPath) {
+      sendJson(res, 404, { ok: false, error: "NOT_FOUND" });
+      return;
+    }
+    if (req.method === "GET" && decodedPath === "/health") {
       const counts = stats();
       sendJson(res, 200, {
         ok: true,
@@ -177,15 +225,19 @@ export function createRequestHandler(opts: ServerOptions = {}): http.RequestList
       });
       return;
     }
-    if (req.method === "POST" && url.pathname === "/api/rooms") {
-      void handleCreateRoom(req, res, manager);
+    if (req.method === "POST" && decodedPath === "/api/rooms") {
+      void handleCreateRoom(req, res, manager, security);
       return;
     }
-    if (req.method === 'GET' && url.pathname === '/api/rooms') {
+    if (req.method === 'GET' && decodedPath === '/api/rooms') {
       sendJson(res, 200, { rooms: manager.roomCodes().map(roomCode => {
         const room = manager.getRoom(roomCode)!;
         return { roomCode, state: room.state, paused: room.paused, playerCount: room.players.length };
       }) }); return;
+    }
+    if (decodedPath === "/api" || decodedPath.startsWith("/api/")) {
+      sendJson(res, 404, { ok: false, error: "NOT_FOUND" });
+      return;
     }
     if (req.method !== "GET" && req.method !== "HEAD") {
       sendJson(res, 405, { ok: false, error: "METHOD_NOT_ALLOWED" });
@@ -208,12 +260,14 @@ export async function startServer(opts: ServerOptions = {}): Promise<StartedServ
       connections: runtime?.connections() ?? 0,
       rooms: manager.roomCount(),
     }));
-  const server = http.createServer(createRequestHandler({ ...opts, manager, stats }));
+  const limits = opts.security?.limits ?? loadSecurityLimits(process.env);
+  const security = createSecurityRuntime(limits, opts.wsOptions?.now ?? (() => Date.now()), opts.security);
+  const server = http.createServer(createRequestHandler({ ...opts, manager, stats, security }));
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, host, () => resolve());
   });
-  runtime = attachLobbyWebSocket(server, manager, opts.wsOptions);
+  runtime = attachLobbyWebSocket(server, manager, { ...opts.wsOptions, security });
   const address = server.address();
   const actualPort = typeof address === "object" && address !== null ? address.port : port;
   const wsRuntime = runtime;
@@ -222,6 +276,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<StartedServ
     host,
     port: actualPort,
     manager,
+    security,
     connections: () => wsRuntime.connections(),
     close: async () => {
       await wsRuntime.close();

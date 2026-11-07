@@ -28,7 +28,7 @@ for(const point of ['before_rename','after_rename'] as const) {
     try {
       let server=await boot(dir); children.push(server.child);
       const healthBefore=await (await fetch(`http://127.0.0.1:${server.port}/health`)).json();
-      const {roomCode:code}=await (await fetch(`http://127.0.0.1:${server.port}/api/rooms`,{method:'POST',body:'{}'})).json() as {roomCode:string};
+      const {roomCode:code}=await (await fetch(`http://127.0.0.1:${server.port}/api/rooms`,{method:'POST',headers:{'content-type':'application/json'},body:'{}'})).json() as {roomCode:string};
       const connect=async(port:number,credentials?:Message)=>{
         const p=await new Peer(`ws://127.0.0.1:${port}/ws?room=${code}`).open();peers.push(p);
         p.send(credentials?{type:'resume',roomCode:code,...credentials}:{type:'join',nickname:'玩家'+peers.length});

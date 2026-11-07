@@ -9,6 +9,8 @@ import { RoomManager } from "../src/rooms/manager.js";
 import { attachLobbyWebSocket } from "../src/ws.js";
 import { MemorySessionStore, SessionRegistry } from "../src/rooms/session.js";
 import { ClientGameCommandSchema, ResumeSchema } from "@richman/shared";
+import { DEFAULT_SECURITY_LIMITS } from "../src/security.js";
+import type { SecurityLimits } from "../src/security.js";
 
 type Message = Record<string, any>;
 class Client {
@@ -40,8 +42,9 @@ class Client {
 }
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); });
-async function server(): Promise<StartedServer> {
-  const started = await startServer({ host: "127.0.0.1", port: 0 });
+async function server(limits: Partial<SecurityLimits> = {}): Promise<StartedServer> {
+  const started = await startServer({ host: "127.0.0.1", port: 0,
+    security: { limits: { ...DEFAULT_SECURITY_LIMITS, ...limits } } });
   cleanups.push(() => started.close());
   return started;
 }
@@ -137,7 +140,7 @@ it("replace_connection: epoch递增且旧close/旧消息不影响新连接与游
 });
 
 it("recover_different_origin: recoveryCode回原座位并立即作废旧token", async () => {
-  const s = await server(), room = s.manager.createRoom();
+  const s = await server({ allowedOrigins: ["https://different.example"] }), room = s.manager.createRoom();
   const [old, identity] = await join(s.port, room, "甲");
   const fresh = await open(s.port, room, { origin: "https://different.example" });
   fresh.send({ type: "resume", roomCode: room, recoveryCode: identity.recoveryCode });

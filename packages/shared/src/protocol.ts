@@ -66,6 +66,9 @@ export const NicknameSchema = z
   .refine((value) => [...value].length >= 1, { message: "昵称至少 1 个字符" })
   .refine((value) => [...value].length <= SERVER_DEFAULTS.nicknameMaxCodePoints, {
     message: "昵称最多 " + String(SERVER_DEFAULTS.nicknameMaxCodePoints) + " 个字符",
+  })
+  .refine((value) => !/[\u0000-\u001F\u007F]/.test(value), {
+    message: "昵称不能包含控制字符",
   });
 
 export const LobbyJoinSchema = z

@@ -3,7 +3,7 @@ import type { Duplex } from "node:stream";
 import { randomBytes, createHash } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import type { RawData } from "ws";
-import { ClientGameCommandSchema, ClientLobbyMessageSchema, SERVER_DEFAULTS } from "@richman/shared";
+import { ClientGameCommandSchema, ClientLobbyMessageSchema, RULES, SERVER_DEFAULTS } from "@richman/shared";
 import type { GameEvent, LobbyErrorCode, ServerLobbyMessage, TransitionResult } from "@richman/shared";
 import { SNAPSHOT_SCHEMA_VERSION, eventsForPlayer, getPlayerView } from "@richman/game-core";
 import type { EngineState } from "@richman/game-core";
@@ -14,6 +14,14 @@ import type { SessionIdentity, SessionStore } from "./rooms/session.js";
 import { GameCommandProcessor, RoomCommandQueue } from "./rooms/command-queue.js";
 import type { CommandResultStore, CommandResultRecord } from "./rooms/command-queue.js";
 import { RoomScheduler } from "./rooms/scheduler.js";
+import {
+  clientIp,
+  createSecurityRuntime,
+  ECONOMIC_COMMANDS,
+  isAllowedOrigin,
+  loadSecurityLimits,
+} from "./security.js";
+import type { SecurityRuntime } from "./security.js";
 
 interface Connection {
   ws: WebSocket;
@@ -21,6 +29,10 @@ interface Connection {
   identity: SessionIdentity | null;
   epoch: number;
   roomCodeQuery: string | null;
+  ip: string;
+  authenticated: boolean;
+  createdAt: number;
+  released: boolean;
   replaced: boolean;
   closed: boolean;
   serial: Promise<void>;
@@ -84,7 +96,12 @@ export interface LobbyWsOptions {
   now?: () => number;
   sessionStore?: SessionStore;
   commandStore?: CommandResultStore;
+  security?: SecurityRuntime;
   heartbeatClock?: {
+    setInterval(callback: () => void, ms: number): unknown;
+    clearInterval(handle: unknown): void;
+  };
+  authClock?: {
     setInterval(callback: () => void, ms: number): unknown;
     clearInterval(handle: unknown): void;
   };
@@ -147,6 +164,8 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
   const queue = new RoomCommandQueue();
   const sessions = new SessionRegistry(manager, { store: options.sessionStore ?? new SnapshotSessionStore(manager) });
   const now = options.now ?? (() => Date.now());
+  const limits = options.security?.limits ?? loadSecurityLimits(process.env);
+  const security = options.security ?? createSecurityRuntime(limits, now);
   let nextId = 1;
   let closing = false;
   const ownerKey = (identity: SessionIdentity): string => JSON.stringify([identity.roomCode, identity.playerId]);
@@ -217,6 +236,10 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
     conn.identity = { roomCode: identity.roomCode, playerId: identity.playerId, seatId: identity.seatId,
       tokenDigest: createHash('sha256').update(identity.sessionToken).digest('hex') };
     owners.set(key, conn);
+    if (!conn.authenticated) {
+      conn.authenticated = true;
+      security.guard.markAuthenticated(conn.ip);
+    }
     if (previous && previous !== conn) {
       previous.replaced = true;
       previous.identity = null;
@@ -241,6 +264,24 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
       if (conn.identity !== null) { sendError(conn, "INVALID_MESSAGE", "当前连接已有身份，请重新建立连接恢复"); return; }
       const roomCode = message.type === "resume" ? message.roomCode : conn.roomCodeQuery;
       if (roomCode === null) { sendError(conn, "ROOM_NOT_FOUND", "连接缺少房间码"); return; }
+      if (message.type === "join") {
+        const existing = manager.getRoom(roomCode);
+        // 满房请求用独立桶计数：前 joinBurst 次仍由 sessions.join 返回 ROOM_FULL，
+        // 超出后 RATE_LIMITED，避免绕过 join 限流反复刷满房请求。
+        const roomFull = existing !== null && existing.players.length >= RULES.playerMax;
+        const joinBucket = roomFull ? security.fullJoinBucket : security.joinBucket;
+        if (!joinBucket.tryTake(conn.ip)) {
+          sendError(conn, "RATE_LIMITED", "尝试过于频繁，请稍后重试");
+          return;
+        }
+      } else {
+        const ipAllowed = security.resumeBucket.tryTake(conn.ip);
+        const roomAllowed = security.resumeRoomBucket.tryTake(roomCode);
+        if (!ipAllowed || !roomAllowed) {
+          sendError(conn, "RATE_LIMITED", "尝试过于频繁，请稍后重试");
+          return;
+        }
+      }
       reconcileOwners(roomCode);
       const freshJoin = message.type === 'join' && message.sessionToken === undefined;
       let joined: Awaited<ReturnType<SessionRegistry['join']>> | Awaited<ReturnType<SessionRegistry['resume']>>;
@@ -330,6 +371,16 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
       if (conn.identity) reconcileOwners(conn.identity.roomCode);
       if (!current(conn)) { sendError(conn, "NOT_JOINED", "请先加入房间"); return; }
       const identity = conn.identity!, epoch = conn.epoch;
+      const commandKey = identity.roomCode + "|" + identity.playerId;
+      if (!security.commandBucket.tryTake(commandKey)) {
+        sendError(conn, "RATE_LIMITED", "操作过于频繁，请稍后重试");
+        return;
+      }
+      if (ECONOMIC_COMMANDS.includes(command.data.type)
+        && !security.economicBucket.tryTake(commandKey + "|" + command.data.type)) {
+        sendError(conn, "RATE_LIMITED", "操作过于频繁，请稍后重试");
+        return;
+      }
       const versionBefore = manager.getGame(identity.roomCode)?.version;
       let reply;
       try { reply = await processor.execute(identity.roomCode, identity.playerId, command.data,
@@ -357,35 +408,56 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
     const identity = conn.identity, epoch = conn.epoch, wasCurrent = current(conn);
     conn.closed = true;
     connections.delete(conn.ws);
+    if (!conn.released) {
+      conn.released = true;
+      security.guard.release(conn.ip, conn.authenticated);
+    }
     if (!wasCurrent || identity === null || closing) return;
     detach(conn);
     void queue.run(identity.roomCode, async () => {
       if (sessions.isCurrent(identity, epoch) && !owners.has(ownerKey(identity))) await manager.transact(identity.roomCode, () => sessions.disconnect(identity));
     }).catch(() => undefined);
   };
-  const init = (ws: WebSocket, roomCodeQuery: string | null): void => {
-    const conn: Connection = { ws, id: nextId++, identity: null, epoch: 0, roomCodeQuery,
-      replaced: false, closed: false, serial: Promise.resolve(), ping: null, missedPongs: 0,
-      rateStart: now(), rateCount: 0, pauseErrors: 0 };
-    connections.set(ws, conn);
-    ws.on("message", data => {
-      if (conn.closed || conn.replaced) return;
-      if (now() - conn.rateStart >= 1000) { conn.rateStart = now(); conn.rateCount = 0; }
-      if (++conn.rateCount > 60) { sendError(conn, "RATE_LIMITED", "操作过于频繁，请稍后重试"); return; }
-      const raw = rawToString(data);
-      conn.serial = conn.serial.then(async () => {
-        const before = conn.pauseErrors;
-        try { await handle(conn, raw); } catch (error) {
-        if (error instanceof LobbyError) { if (error.code !== 'ERROR_PAUSED' || conn.pauseErrors === before) sendError(conn, error.code, error.message); }
-        else sendError(conn, "INVALID_MESSAGE", "请求无法处理");
-        }
+  const init = (ws: WebSocket, roomCodeQuery: string | null, ip: string): void => {
+    let conn: Connection | null = null;
+    try {
+      const created: Connection = { ws, id: nextId++, identity: null, epoch: 0, roomCodeQuery,
+        ip, authenticated: false, createdAt: now(), released: false,
+        replaced: false, closed: false, serial: Promise.resolve(), ping: null, missedPongs: 0,
+        rateStart: now(), rateCount: 0, pauseErrors: 0 };
+      conn = created;
+      connections.set(ws, created);
+      ws.on("message", data => {
+        if (created.closed || created.replaced) return;
+        if (now() - created.rateStart >= 1000) { created.rateStart = now(); created.rateCount = 0; }
+        if (++created.rateCount > security.limits.wsMessagesPerSecond) { sendError(created, "RATE_LIMITED", "操作过于频繁，请稍后重试"); return; }
+        const raw = rawToString(data);
+        created.serial = created.serial.then(async () => {
+          const before = created.pauseErrors;
+          try { await handle(created, raw); } catch (error) {
+          if (error instanceof LobbyError) { if (error.code !== 'ERROR_PAUSED' || created.pauseErrors === before) sendError(created, error.code, error.message); }
+          else sendError(created, "INVALID_MESSAGE", "请求无法处理");
+          }
+        });
       });
-    });
-    ws.on("pong", data => {
-      if (conn.ping !== null && conn.ping.equals(data)) { conn.ping = null; conn.missedPongs = 0; }
-    });
-    ws.on("error", () => undefined);
-    ws.on("close", () => disconnected(conn));
+      ws.on("pong", data => {
+        if (created.ping !== null && created.ping.equals(data)) { created.ping = null; created.missedPongs = 0; }
+      });
+      ws.on("error", () => undefined);
+      ws.on("close", () => disconnected(created));
+    } catch (error) {
+      if (conn !== null) {
+        if (!conn.released) {
+          conn.released = true;
+          security.guard.release(conn.ip, conn.authenticated);
+        }
+        connections.delete(ws);
+      } else {
+        security.guard.release(ip, false);
+      }
+      try { ws.terminate(); } catch { /* 已断开 */ }
+      throw error;
+    }
   };
   const heartbeatClock = options.heartbeatClock ?? {
     setInterval: (callback: () => void, ms: number): unknown => { const timer = setInterval(callback, ms); timer.unref(); return timer; },
@@ -400,18 +472,71 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
       conn.ws.ping(conn.ping);
     }
   }, 10000);
+
+  const authClock = options.authClock ?? {
+    setInterval: (callback: () => void, ms: number): unknown => {
+      const timer = setInterval(callback, ms);
+      timer.unref();
+      return timer;
+    },
+    clearInterval: (handle: unknown): void => clearInterval(handle as ReturnType<typeof setInterval>),
+  };
+  const authScan = authClock.setInterval(() => {
+    for (const conn of connections.values()) {
+      if (conn.closed || conn.replaced || conn.authenticated) continue;
+      if (now() - conn.createdAt < security.limits.unauthTimeoutMs) continue;
+      sendError(conn, "INVALID_MESSAGE", "连接超时，请重新加入");
+      conn.ws.close(4003, "AUTH_TIMEOUT");
+    }
+  }, 5000);
+
+  const rejectUpgrade = (socket: Duplex, status: number, code: string): void => {
+    try {
+      socket.write(`HTTP/1.1 ${status} ${code}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+    } catch { /* socket 已断开 */ }
+    socket.destroy();
+  };
   const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer): void => {
     let url: URL;
     try { url = new URL(req.url ?? "/", "http://localhost"); }
     catch { socket.destroy(); return; }
     if (url.pathname !== "/ws") { socket.destroy(); return; }
-    wss.handleUpgrade(req, socket, head, ws => init(ws, url.searchParams.get("room")));
+    if (!isAllowedOrigin(req.headers.origin, req.headers.host, security.limits.allowedOrigins)) {
+      rejectUpgrade(socket, 403, "ORIGIN_NOT_ALLOWED");
+      return;
+    }
+    const ip = clientIp(req, security.limits);
+    const admission = security.guard.admit(ip);
+    if (!admission.ok) {
+      rejectUpgrade(socket, 503, admission.code ?? "TOO_MANY_CONNECTIONS");
+      return;
+    }
+    // 握手失败时 ws 的 abortHandshake 直接写 400 并 destroy，不抛错也不回调；
+    // 因此 admit 后的配额先挂到 socket close 回收，握手成功后由 Connection 认领。
+    let released = false;
+    const releaseIfUnclaimed = (): void => {
+      if (released) return;
+      released = true;
+      security.guard.release(ip, false);
+    };
+    socket.once("close", releaseIfUnclaimed);
+    try {
+      wss.handleUpgrade(req, socket, head, ws => {
+        released = true;
+        socket.removeListener("close", releaseIfUnclaimed);
+        init(ws, url.searchParams.get("room"), ip);
+      });
+    } catch {
+      releaseIfUnclaimed();
+      socket.destroy();
+    }
   };
   server.on("upgrade", onUpgrade);
   return { connections: () => wss.clients.size, close: async () => {
     closing = true;
     server.off("upgrade", onUpgrade);
     heartbeatClock.clearInterval(heartbeat);
+    authClock.clearInterval(authScan);
     scheduler.close(); unsubscribe();
     for (const client of wss.clients) client.terminate();
     await new Promise<void>(resolve => wss.close(() => resolve()));

@@ -58,7 +58,7 @@ it.each(['open','writeFile','sync'])('S3 append_%s: committed reply survives res
 });
 it('S4 single_error: an identity failure broadcast followed by revocation sends one ERROR_PAUSED',async()=>{
   const h=await diskHarness();try{
-    const {roomCode:code}=await(await fetch(`http://127.0.0.1:${h.server().port}/api/rooms`,{method:'POST',body:'{}'})).json();
+    const {roomCode:code}=await(await fetch(`http://127.0.0.1:${h.server().port}/api/rooms`,{method:'POST',headers:{'content-type':'application/json'},body:'{}'})).json();
     const a=await h.connect(code);await h.connect(code);const begin=a.p.history.length;
     const unsubscribe=h.server().manager.subscribe(e=>{if(e.type==='storage_error')h.server().manager.reconcileDurable(code);});
     h.store.options.failAt='after_rename';a.p.send({type:'leave'});await a.p.next('error');
@@ -68,7 +68,7 @@ it('S4 single_error: an identity failure broadcast followed by revocation sends 
 });
 it('S6 failed_create: after-rename failure leaves no resurrectable empty room',async()=>{
   const h=await diskHarness();try{
-    h.store.options.failAt='after_rename';expect((await fetch(`http://127.0.0.1:${h.server().port}/api/rooms`,{method:'POST',body:'{}'})).status).toBe(503);
+    h.store.options.failAt='after_rename';expect((await fetch(`http://127.0.0.1:${h.server().port}/api/rooms`,{method:'POST',headers:{'content-type':'application/json'},body:'{}'})).status).toBe(503);
     h.store.options.failAt=undefined;await h.restart();expect(h.server().manager.roomCount()).toBe(0);
     expect((await readdir(path.join(h.dir,'rooms'))).filter(p=>/^\d+$/.test(p))).toEqual([]);
   }finally{h.store.options.failAt=undefined;await h.close();}
@@ -76,7 +76,7 @@ it('S6 failed_create: after-rename failure leaves no resurrectable empty room',a
 it('M2 failed_join_restart: unissued first credentials cannot leave an ownerless host',async()=>{
   const h=await diskHarness();let failed:Peer|undefined;
   try{
-    const {roomCode:code}=await(await fetch(`http://127.0.0.1:${h.server().port}/api/rooms`,{method:'POST',body:'{}'})).json();
+    const {roomCode:code}=await(await fetch(`http://127.0.0.1:${h.server().port}/api/rooms`,{method:'POST',headers:{'content-type':'application/json'},body:'{}'})).json();
     h.store.options.failAt='after_rename';failed=await new Peer(`ws://127.0.0.1:${h.server().port}/ws?room=${code}`).open();
     failed.send({type:'join',nickname:'never-issued'});await failed.next('error');h.store.options.failAt=undefined;
     await failed.close();await h.restart();expect(h.server().manager.getRoom(code)!.players).toEqual([]);

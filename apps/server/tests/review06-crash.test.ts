@@ -11,7 +11,7 @@ async function kill(child:ChildProcess){if(child.exitCode!==null||child.signalCo
 it('M2 confirmation_disconnect: a delivered join closing during confirmation cannot remain online',async()=>{
   const h=await diskHarness();let peer:Peer|undefined;let release=()=>{};
   try{
-    const {roomCode:code}=await(await fetch(`http://127.0.0.1:${h.server().port}/api/rooms`,{method:'POST',body:'{}'})).json();
+    const {roomCode:code}=await(await fetch(`http://127.0.0.1:${h.server().port}/api/rooms`,{method:'POST',headers:{'content-type':'application/json'},body:'{}'})).json();
     let entered!:()=>void;let writes=0;const barrier=new Promise<void>(r=>{entered=r;});const gate=new Promise<void>(r=>{release=r;});
     h.store.options.checkpoint=async point=>{if(point==='after_rename'&&++writes===2){entered();await gate;}};
     peer=await new Peer(`ws://127.0.0.1:${h.server().port}/ws?room=${code}`).open();peer.send({type:'join',nickname:'delivered'});
@@ -26,7 +26,7 @@ it('M2 join_commit_kill: first join killed after rename before joined is revoked
     children.push(child);const {port}=await ipc(child,'ready');return{child,port};};
   try{
     let server=await boot();const base=`http://127.0.0.1:${server.port}`;
-    const {roomCode:code}=await(await fetch(base+'/api/rooms',{method:'POST',body:'{}'})).json();
+    const {roomCode:code}=await(await fetch(base+'/api/rooms',{method:'POST',headers:{'content-type':'application/json'},body:'{}'})).json();
     const first=await new Peer(`ws://127.0.0.1:${server.port}/ws?room=${code}`).open();peers.push(first);
     const armed=ipc(server.child,'armed');server.child.send({type:'arm',point:'after_rename'});await armed;
     const barrier=ipc(server.child,'barrier');first.send({type:'join',nickname:'undelivered'});await barrier;
@@ -49,7 +49,7 @@ it.each(['join','recovery'] as const)('M1_M2 disconnect_during_%s: delivery inte
   try{
     let code:string,old:any;
     if(mode==='recovery'){const started=await h.start();code=started.code;old=started.a;}
-    else({roomCode:code}=await(await fetch(`http://127.0.0.1:${h.server().port}/api/rooms`,{method:'POST',body:'{}'})).json());
+    else({roomCode:code}=await(await fetch(`http://127.0.0.1:${h.server().port}/api/rooms`,{method:'POST',headers:{'content-type':'application/json'},body:'{}'})).json());
     let entered!:()=>void;const barrier=new Promise<void>(r=>{entered=r;});const gate=new Promise<void>(r=>{release=r;});
     h.store.options.checkpoint=async point=>{if(point==='after_rename'){entered();await gate;}};
     incoming=await new Peer(`ws://127.0.0.1:${h.server().port}/ws?room=${code!}`).open();
