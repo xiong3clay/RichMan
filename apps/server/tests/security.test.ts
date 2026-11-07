@@ -59,6 +59,14 @@ async function waitFor(check: () => boolean, timeoutMs = 500): Promise<void> {
   }
 }
 
+function waitForClose(ws: WebSocket, timeoutMs = 1500): Promise<void> {
+  if (ws.readyState === WebSocket.CLOSED) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("连接未在时限内关闭")), timeoutMs);
+    ws.once("close", () => { clearTimeout(timer); resolve(); });
+  });
+}
+
 /** 真实 TCP 发缺 Sec-WebSocket-Key 的 upgrade，返回服务端状态码。 */
 function rawInvalidHandshake(port: number): Promise<number> {
   return new Promise(resolve => {
@@ -658,47 +666,94 @@ describe("09A security", () => {
     }
   });
 
-  it("49 握手失败释放配额且只一次：缺 Key→400，60 次后仍为 0，正常连接可加入", async () => {
+  it("49 握手失败只释放一次：基线连接 total 不变，60 次后 A 仍可 ready", async () => {
     const s = await server();
     const room = s.manager.createRoom();
-    expect(await rawInvalidHandshake(s.port)).toBe(400);
-    await waitFor(() => s.security.guard.stats().total === 0
+    const a = trackPeer(await Peer.open(s.port, room));
+    a.send({ type: "join", nickname: "甲" });
+    await a.next("joined");
+    await waitFor(() => s.security.guard.stats().total === 1
       && s.security.guard.stats().unauthenticated === 0);
+    expect(s.security.guard.stats().perIp["127.0.0.1"]).toBe(1);
+
+    // 无效握手先 admit 到 total=2，close 只减 1；若双释放会减到 0。
+    expect(await rawInvalidHandshake(s.port)).toBe(400);
+    await waitFor(() => {
+      const stats = s.security.guard.stats();
+      return stats.total === 1 && stats.unauthenticated === 0 && stats.perIp["127.0.0.1"] === 1;
+    });
+
     for (let index = 0; index < 60; index += 1) {
       expect(await rawInvalidHandshake(s.port)).toBe(400);
     }
-    await waitFor(() => s.security.guard.stats().total === 0
-      && s.security.guard.stats().unauthenticated === 0);
-    const peer = trackPeer(await Peer.open(s.port, room));
-    peer.send({ type: "join", nickname: "甲" });
-    await peer.next("joined");
-    expect(s.security.guard.stats().total).toBe(1);
+    await waitFor(() => {
+      const stats = s.security.guard.stats();
+      return stats.total === 1 && stats.unauthenticated === 0 && stats.perIp["127.0.0.1"] === 1;
+    });
+    expect(a.ws.readyState).toBe(WebSocket.OPEN);
+    a.send({ type: "ready", ready: true });
+    await a.next("room", message =>
+      message.players.some((player: Record<string, unknown>) =>
+        player["playerId"] === "p1" && player["ready"] === true));
+
+    await a.close();
+    await waitFor(() => s.security.guard.stats().total === 0);
   });
 
-  it("50 心跳超时 terminate 路径释放 guard 配额并保留离线座位", async () => {
-    let tick: (() => void) | null = null;
-    const s = await server({}, {
+  it("50 心跳：autoPong 默认保活，autoPong:false 才超时关闭并释放", async () => {
+    // 正段：默认 autoPong=true，每次 tick 后等 ping 到达并留 50ms 让 pong 被服务端处理。
+    let keepTick: (() => void) | null = null;
+    const keepServer = await server({}, {
       heartbeatClock: {
-        setInterval: (callback: () => void): unknown => { tick = callback; return 1; },
-        clearInterval: (): void => { tick = null; },
+        setInterval: (callback: () => void): unknown => { keepTick = callback; return 1; },
+        clearInterval: (): void => { keepTick = null; },
       },
     });
-    const room = s.manager.createRoom();
-    const peer = trackPeer(await Peer.open(s.port, room, {}, { autoPong: false }));
-    peer.send({ type: "join", nickname: "半开" });
-    await peer.next("joined");
-    await waitFor(() => s.manager.getRoom(room)?.players[0]?.online === true);
-    const ping1 = new Promise<void>(resolve => peer.ws.once("ping", () => resolve()));
-    tick!();
+    const keepRoom = keepServer.manager.createRoom();
+    const keepPeer = trackPeer(await Peer.open(keepServer.port, keepRoom));
+    keepPeer.send({ type: "join", nickname: "保活" });
+    await keepPeer.next("joined");
+    await waitFor(() => keepServer.manager.getRoom(keepRoom)?.players[0]?.online === true
+      && keepServer.security.guard.stats().total === 1);
+
+    for (let index = 0; index < 3; index += 1) {
+      const ping = new Promise<void>(resolve => keepPeer.ws.once("ping", () => resolve()));
+      keepTick!();
+      await ping;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    expect(keepPeer.ws.readyState).toBe(WebSocket.OPEN);
+    expect(keepServer.manager.getRoom(keepRoom)?.players[0]?.online).toBe(true);
+    expect(keepServer.security.guard.stats().total).toBe(1);
+
+    // 反段：autoPong=false，两次 ping 后第三次 tick 触发 missedPongs>=2 关闭。
+    let closeTick: (() => void) | null = null;
+    const closeServer = await server({}, {
+      heartbeatClock: {
+        setInterval: (callback: () => void): unknown => { closeTick = callback; return 1; },
+        clearInterval: (): void => { closeTick = null; },
+      },
+    });
+    const closeRoom = closeServer.manager.createRoom();
+    const closePeer = trackPeer(await Peer.open(closeServer.port, closeRoom, {}, { autoPong: false }));
+    closePeer.send({ type: "join", nickname: "半开" });
+    await closePeer.next("joined");
+    await waitFor(() => closeServer.manager.getRoom(closeRoom)?.players[0]?.online === true
+      && closeServer.security.guard.stats().total === 1);
+
+    const ping1 = new Promise<void>(resolve => closePeer.ws.once("ping", () => resolve()));
+    closeTick!();
     await ping1;
-    const ping2 = new Promise<void>(resolve => peer.ws.once("ping", () => resolve()));
-    tick!();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const ping2 = new Promise<void>(resolve => closePeer.ws.once("ping", () => resolve()));
+    closeTick!();
     await ping2;
-    const closed = new Promise<void>(resolve => peer.ws.once("close", () => resolve()));
-    tick!();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const closed = waitForClose(closePeer.ws, 1500);
+    closeTick!();
     await closed;
-    await waitFor(() => s.security.guard.stats().total === 0);
-    await waitFor(() => s.manager.getRoom(room)?.players[0]?.online === false);
-    expect(s.manager.getRoom(room)?.players).toHaveLength(1);
+    await waitFor(() => closeServer.security.guard.stats().total === 0);
+    await waitFor(() => closeServer.manager.getRoom(closeRoom)?.players[0]?.online === false);
+    expect(closeServer.manager.getRoom(closeRoom)?.players).toHaveLength(1);
   });
 });
