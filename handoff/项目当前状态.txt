@@ -12,7 +12,8 @@ RichMan 项目当前状态
 已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（已提交 eeec8ca，第四轮补强 bb7c2f2，交接 1ebdbe0）、09B（首版 6491fe9/39dc1b9；第五、六轮复核修复已提交 bcb9aae，文档 71e099a）、09C-A（实现 2bd84cd，规格 c522bb4，Qoder 复核可提交）。
 当前子任务：09C-B PowerShell 备份/恢复/清理脚本（backup/restore/cleanup + README；服务运行中拒绝 restore；
 开始前先处理 Qoder 对 09C-A 的 S1/S2，见 handoff/单元09C-A-下一阶段交接.txt 第六节）。
-09C 拆分：A 核心库与 CLI（已提交 2bd84cd）→ B PowerShell 包装 backup/restore/cleanup + README（当前，Trae）→
+09C-B 承担者：Codex（用户 2026-11-08 指定；涉及崩溃一致性 seam 与 PowerShell 安全闸门，与 06 同类）。
+09C 拆分：A 核心库与 CLI（已提交 2bd84cd）→ B PowerShell 包装 backup/restore/cleanup + README + 09C-A 补强（当前，Codex）→
 C BET_SETTLED 按 audience 拆分（Codex 或 Lead）→ D LICENSE/CHANGELOG/版本记录（Lead）→
 之后 09D 真机发布验收矩阵（局域网 + 隧道 + 2/10 人）。
 08C 已提交 d7b67f8 并通过 Qoder 二次验证（63 文件/731 条、typecheck/build 0、6 个 WAV + 播放器/事件音效），真机音频未测。
