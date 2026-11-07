@@ -1,4 +1,8 @@
 :root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
   color-scheme: dark;
   font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
   background: #0f1720;
@@ -12,6 +16,7 @@
 body {
   margin: 0;
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 h1,
@@ -23,7 +28,7 @@ p {
 .app {
   max-width: 980px;
   margin: 0 auto;
-  padding: 24px 16px 80px;
+  padding: 24px max(16px, var(--safe-right)) calc(80px + var(--safe-bottom)) max(16px, var(--safe-left));
 }
 
 .eyebrow {
@@ -488,7 +493,7 @@ p {
   background: #0f1720;
   border-bottom: 1px solid #1e2b3a;
   box-shadow: 0 8px 14px rgba(0, 0, 0, 0.35);
-  padding: 8px 0 4px;
+  padding: calc(8px + var(--safe-top)) 0 4px;
 }
 
 /* sticky 由 .game-sticky 承担，header 不再自身吸顶，避免两层叠加错位。 */
@@ -1008,6 +1013,7 @@ p {
   width: min(640px, 100%);
   min-width: 0;
   max-width: 100%;
+  max-height: 100vh;
   max-height: 100dvh;
   overflow: hidden;
   background: #16222e;
@@ -1100,6 +1106,7 @@ p {
   width: min(680px, 100%);
   min-width: 0;
   max-width: 100%;
+  max-height: 100vh;
   max-height: 100dvh;
   overflow-y: auto;
   overflow-x: hidden;
@@ -1169,6 +1176,7 @@ p {
   .tutorial-panel,
   .rules-sheet {
     width: 100%;
+    max-height: 100vh;
     max-height: 100dvh;
     border-left: 0;
     border-right: 0;
@@ -1260,5 +1268,136 @@ p {
   .drawer .player-row:not(.player-head) .player-defaulted-debt::before {
     content: "失信欠款：";
     color: #9fb0c3;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 08B 手机适配                                                          */
+/* ------------------------------------------------------------------ */
+
+/* S4：iOS Safari 聚焦 16px 以下输入框会放大页面；桌面 .input 保持 15px。 */
+@media (max-width: 560px) {
+  .input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}
+
+/* S5：粗指针设备保证 44px 触控目标并消除双击缩放延迟。 */
+@media (pointer: coarse) {
+  button,
+  .link,
+  .choice,
+  .topbar-btn {
+    min-height: 44px;
+  }
+
+  button,
+  .link,
+  .choice {
+    touch-action: manipulation;
+  }
+
+  .link {
+    min-width: 44px;
+  }
+}
+
+/* S6：横屏矮视口；必须用复合选择器，避免 styles-05e 的 lastBlock(".game-sticky") 读到覆盖块。 */
+@media (max-height: 480px) and (orientation: landscape) {
+  .game-sticky.game-sticky {
+    max-height: 56vh;
+  }
+
+  .app {
+    padding-top: 12px;
+    padding-bottom: calc(40px + var(--safe-bottom));
+  }
+
+  .tutorial-panel,
+  .rules-sheet {
+    width: 100%;
+    max-height: 100vh;
+    max-height: 100dvh;
+    border-radius: 0;
+  }
+
+  .wizard {
+    scroll-margin-top: calc(56vh + 8px);
+  }
+
+  .tutorial-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* S7：≤400px 收边距；必须放在既有 560px 断点之后，18px 才能覆盖 19px。 */
+@media (max-width: 400px) {
+  .app {
+    padding-left: max(12px, var(--safe-left));
+    padding-right: max(12px, var(--safe-right));
+  }
+
+  .panel,
+  .wizard {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .question {
+    font-size: 18px;
+  }
+}
+
+/* S8：长金额不撑宽容器；金额最大 13 位数字。 */
+.stat-value,
+.top-line,
+.game-meta,
+.settle-lines,
+.settle-line,
+.settle-balance,
+.debt-row {
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* S9：教程/规则覆盖层避开刘海与底部手势条；fixed + z-index 40 不变。 */
+.tutorial-head {
+  padding-top: calc(16px + var(--safe-top));
+}
+
+.tutorial-actions {
+  padding-bottom: calc(16px + var(--safe-bottom));
+}
+
+.rules-sheet {
+  padding-bottom: calc(16px + var(--safe-bottom));
+}
+
+/* F1：金额输入保持 18px；0,2,0 特异性稳定胜过 560px 的 .input 16px。 */
+.input.amount-input {
+  font-size: 18px;
+}
+
+/* F2：fixed footer、规则页顶部、覆盖层左右的 safe-area 补齐。 */
+.footer {
+  padding: 10px max(18px, var(--safe-right)) calc(10px + var(--safe-bottom)) max(18px, var(--safe-left));
+}
+
+.rules-sheet {
+  padding-top: calc(18px + var(--safe-top));
+}
+
+.tutorial-overlay {
+  padding: max(16px, var(--safe-top)) max(16px, var(--safe-right))
+    max(16px, var(--safe-bottom)) max(16px, var(--safe-left));
+}
+
+/* 必须放在上面的 .tutorial-overlay 覆盖之后，窄屏才能恢复通栏 padding。 */
+@media (max-width: 560px) {
+  .tutorial-overlay {
+    padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
   }
 }

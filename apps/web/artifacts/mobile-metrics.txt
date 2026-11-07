@@ -1,0 +1,10 @@
+# 08B mobile metrics（PASS 条件：scrollWidth <= clientWidth）
+state=entry viewport=360x640 scrollWidth=360 clientWidth=360 PASS
+state=tutorial viewport=360x640 scrollWidth=360 clientWidth=360 PASS
+state=game-q1 viewport=360x640 scrollWidth=360 clientWidth=360 PASS
+state=game-q3 viewport=390x844 scrollWidth=390 clientWidth=390 PASS
+state=landscape viewport=640x360 scrollWidth=640 clientWidth=640 PASS
+state=rules viewport=430x932 scrollWidth=430 clientWidth=430 PASS
+check=amount-input-font value=18px viewport=390x844 PASS
+check=input-font-mobile value=16px viewport=360x640 PASS
+check=input-font-desktop value=15px viewport=640x360 PASS
