@@ -1,7 +1,7 @@
 单元 09B 成果报告（一键启动 / 隧道 / 停止 / 状态脚本）
 ================================================================
 日期：2026-11-07
-基线：代码基线 HEAD 8268aba（09A 第四轮补强后的复核修复单；09B 第五轮修复在其工作区之上）；09B 首版实现 6491fe9、文档 39dc1b9；第六轮补强提交后以 git log 为准。
+基线：代码基线 8268aba（第六轮修复前）；第六轮修复已提交 bcb9aae（代码）+ 71e099a（文档）；09B 首版实现 6491fe9、文档 39dc1b9。
 规格：handoff/单元09B-一键启动与停止脚本.txt、单元09B-复核修复.txt
 结论：完成（自动化与真实验收链通过；真机/计划任务/非 Windows 未验证）。
 
@@ -14,7 +14,7 @@
    - Test-PortFree（TcpClient 探 127.0.0.1；SocketException/InvalidOperationException
      按空闲处理并在注释写明）。
    - Wait-HttpHealth（500ms 一次 Invoke-WebRequest -UseBasicParsing -TimeoutSec 2，
-     2xx/3xx 成功，失败不打印堆栈）。
+     须 2xx/3xx 且 JSON ok=true、service=richman 才算健康，失败不打印堆栈）。
    - Get-CloudflaredPath（显式 > RICHMAN_CLOUDFLARED > Get-Command > 
      D:\Lianjunjie\tools\cloudflared.exe）。
    - Get-RunStateProcess（missing/stale/running/mismatch/unknown；pid 存活 + 进程名白名单
@@ -31,7 +31,7 @@
      err 末尾 20 行；成功写 run/server.json 并打印本机/LAN/数据目录/日志/停止命令/
      防火墙/防睡眠提示。
 3) scripts/start-tunnel.ps1
-   - 参数 -Port/-Cloudflared/-TimeoutSec 90/-CheckOnly。
+   - 参数 -Port/-DataDir/-Cloudflared/-TimeoutSec 90/-CheckOnly。
    - 先要求本地 /health；已有存活 tunnel.json 则打印旧 URL 幂等退出；
      CheckOnly 输出 localServer/cloudflared/port/alreadyRunning JSON；
      启动 cloudflared.exe tunnel --url http://127.0.0.1:<port> --no-autoupdate，
@@ -47,14 +47,18 @@
    - 无状态文件打印“未在运行” exit 0（幂等）。
 5) scripts/status.ps1
    - 本地 /health 打印 ok/rooms/connections；隧道状态 + pid 存活 + URL /health（5s）；
-     -Json 输出单行 {ok,server:{ok,port,rooms,connections},tunnel:{url,ok}}；
+     -Json 输出单行 {ok,server:{ok,port,rooms,connections,reason,stateNote},tunnel:{url,ok}}；
+     不论状态文件是 stale/mismatch/unknown/损坏，都先探测生效端口上的 /health：
+     健康即 ok=true/exit 0，并用 server.stateNote 标注状态文件不可信的原因；
      server 不健康 exit 1；-CheckOnly 接受但不改变状态。
-6) apps/server/tests/scripts.test.ts（仅 win32，12 条 = 首版 5 条 + T6–T12）：
+6) apps/server/tests/scripts.test.ts（仅 win32，15 条 = 首版 5 条 + T6–T12 + 第六轮 T13–T15）：
    - 首版 5 条：六个文件存在 + 五个 ps1 UTF-8 BOM + 入口脚本 param( 开头；
      start-lan CheckOnly 空闲端口 ok=true；端口被占 ok=false/PORT_IN_USE/exit 1；
      stop CheckOnly 空目录 ok=true/exit 0/不创建 run；status 无服务 ok=false/exit 1。
    - T6–T12：无关 node + 旧启动时间 stop exit 2；start-tunnel -DataDir；普通 HTTP
      200 不算 RichMan；写状态失败无孤儿；坏 JSON exit 2；未知参数报错；完整生命周期。
+    - T13–T15：Stop-Process 失败 → STOP_FAILED/exit 2/状态保留；stale 状态 + 真健康服务
+      → exit 0/stateNote=stale；坏 JSON + 健康服务 → stateNote=broken。
 7) README「## 一键启动 / 停止（Windows）」：命令、参数、日志、隧道域名变化、
    防火墙/防睡眠提示、非 Windows 用 corepack pnpm -s start。
 
@@ -70,13 +74,15 @@
 三、验收命令与真实结果（2026-11-07 23:45，第六轮补强后）
 1) corepack pnpm -s test
    65 文件 / 796 条全部通过（796 = 731 旧 + 09A security 50 + 09B scripts 15）。
-   TEST_EXIT=0；Lead 实测 Duration 57s。日志：artifacts/test-logs/09Bfix3-full-test.log
+   TEST_EXIT=0；Lead 实测 Duration 57s（另一次运行）；Trae 证据日志
+   09Bfix3-full-test.log 记录 49.71s。
 2) corepack pnpm -s typecheck
    TSC_EXIT=0；日志：artifacts/test-logs/09Bfix3-typecheck.log
 3) corepack pnpm -s build
    BUILD_EXIT=0；141 modules；index--JyM_5JG.css 18.07 kB、index-CrCvzBNf.js 425.13 kB；
    built in 307ms。日志：artifacts/test-logs/09Bfix3-build.log
-4) 单文件 scripts.test.ts：15/15 passed，EXIT=0（54s）；日志：09Bfix3-scripts.log。
+4) 单文件 scripts.test.ts：15/15 passed，EXIT=0（Lead 实测 54s，Trae 日志 47.00s）；
+   日志：09Bfix3-scripts.log。
 （旧轮次 793/786 条与 12/5 条 scripts 测试作为历史保留在 09Bfix-test.log、09B-test.log。）
 
 四、真实验收链（首版历史，修复前；完整输出见 artifacts/test-logs/09B-acceptance.log）
@@ -167,6 +173,8 @@ F3 T9 不再依赖全局进程计数（S-3）
 - 改为“测试前后 http.ts PID 集合差”，只回收新增 pid；不再要求全局计数为 0。
 - 证据：本机先用 start-lan 起真实服务（端口 63409，/health 200），再跑整个
   scripts.test.ts → 15/15 通过；stop 后 /health DOWN，无 http.ts 孤儿。
+  （Trae 的 09Bfix3-t9-live.log 只跑了 T9 单条 1/1；整文件 15/15 另有 Lead 实测与
+  Qoder 第六轮独立复跑为证，见 handoff/复核-单元09B-第六轮验证.txt 第四节。）
 F4 清理（S-4）
 - 新增 killAndWait（SIGKILL 后等 exit，10s）、killPidAndWait、rmDirWithRetry（3×200ms）；
   afterEach 先杀子进程再删目录；T9 用 before 集合只杀新增 pid；清理失败抛出而非吞掉。
@@ -175,8 +183,10 @@ F4 清理（S-4）
   （expected 'STATE_UNRESOLVED' to be 'STOP_FAILED'）。
 - MUT B 把 status.ps1 的 $stateNote = $stateStatus 改成 '' → T14 红
   （expected '' to be 'stale'）。
+- MUT C 把 T9 改回全局计数（richmanHttpPids().length === 0）→ 在有真实服务时 T9 红
+  （等待条件超时）；还原后 sha256 一致、重新绿（Qoder 第六轮复验）。
 
 九、被验证的提交号
-09B 实现 6491fe9、文档 39dc1b9；本修复单提交后以 git log 为准。
+09B 实现 6491fe9、文档 39dc1b9；第五/六轮复核修复提交 bcb9aae（代码）、71e099a（文档）。
 本轮工作区只改五个 .ps1、scripts.test.ts、README 09B 节、09B 四份交接与项目状态。
 

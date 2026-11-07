@@ -1,0 +1,250 @@
+RichMan 单元 09B 第六轮复核补强 独立验证
+================================================
+复核员：Qoder（只读复核；未改源码/测试，未 commit）
+日期：2026-11-08
+复核基线：代码 bcb9aae、文档 71e099a；工作区干净（复核前后 git status 均为空）
+复核对象：
+  - handoff/单元09B-第六轮复核补强.txt（F1–F4）
+  - handoff/复核-单元09B-修复验证.txt（上一轮 S-1..S-4）
+  - git show bcb9aae / 71e099a、scripts/*.ps1、apps/server/tests/scripts.test.ts
+  - 09Bfix3-* 日志与 09B 四份交接
+
+结论：需修复（代码 F1–F4 全部 PASS，无代码 must-fix；阻塞项在交接文档/证据）
+  代码侧：F1、F2、F3、F4 独立复现均通过；M1/M2/M3 变异均真实变红并还原；
+          仓库 65 文件 / 796 条、typecheck 0、build 0；真实服务在跑时 T9/全套 15/15。
+  文档侧：成果报告/运行验收顶部仍写 12 条、793/12、旧日志；项目状态算术 781+50+15；
+          正文的 57s/54s 与所引日志 49.71s/47.00s 不一致；t9-live 日志实际只跑了 T9
+          （14 skipped），正文却称“整个 scripts.test.ts → 15/15”。
+          代码可提交；上述文档/证据修完再提交。
+
+一、逐项 PASS/FAIL 表
+| 项 | 结果 | 独立证据摘要 |
+|---|---|---|
+| F1 STOP_FAILED | PASS | PowerShell 函数遮蔽 Stop-Process → exit 2、ok=false、reason=STOP_FAILED、无“已全部停止”、状态保留、dummy 活 |
+| F2 stale/broken/mismatch 仍探健康 | PASS | 真实 HTTP 返回 rooms=7/connections=3：三种状态均 exit 0、server.ok=true、reason=""、stateNote 分别 stale/broken/mismatch |
+| F2 非 JSON 输出 | PASS | OK 行后追加“状态文件已过期/损坏…但端口上的 RichMan 服务健康” |
+| F3 T9 PID 集合差 | PASS | 真实服务在跑时完整 scripts.test 15/15；服务仍 200；stop 后端口释放、无 http.ts 孤儿 |
+| F4 killAndWait/rmDirWithRetry | PASS | 锁定目录下 rm 重试 3 次后抛 EBUSY；killAndWait 有 10s 超时抛错；T7/T9 finally 回收 |
+| M1 STOP_FAILED→STATE_UNRESOLVED | PASS（变异有效） | T13 红：expected 'STATE_UNRESOLVED' to be 'STOP_FAILED'；sha256 前后一致 |
+| M2 stateNote 恒空 | PASS（变异有效） | T14 红：expected '' to be 'stale'；sha256 前后一致 |
+| M3 T9 改回全局计数 | PASS（变异有效） | 有真实服务时 T9 红（等待条件超时）；服务仍 200；仅既有 pid，无新孤儿 |
+| T1–T12 未放宽 | PASS | 仅 scripts.test.ts 改动；T6 2020 时间、T7 -DataDir、T10 坏 JSON 原样；T9 内部实现改为集合差是规格允许 |
+| 全量 test/typecheck/build | PASS | 65 文件 / 796 条；TSC_EXIT=0；BUILD_EXIT=0；scripts 15/15 |
+| 未改禁区 | PASS | git diff 仅 scripts.test + 5 个 scripts；无 apps/server/src、packages、apps/web、依赖 |
+| BOM / PS 5.1 | PASS | 5 个 .ps1 均 EF BB BF；PS 5.1.26100.9711 |
+| 文档/证据一致性 | FAIL | 12 vs 15、793/12 vs 796/15、算术 846、durations、t9-live 证据不符 |
+
+二、F1 独立复现（遮蔽注入，不是只读断言）
+准备：真实无关 node（sleep 120s，PID 33416）+ 真实 StartTime 写入
+  f1/run/server.json：
+  {"pid":33416,"startedAtUtc":"2026-11-07T15:57:49.2500489Z","port":19999,...}
+注入脚本（等价于规格命令）：
+  function Stop-Process { throw 'ACCESS_DENIED_TEST' }
+  & 'D:\...\scripts\stop.ps1' -DataDir 'D:\...\f1'
+  exit $LASTEXITCODE
+实际：
+  F1_EXIT=2
+  WARN：停止 server（pid 33416）失败：ACCESS_DENIED_TEST
+  {"ok":false,"reason":"STOP_FAILED","stopped":[],
+   "warnings":["停止 server（pid 33416）失败：ACCESS_DENIED_TEST"],...}
+  STATE_EXISTS=true
+  DUMMY_ALIVE=true
+  CONTAINS_ALL_STOPPED=false
+结论：F1 PASS；状态文件未被删除，进程仍活，没有普通成功出口。
+对应实现：stop.ps1:27 $hasStopFailure、:70-73 catch、:89-101 STOP_FAILED/exit 2。
+
+三、F2 独立复现（真实 HTTP）
+启动 node HTTP 服务（18901），/health 返回：
+  HTTP 200 {"ok":true,"service":"richman","rooms":7,"connections":3}
+（a）stale：state pid=999999、port=18901
+  status -Json -Port 18901 -DataDir f2a：
+  EXIT=0
+  {"ok":true,"port":18901,...,
+   "server":{"ok":true,"port":18901,"rooms":7,"connections":3,"reason":"","stateNote":"stale"},...}
+  非 JSON 输出：
+    本地服务：OK  http://127.0.0.1:18901/  房间=7  连接=3
+    注意：状态文件已过期/损坏，进程归属无法确认，但端口上的 RichMan 服务健康。
+（b）broken：server.json 内容 `{not valid json`
+  status -Json -Port 18901 -DataDir f2b：
+  EXIT=0
+  {"ok":true,...,
+   "server":{"ok":true,...,"reason":"","stateNote":"broken"},...}
+（c）mismatch：真实无关 node（PID 20080）实际 StartTime
+  2026-11-07T15:58:06.8870684Z，状态故意写早 1 小时：
+  2026-11-07T14:58:06.8870684Z
+  status -Json -Port 18901 -DataDir f2c：
+  EXIT=0
+  {"ok":true,...,
+   "server":{"ok":true,...,"reason":"","stateNote":"mismatch"},...}
+  MISMATCH_DUMMY_ALIVE=true
+结论：F2 PASS；三种不可信状态都能被健康探测纠正，stateNote 与 reason 正确，
+rooms/connections 确实取自健康响应（7/3），不是硬编码。
+对应实现：status.ps1:37-46 stateNote、:55-75 始终探测、:101-118 JSON。
+
+四、F3 独立复现（真实服务在跑时跑全套）
+1) start-lan -Port 18902 -DataDir f3live → EXIT 0；/health 200
+   {"ok":true,"service":"richman",...,"rooms":0,"connections":0,...}
+   服务 PID=32496。
+2) corepack pnpm -s vitest run apps/server/tests/scripts.test.ts
+   T15_EXIT=0
+   Test Files  1 passed (1)
+   Tests       15 passed (15)
+   Duration    50.96s
+3) 测试后服务仍健康：/health 200，PID 32496 存活。
+4) stop -DataDir f3live：
+   STOP_EXIT=0，已停止 server（pid 32496）
+   NO_LISTENER_18902；无新 http.ts 进程。
+结论：F3 PASS；T9 的 PID 集合差能区分既有服务和本次孤儿。
+对应实现：scripts.test.ts:201-212 richmanHttpPids、:371-388 T9（before 集合 + finally
+只杀新增 pid）。
+
+五、F4 独立复现与代码检查
+1) rmDirWithRetry：
+   用与 scripts.test.ts:42-54 相同的实现（外部脚本）删除被 PowerShell
+   FileStream(FileShare.None) 锁定的目录：
+     RM_EXIT=2
+     RM_THREW=清理临时目录失败（已重试 3 次）: ...\f4 : Error: EBUSY:
+     resource busy or locked, unlink '...\f4\locked.txt'
+   清理失败没有被吞掉，符合“失败要抛出而不是假绿”。
+2) killAndWait（scripts.test.ts:23-33）：
+   SIGKILL 后轮询 exitCode/signalCode，超过 10 秒抛
+   “子进程未在 10 秒内退出”；本次未构造不可杀进程，按代码审查。
+3) T7（scripts.test.ts:315-344）finally 调 killAndWait(fake)；
+   T9（:371-388）finally 只回收 before 之外的新增 http.ts pid；
+   afterEach（:56-59）先 killAndWait 再 rmDirWithRetry。
+4) 独立 15/15 通过后 18902 无监听、无 http.ts 孤儿；M3 失败路径也只留下既有
+   服务 pid，说明 T9 失败后回收路径有效。
+结论：F4 PASS（killAndWait 的超时分支为代码审查，未实跑不可杀进程）。
+
+六、变异结果（仓库外副本，逐组还原，sha256 前后一致）
+副本基线：T13/T14 2/2 绿；有真实服务时 T9 1/1 绿。
+M1 stop.ps1 把 STOP_FAILED 改成 STATE_UNRESOLVED：
+  MUT_M1_EXIT=1
+  FAIL ... > 13 Stop-Process 失败必须 STOP_FAILED exit 2 且保留状态
+  expected 'STATE_UNRESOLVED' to be 'STOP_FAILED'
+  Tests 1 failed | 14 skipped (15)
+  还原后 SHA_AFTER_STOP = ec089d7db5ff97bd9ec2b08cd98190410321fd007ca0a290de08f846c8d0a3ba
+  SHA_ORIG_STOP  = 同值；diff 完全一致。
+M2 status.ps1 把 `$stateNote = $stateStatus` 改成 `''`：
+  MUT_M2_EXIT=1
+  FAIL ... > 14 stale 状态仍探测健康：stateNote=stale、exit 0
+  expected '' to be 'stale'
+  Tests 1 failed | 14 skipped (15)
+  还原后 SHA_AFTER_STATUS = 81c99968b1fb75aa327f24b634ada09959bd61e8f12f67f1478cf8533fa3292e
+  SHA_ORIG_STATUS  = 同值；diff 完全一致。
+M3 scripts.test.ts 的 T9 改回 `richmanHttpPids().length === 0`：
+  先启动真实服务（18903，/health 200，PID 2376），再跑 T9。
+  MUT_M3_EXIT=1
+  FAIL ... > 9 状态目录写入失败时回收本次子进程、端口释放
+  Error: 等待条件超时（scripts.test.ts:154 waitFor；调用点 :381 T9）
+  Tests 1 failed | 14 skipped (15)
+  此时 /health 仍 200；http.ts 只有既有 PID 2376，无新增孤儿。
+  还原后 T9 再跑 1/1 绿；SHA_AFTER_TEST = 957e610879585c2c9c19828b52da590c725988696d4f9ec46a8e07a3d9586eae
+  SHA_ORIG_TEST  = 同值；diff 完全一致。
+结论：M1/M2/M3 都真实变红，且不是靠改测试自证。
+
+七、全量复跑与禁区
+  1) corepack pnpm -s test
+     Test Files 65 passed (65)
+     Tests 796 passed (796)
+     Duration 53.95s；TEST_EXIT=0
+  2) corepack pnpm -s typecheck → TSC_EXIT=0（无诊断）
+  3) corepack pnpm -s build → BUILD_EXIT=0；141 modules；built in 297ms
+  4) scripts.test.ts 单文件（真实服务在跑）：15/15，50.96s，EXIT=0
+  5) git diff 8268aba..bcb9aae -- apps/server/tests：
+     只有 apps/server/tests/scripts.test.ts；其它测试文件零改动。
+  6) T6/T7/T10 当前断言：
+     T6 startedAtUtc="2020-01-01T00:00:00.0000000Z"（远超 2 秒）；
+     T7 仍使用 -DataDir dirA/dirB；
+     T10 仍写 `{not valid json` 并断言 exit 2/状态保留/进程活。
+     T9 由全局计数改为 PID 集合差是规格允许；T13–T15 为追加，未放宽 T1–T12。
+  7) 未改禁区：git diff 仅 scripts.test.ts + 5 个 scripts；无 apps/server/src、
+     packages、apps/web、协议、package.json/依赖。
+  8) 5 个 .ps1 均 EF BB BF；PS 5.1.26100.9711；pwsh 7 未安装。
+
+八、文档与日志核对（阻塞项）
+D1 顶部仍写旧测试数/旧日志
+  位置：
+    handoff/单元09B-成果报告.txt:52 “12 条 = 首版 5 条 + T6–T12”；实际 15 条。
+    handoff/单元09B-运行与验收.txt:14-24 仍写 “65 文件 / 793 条、12 passed、
+      09Bfix-* 日志”；与同文件 :169-171 的 “796/15/09Bfix3” 自相矛盾。
+  为什么阻塞：这是交接正文的当前验收数字，不是历史段落。
+  修复：顶部统一为 796 条、scripts 15 条、09Bfix3-*。
+D2 算术错误
+  位置：handoff/项目当前状态.txt:17、:46
+    “旧 781 + security 50 + scripts 15” = 846，不是 796。
+    正确：731 + 50 + 15 = 796，或 781 + 15 = 796。
+  成果报告:72 的 731+50+15 是对的；项目状态两行仍错。
+D3 正文耗时与所引日志不一致
+  位置：成果报告:73、:79；运行验收:169、:171
+    正文写 Lead 实测 57s、单文件 54s；
+    09Bfix3-full-test.log 实际 49.71s；
+    09Bfix3-scripts.log 实际 47.00s。
+  说明：可能是另一次运行，但正文同时以这些日志为证据；要么标注“另一次运行”，
+  要么改成日志值。不是代码问题，但属于证据不一致。
+D4 t9-live 日志与“整个 15/15”不一致
+  位置：成果报告:168-169；运行验收:173
+    正文称“再跑整个 scripts.test.ts → 15/15”；
+    09Bfix3-t9-live.log 实际是 1 passed | 14 skipped（只跑 T9）。
+  事实：本次独立复跑“真实服务在跑 + 整个 scripts.test.ts”确实 15/15（第四节），
+  所以代码 PASS；但现有日志不能证明“整个”这句话，需补全量日志或改正文。
+D5 顶部其它旧描述（应修）
+  成果报告:17 Wait-HttpHealth 仍写“2xx/3xx 成功”（现还要求 ok/service）；
+  成果报告:34 start-tunnel 参数表缺 -DataDir；
+  成果报告:49-50 status JSON 仍是旧结构，未含 server.stateNote；
+  运行验收:134-137 exit 2 列表只列 mismatch/broken/端口，未列 STOP_FAILED。
+D6 基线表述（应修）
+  成果报告:4、下一阶段:4 写“代码基线 HEAD 8268aba”；本次复核基线是
+  bcb9aae（代码）+71e099a（文档）。如 8268aba 指“第六轮修复前代码”，请写清
+  “代码基线 8268aba；本轮提交 bcb9aae/71e099a”，避免读者混淆。
+D7 成果报告 §八只记录 MUT A/B；本次 M3（T9 全局计数）也真实变红，建议补记。
+
+九、E1–E4 闭环判断
+E1 status stale/mismatch/broken 时不探健康 → 已闭环。
+  status.ps1:37-46 + :55-75；本次 F2 三态真实 HTTP 全 PASS；README/注意事项也写了。
+E2 旧 startedAtUtc 迁移说明 → 已闭环。
+  注意事项 §11（88-94）明确“升级前用首版 stop；已升级则人工确认后清旧状态；
+  不放宽 ±2 秒”。本次 E2 的 4 秒 mismatch 行为仍安全；无新阻塞。
+E3 管道捕获 → 维持已知限制，非本轮代码目标。
+  控制台/文件重定向不受影响；文档 注意事项 §5、运行验收 §六已写明；
+  本次不再要求更强代码约束，但 CI 必须重定向（nit）。
+E4 stop 幂等 vs mismatch exit 2 → 代码/文档已基本闭环。
+  注意事项 §3（28-29）和 README:45-49 已写清“无状态 exit 0；mismatch/坏文件
+  重复仍 exit 2 且状态不动”；但 成果报告/运行验收顶部仍有 D1/D5 旧段落，
+  需要随 D1 一并修。
+
+十、Should-fix
+S1 运行验收 §七 exit 2 未列 STOP_FAILED；补一条“Stop-Process 失败：STOP_FAILED”。
+S2 成果报告 §一.1/3/5 旧函数/旧参数/旧 JSON 描述；按当前实现重写。
+S3 成果报告 §八 补 M3（T9 全局计数变异）与 sha256 结果。
+S4 项目状态:235 历史段仍写“五个入口加 [CmdletBinding()]”；实际 4 个入口 + common
+   库；若作为历史保留可不动，当前段/下一阶段已正确。
+S5 09Bfix3-t9-live 日志若保留，正文必须改成“T9 单条 1/1”，或补一份
+   “真实服务在跑 + 整个 15/15”的日志（本次已有同等证据，可复用）。
+S6 成果报告/运行验收的耗时若来自不同运行，请标注，避免与所引日志冲突。
+
+十一、Nits / 遗留风险
+N1 killAndWait 的“子进程 10 秒不退出”分支未实跑（无法安全制造不可杀进程）；
+   代码有明确 throw，风险低。
+N2 T9 的 before 集合只按“测试开始前 pid”比较；若用户服务在测试期间恰好重启，
+   新 pid 会被当成本测试新增并回收。当前 F3 场景（服务先启动）通过，属边界。
+N3 F1 的 PowerShell 函数遮蔽只覆盖 Stop-Process；若真实权限拒绝发生在
+   Remove-RunState 等其它命令，不在本轮 STOP_FAILED 语义内。
+N4 真机手机、pwsh 7、防火墙规则、计划任务、非 Windows 仍未验证（文档已列）。
+N5 F4 的 rm 锁测试是用与测试文件相同的实现脚本完成；实际 helper 未导出，
+   代码审查确认同样会抛错，未直接调用 helper。
+N6 T13/T14/T15 使用真实子进程/HTTP；T14/T15 的“RichMan 健康”是专用假服务，
+   不是完整服务端；F2 独立探针与 F3 真实服务覆盖了健康语义。
+
+十二、最终结论
+代码侧：**可提交（PASS）**。F1–F4 全部独立通过；T6–T15 真实进程/HTTP/端口；
+796 条、typecheck/build 0；变异 A–E 与 M1–M3 均可红可绿，未发现代码 must-fix。
+整单：**需修复（仅文档/证据）**。D1–D4 是当前交接正文的硬数字/证据错误，
+D5–D7 是旧描述；修完后可提交。上一轮 E1/E2/E4 已闭环，E3 维持已知限制。
+
+十三、清理声明
+- 只使用随机端口 18901–18903 与临时目录 richman-09b-round6probe；未触碰 8000、
+  未写 apps/server/data。
+- 所有 server/dummy/health/cloudflared 已停止；1890x 无 LISTENING；
+  richman-09b-round6probe、richman-09b-round6-mut、richman-scripts-* 已删除。
+- 仓库未改源码/测试/脚本/README/交接，未 commit；本次仅新增本复核文件。
