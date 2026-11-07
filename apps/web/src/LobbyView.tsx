@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { AudioButton } from "./audio/AudioPanel";
 import type { JoinedInfo, WireRoom } from "./net/wire";
 
 export interface LobbyViewProps {
@@ -12,6 +13,8 @@ export interface LobbyViewProps {
   /** 08A：新手教程/规则说明入口；旧调用方不传时保持原样。 */
   onOpenTutorial?: () => void;
   onOpenRules?: () => void;
+  /** 08C：声音设置入口。 */
+  onOpenAudio?: () => void;
 }
 
 const ROOM_STATE_LABELS: Record<WireRoom["state"], string> = {
@@ -22,7 +25,7 @@ const ROOM_STATE_LABELS: Record<WireRoom["state"], string> = {
   ENDED: "已结束",
 };
 
-export function LobbyView({ room, joined, error, onReady, onStart, onDestroyRoom, onOpenTutorial, onOpenRules }: LobbyViewProps) {
+export function LobbyView({ room, joined, error, onReady, onStart, onDestroyRoom, onOpenTutorial, onOpenRules, onOpenAudio }: LobbyViewProps) {
   const [confirmDestroy, setConfirmDestroy] = useState(false);
   const [destroyError, setDestroyError] = useState<string | null>(null);
   const me = joined === null ? undefined : room.players.find((player) => player.playerId === joined.playerId);
@@ -85,7 +88,7 @@ export function LobbyView({ room, joined, error, onReady, onStart, onDestroyRoom
           开始游戏
         </button>
       </div>
-      {onOpenTutorial !== undefined || onOpenRules !== undefined ? (
+      {onOpenTutorial !== undefined || onOpenRules !== undefined || onOpenAudio !== undefined ? (
         <div className="row lobby-links">
           {onOpenTutorial !== undefined ? (
             <button type="button" className="link" onClick={onOpenTutorial}>新手教程</button>
@@ -93,6 +96,7 @@ export function LobbyView({ room, joined, error, onReady, onStart, onDestroyRoom
           {onOpenRules !== undefined ? (
             <button type="button" className="link" onClick={onOpenRules}>规则说明</button>
           ) : null}
+          {onOpenAudio !== undefined ? <AudioButton onOpen={onOpenAudio} /> : null}
         </div>
       ) : null}
       {startReason !== null ? <p className="reason">{startReason}</p> : null}

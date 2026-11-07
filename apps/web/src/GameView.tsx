@@ -50,6 +50,7 @@ import { commandSuccessText } from "./game/results";
 import type { CommandKind, CommandSuccessContext } from "./game/results";
 import { confirmationIsCurrent } from "./game/confirmations";
 import type { ConfirmAction } from "./game/confirmations";
+import { AudioButton } from "./audio/AudioPanel";
 
 export interface GameViewProps {
   paused?: boolean;
@@ -69,6 +70,8 @@ export interface GameViewProps {
   /** 08A：教程/规则入口；只影响阅读，不发命令、不消耗行动。 */
   onOpenTutorial?: () => void;
   onOpenRules?: () => void;
+  /** 08C：声音设置入口；只影响本地音频，不发命令。 */
+  onOpenAudio?: () => void;
 }
 
 const CONN_LABELS: Record<ConnectionStatus, string> = {
@@ -152,7 +155,7 @@ export function GameView(props: GameViewProps) {
   return <GameSessionView key={props.view.gameId} {...props} />;
 }
 
-function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, client, status, statusDetail, result, error, events, onDestroyRoom, onOpenTutorial, onOpenRules }: GameViewProps) {
+function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, client, status, statusDetail, result, error, events, onDestroyRoom, onOpenTutorial, onOpenRules, onOpenAudio }: GameViewProps) {
   const [ui, setUi] = useState<UiState>(INITIAL_UI_STATE);
   const [amount, setAmount] = useState("");
   const [rateText, setRateText] = useState("1000");
@@ -1590,6 +1593,7 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
               <span className={"dot " + status} />
               {CONN_LABELS[status]}
             </div>
+            {onOpenAudio !== undefined ? <AudioButton onOpen={onOpenAudio} className="topbar-btn" /> : null}
             {hostId === view.me.playerId ? (
               <button
                 type="button"

@@ -9,6 +9,8 @@ import { isSessionError, lobbyErrorText, serverErrorText } from "./net/wire";
 import { TutorialOverlay } from "./tutorial/TutorialOverlay";
 import { RulesSheet } from "./tutorial/RulesSheet";
 import { markTutorialSeen, safeLocalStorage, tutorialSeen } from "./tutorial/storage";
+import { createAudioController, deriveSfxEvents, collectNewSfx } from "./audio/audio";
+import { AudioButton, AudioPanel } from "./audio/AudioPanel";
 
 interface ServerError {
   code: string;
@@ -48,8 +50,11 @@ export default function App() {
     return storage !== null && !tutorialSeen(storage);
   });
   const [rulesOpen, setRulesOpen] = useState(false);
+  const [audioOpen, setAudioOpen] = useState(false);
+  const [audio] = useState(() => createAudioController());
 
   const clientRef = useRef<RichmanClient | null>(null);
+  const playedSfxSeqRef = useRef<Set<number>>(new Set());
   /** 主动退出/换房间期间忽略旧连接上的迟到错误。 */
   const leavingRef = useRef(false);
 
@@ -75,6 +80,7 @@ export default function App() {
     setJoined(null);
     setSnapshot(null);
     setEvents([]);
+    playedSfxSeqRef.current.clear();
     setResult(null);
     setServerError(null);
     setEntryError(null);
@@ -100,6 +106,7 @@ export default function App() {
         // started 之后等 snapshot；服务端会在同一提交内推送到所有连接。
         setSnapshot(null);
         setEvents([]);
+        playedSfxSeqRef.current.clear();
         setResult(null);
         setServerError(null);
         setLobbyError(null);
@@ -125,6 +132,7 @@ export default function App() {
           setJoined(reset.joined);
           setSnapshot(reset.snapshot);
           setEvents(reset.events);
+          playedSfxSeqRef.current.clear();
           setResult(reset.result);
           setServerError(reset.serverError);
           setLobbyError(reset.lobbyError);
@@ -176,6 +184,42 @@ export default function App() {
     // 只在首次挂载时恢复会话。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // StrictMode 的 mount→cleanup→mount 不能 dispose controller；只在真实页面离开时释放。
+  useEffect(() => {
+    const onHide = (): void => audio.dispose();
+    window.addEventListener("pagehide", onHide);
+    return () => window.removeEventListener("pagehide", onHide);
+  }, [audio]);
+
+  // 自动播放策略：只在首次 pointerdown/keydown 后创建/播放 BGM，不做任何预加载。
+  useEffect(() => {
+    const onGesture = (): void => {
+      audio.unlock();
+      window.removeEventListener("pointerdown", onGesture);
+      window.removeEventListener("keydown", onGesture);
+    };
+    window.addEventListener("pointerdown", onGesture);
+    window.addEventListener("keydown", onGesture);
+    return () => {
+      window.removeEventListener("pointerdown", onGesture);
+      window.removeEventListener("keydown", onGesture);
+    };
+  }, [audio]);
+
+  const ownPlayerId = joined?.playerId ?? snapshot?.me.playerId ?? "";
+  // 事件音效由 App 统一派生；用 Set 按 seq 永久去重（覆盖 300 条事件窗口），避免重播。
+  useEffect(() => {
+    if (events.length === 0) {
+      playedSfxSeqRef.current.clear();
+      return;
+    }
+    if (ownPlayerId === "") return;
+    // derive 始终接收完整事件窗口，保留 LOAN_REQUESTED→CLOSED 的映射。
+    for (const item of collectNewSfx(deriveSfxEvents(events, ownPlayerId), playedSfxSeqRef.current)) {
+      audio.playSfx(item.name);
+    }
+  }, [events, ownPlayerId, audio]);
 
   function finishTutorial(): void {
     markTutorialSeen(safeLocalStorage());
@@ -290,12 +334,14 @@ export default function App() {
           onDestroyRoom={() => requestRoomDestroy(clientRef.current)}
           onOpenTutorial={() => setTutorialOpen(true)}
           onOpenRules={() => setRulesOpen(true)}
+          onOpenAudio={() => setAudioOpen(true)}
         />
       ) : roomCode !== null && room !== null ? (
         <LobbyView room={room} joined={joined} error={lobbyError} onReady={handleReady} onStart={handleStart}
           onDestroyRoom={() => requestRoomDestroy(clientRef.current)}
           onOpenTutorial={() => setTutorialOpen(true)}
-          onOpenRules={() => setRulesOpen(true)} />
+          onOpenRules={() => setRulesOpen(true)}
+          onOpenAudio={() => setAudioOpen(true)} />
       ) : roomCode !== null ? (
         <section className="panel">
           <h1>正在进入房间 {roomCode}</h1>
@@ -344,6 +390,7 @@ export default function App() {
           <div className="row entry-links">
             <button type="button" className="link" onClick={() => setTutorialOpen(true)}>新手教程</button>
             <button type="button" className="link" onClick={() => setRulesOpen(true)}>规则说明</button>
+            <AudioButton onOpen={() => setAudioOpen(true)} />
           </div>
           {entryError !== null ? <p className="reason">{entryError}</p> : null}
           {lobbyError !== null ? <p className="reason">{lobbyError}</p> : null}
@@ -360,6 +407,7 @@ export default function App() {
         ) : null}
       </footer>
 
+      {audioOpen ? <AudioPanel controller={audio} onClose={() => setAudioOpen(false)} /> : null}
       {tutorialOpen ? <TutorialOverlay onFinish={finishTutorial} /> : null}
       {rulesOpen ? <RulesSheet onClose={() => setRulesOpen(false)} /> : null}
     </div>

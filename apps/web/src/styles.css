@@ -1401,3 +1401,117 @@ p {
     padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* 08C 声音设置：高于内容、低于教程/规则覆盖层 40，四角安全区。          */
+/* ------------------------------------------------------------------ */
+.audio-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: max(16px, var(--safe-top)) max(16px, var(--safe-right))
+    max(16px, var(--safe-bottom)) max(16px, var(--safe-left));
+  background: rgba(5, 10, 16, 0.72);
+}
+
+.audio-panel {
+  width: min(420px, 100%);
+  min-width: 0;
+  max-height: 100vh;
+  max-height: 100dvh;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  background: #16222e;
+  border: 1px solid #3d7fae;
+  border-radius: 16px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  padding: 18px max(18px, var(--safe-right)) calc(18px + var(--safe-bottom)) max(18px, var(--safe-left));
+}
+
+.audio-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.audio-head h2 {
+  font-size: 20px;
+  color: #f2f8ff;
+}
+
+.audio-close {
+  display: inline-grid;
+  place-items: center;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 8px;
+}
+
+.audio-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  margin-top: 10px;
+}
+
+.audio-row > span {
+  min-width: 4.5em;
+  color: #dbe6f2;
+}
+
+.audio-row input[type="range"] {
+  flex: 1 1 160px;
+  min-width: 0;
+  accent-color: #5fb4e8;
+}
+
+.audio-row input[type="checkbox"] {
+  width: 24px;
+  height: 24px;
+  accent-color: #5fb4e8;
+}
+
+.audio-value {
+  min-width: 2.5em;
+  text-align: right;
+  color: #9fb0c3;
+  font-variant-numeric: tabular-nums;
+}
+
+.audio-unavailable {
+  color: #ffd28a;
+}
+
+@media (pointer: coarse) {
+  .audio-row input[type="range"] {
+    min-height: 44px;
+  }
+
+  .audio-row input[type="checkbox"] {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+@media (max-width: 560px) {
+  .audio-overlay {
+    padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+    align-items: stretch;
+  }
+
+  .audio-panel {
+    width: 100%;
+    max-height: 100vh;
+    max-height: 100dvh;
+    border-left: 0;
+    border-right: 0;
+    border-radius: 0;
+  }
+}
