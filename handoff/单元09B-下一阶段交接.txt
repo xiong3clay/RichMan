@@ -1,13 +1,15 @@
 单元 09B 下一阶段交接（一键启动 / 隧道 / 停止 / 状态脚本）
 ================================================================
 日期：2026-11-07
-基线：793bb83；本轮实现未提交。下一单元：09C（备份恢复、安全补强、文档/许可证/版本记录）。
+基线：代码基线 8268aba（09A 第四轮补强后的复核修复单；09B 第五轮修复在其工作区之上）；
+09B 首版实现 6491fe9、文档 39dc1b9；第六轮补强提交后以 git log 为准。
+下一单元：09C（备份恢复、BET_SETTLED 按 audience 拆分、文档/许可证/版本记录）。
 
 一、脚本架构与入口
 - scripts/richman-common.ps1：公共函数（dot-source）
   Get-RichManRoot / Resolve-DataDir / Read-RunState / Write-RunState / Remove-RunState /
-  Test-PortFree / Wait-HttpHealth / Get-CloudflaredPath / Get-ProcessInfo /
-  Get-LanAddresses / Write-CheckJson。
+  Test-PortFree / Wait-HttpHealth / Get-CloudflaredPath / Get-RunStateProcess /
+  Stop-LaunchedProcess / Get-LanAddresses / Write-CheckJson。
 - scripts/start-lan.ps1：
   CheckOnly 五项检查 → JSON；正常模式单进程 node（--import tsx）→ 健康检查 →
   run/server.json。已在运行幂等退出；端口占用/缺 dist/健康超时 exit 1。
@@ -15,7 +17,8 @@
   本地 /health 前置 → cloudflared → 日志匹配 trycloudflare URL → run/tunnel.json →
   URL /health（30s，失败仅 WARN）。
 - scripts/stop.ps1：
-  先 tunnel 后 server；只按状态文件 pid + 进程名白名单停止；CheckOnly 只报计划；
+  先 tunnel 后 server；只有 pid + 进程名 + 真实启动时间（±2 秒）三者匹配才停止；
+  mismatch/unknown/坏状态文件不杀不删、exit 2；CheckOnly 只报计划；
   停 server 后轮询端口 10s，仍占用 exit 2。
 - scripts/status.ps1：
   只读；本地 /health + 隧道进程/URL/健康；-Json 单行；server 不健康 exit 1。
@@ -46,10 +49,12 @@
 09D（真机矩阵）：LAN + 隧道 + 2/10 人；本脚本打印的 LAN 地址与隧道 URL 可直接用。
 
 五、不可破坏的不变量（09C/09D 及以后）
-1) .ps1 必须 UTF-8 with BOM；入口脚本首行 param(；不使用 PowerShell 7 专有语法。
+1) .ps1 必须 UTF-8 with BOM；四个入口脚本为 [CmdletBinding()] + param(（common 是库）；
+   不使用 PowerShell 7 专有语法。
 2) 起服必须是单进程 node（PID 即 node 本体），stdout/stderr 分开重定向，
    禁止回到 pnpm 父进程 + 子进程模式（stop 会留下孤儿）。
-3) stop 只按状态文件 pid + 进程名白名单（server:node、tunnel:cloudflared）停止；
+3) stop 只按状态文件 pid + 进程名 + 真实启动时间（±2 秒）三者匹配（server:node、
+   tunnel:cloudflared）才停止；
    绝不按端口杀陌生进程；无状态文件幂等 exit 0；端口仍被占用只 WARN + exit 2。
 4) start-lan 必须先健康检查再写 server.json；健康失败不写状态并清理进程。
 5) start-tunnel 必须先本地 /health 通过；已有存活 tunnel.json 幂等打印旧 URL；
@@ -59,4 +64,10 @@
    最后一行必须是单行 JSON。
 8) 停止顺序固定：先 tunnel 后 server。
 9) 数据目录默认不得写进仓库根或静态目录；日志/状态只在 dataDir 下。
-10) 旧 781 条测试不得删改；scripts.test.ts 只能追加。
+10) 旧 796 条测试不得删改；scripts.test.ts 只能追加（T13–T15 为第六轮新增）。
+11) stop 的 Stop-Process 失败必须 reason=STOP_FAILED、ok=false、exit 2，状态文件保留，
+    不得打印“已全部停止”。
+12) status 在任何 stateStatus 下都要探测 /health：健康即 ok=true/exit 0，并用
+    server.stateNote（""/stale/mismatch/unknown/broken）标注状态文件不可信。
+13) scripts 测试只能按“测试前后 http.ts PID 集合差”判断新增进程，禁止要求全局计数为 0；
+    清理必须等进程退出并重试删目录，失败要抛出。

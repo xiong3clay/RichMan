@@ -1,0 +1,397 @@
+RichMan 单元 09B 第五轮复核修复 独立验证
+================================================
+复核员：Qoder（只读复核；未改源码/测试，未 commit）
+日期：2026-11-07
+复核对象：工作区未提交的第五轮修复（基线 HEAD 8268aba）
+  - scripts/richman-common.ps1、start-lan.ps1、start-tunnel.ps1、stop.ps1、status.ps1
+  - apps/server/tests/scripts.test.ts（5 旧 + T6–T12，共 12 条）
+  - README.md 09B 节、handoff/单元09B-*.txt、handoff/项目当前状态.txt
+复核依据：AGENTS.md、handoff/复核-单元09B.txt（上一轮 FAIL）、
+          handoff/单元09B-复核修复.txt（F1–F7）、完整 git diff、09Bfix-* 日志
+
+结论：需修复（核心代码修复 PASS；阻塞项在交接文档/证据，另有若干诊断与测试卫生 should-fix）
+  代码侧：M1、M2、S1、S2、S3、F6 全部通过独立复现；T6–T10/T12 使用真实子进程/HTTP/端口，
+  T11 为真实 PowerShell 参数校验；仓库全量 65 文件 / 793 条通过，typecheck 0，build 0。
+  文档侧：成果报告、注意事项、下一阶段交接仍把“旧的 stop 语义”写成现状，
+          测试数算术错误，09Bfix-typecheck.log 缺失；修完这三类后代码可提交。
+  未发现需要改生产代码才能提交的 must-fix。
+
+一、逐项 PASS/FAIL 表
+| 项 | 结果 | 独立证据摘要 |
+|---|---|---|
+| M1 PID 复用 | PASS | 2020 启动时间状态 → stop exit 2、dummy 活、状态保留；改成真实 StartTime → exit 0、杀掉、状态删除 |
+| M1 状态矩阵 | PASS | missing exit 0；stale exit 0 清状态；unknown(pid=0) exit 2 保留；坏 JSON exit 2 保留 |
+| M2 start-tunnel -DataDir | PASS | dirA 假 cloudflared 被读到 running=true/ALREADY_RUNNING；dirB false；stop dirA 杀掉 |
+| M2 未知参数 | PASS | start-tunnel -Nope 1 → exit 1，NamedParameterNotFound 'Nope' |
+| S1 伪健康 | PASS | 普通 HTTP 200 {"hello":"world"}：start-lan alreadyRunning=false；status server.ok=false |
+| S2 start-lan 写状态失败 | PASS | run 为文件 → exit 1、无监听、无 server.json、无 http.ts 孤儿 |
+| S2 start-tunnel 写状态失败 | PASS | 假 URL 已拿到后 run 为文件 → exit 1、假 cloudflared 被回收、无 tunnel.json |
+| S3 坏 JSON | PASS | stop exit 2、坏文件保留、dummy 活；status reason=“状态文件损坏” |
+| F6 planned port / status 默认端口 | PASS | status 不带 -Port 用 18885；stop -CheckOnly planned[0].port=18885；CheckOnly 后进程仍活 |
+| T1–T5 旧测试 | PASS | 仅 T1 的 param( 断言改为可选 [CmdletBinding()]；T2–T5 未改 |
+| T6–T12 | PASS | T6/T7/T8/T9/T10/T12 为真实 dummy node、假 cloudflared、真实 HTTP、真实 start-lan 服务、真实端口；T11 为真实参数校验；12/12 基线通过 |
+| 变异 A–E | PASS（测试有效） | A→T6 红；B→T7 红；C→T8 红；D→T9 红；E→T10 红；逐组还原后 12/12 绿 |
+| 全量 test/typecheck/build | PASS | 65 文件 / 793 条；TSC_EXIT=0；BUILD_EXIT=0（141 modules） |
+| 未改禁区 | PASS | 仅 README、scripts.test、5 脚本、09B 交接、项目状态；无 apps/server/src、packages、apps/web/src、协议、依赖改动 |
+| BOM / PS 5.1 | PASS | 5 个 .ps1 均 EF BB BF；PowerShell 5.1.26100.9711 实测；pwsh 7 未安装 |
+| 文档与日志一致性 | FAIL | 旧 stop 语义、算术 781+50+12、5 条 vs 12 条、缺失 typecheck 日志、baseline 1ebdbe0 |
+| E1 状态诊断 | FAIL（应修） | stale 状态 + 同端口健康 RichMan → status ok=false、exit 1，不再探测 /health |
+| E2 旧状态迁移 | 代码 PASS / 文档缺 | 旧 health 时刻 startedAtUtc 差 4 秒 → stop exit 2；迁移说明未写 |
+| E3 管道/控制台 | PASS（有已知限制） | 文件重定向 4s、控制台式 3.5s 退出；管道捕获仍会等子进程 |
+| E4 幂等承诺 | FAIL（文档矛盾） | 无状态 exit 0；mismatch exit 2 且保留状态；旧文档仍写“mismatch 清理状态” |
+
+二、M1 独立复现（不是只跑现成测试）
+环境：临时目录、随机端口、无关 node（sleep 120s）；不触碰 8000 / apps/server/data。
+
+2.1 旧启动时间 → 必须不杀、exit 2、保留状态
+写入：
+  {"pid":29100,"startedAtUtc":"2020-01-01T00:00:00.0000000Z","port":19999,...}
+进程真实启动时间：
+  ACTUAL_START=2026-11-07T14:44:15.5008719Z
+执行：
+  powershell -File scripts/stop.ps1 -DataDir <临时目录>
+实际：
+  STOP1_EXIT=2
+  WARN：状态文件 ... 与进程不匹配（进程启动时间与状态文件相差 216225856 秒，
+  pid 可能已被复用），未杀进程，请人工确认后删除状态文件或手动停止。
+  {"ok":false,"reason":"STATE_UNRESOLVED","stopped":[],"warnings":[...]}
+  DUMMY_ALIVE=true
+  STATE1_EXISTS=true
+
+2.2 改成真实 StartTime → 必须杀、exit 0、删除状态
+写入实际 StartTime 后：
+  STOP2_EXIT=0
+  已停止 server（pid 29100）。
+  {"ok":true,"stopped":[{"kind":"server","pid":29100,"port":19999,"running":false}],...}
+  DUMMY_ALIVE=false
+  STATE2_EXISTS=false
+结论：M1 两段都 PASS；stop 确实比较了真实启动时间，而不是只看 pid + 进程名。
+
+2.3 状态矩阵（补充）
+  missing（无状态文件）：EXIT=0，“未在运行...”。
+  stale（pid=999999）：EXIT=0，WARN“进程已退出，已清理状态”，状态文件删除。
+  unknown（pid=0）：EXIT=2，WARN“pid 无效”，状态保留。
+  坏 JSON：EXIT=2，WARN“无法解析（可能损坏）”，状态保留。
+  running：见 2.2，EXIT=0 杀掉并删状态。
+  说明：missing/stale/running/mismatch/unknown 五种语义与修复单 F1.2 一致。
+
+三、M2 独立复现
+准备：把 node.exe 复制为 dirA\cloudflared.exe，启动 sleep 进程；写 dirA/run/tunnel.json
+（pid 29616、真实 StartTime、url=https://probe.trycloudflare.com）。
+  CHECK_A（-CheckOnly -Port 18881 -DataDir dirA）：
+    EXIT=1
+    {"ok":false,"reason":"ALREADY_RUNNING",...,"alreadyRunning":
+     {"ok":false,"running":true,"url":"https://probe.trycloudflare.com"}}
+  CHECK_B（同端口 -DataDir dirB）：
+    EXIT=1
+    {"ok":false,"reason":"LOCAL_SERVER_DOWN",...,"alreadyRunning":
+     {"ok":true,"running":false,"url":""}}
+  STOP_A（-DataDir dirA）：
+    EXIT=0
+    已停止 tunnel（pid 29616）。
+    {"ok":true,"stopped":[{"kind":"tunnel","pid":29616,"port":18881,"running":false}],...}
+    假 cloudflared 已退出，tunnel.json 已删除。
+  未知参数：
+    powershell -File scripts/start-tunnel.ps1 -CheckOnly -Nope 1
+    EXIT=1
+    A parameter cannot be found that matches parameter name 'Nope'.
+    FullyQualifiedErrorId=NamedParameterNotFound,start-tunnel.ps1
+结论：M2 PASS；-DataDir 已真实生效，未知参数不再被 $args 吞掉。
+补充：实际入口脚本是 4 个（start-lan/start-tunnel/stop/status），common 是库；
+四个入口已有 [CmdletBinding()]，common 无 param/CmdletBinding，测试 T1 也排除 common。
+文档若写“五个入口”应改成“四个入口 + 公共库”。
+
+四、S1 伪健康独立复现
+普通 node HTTP 服务监听 18882，/health 返回：
+  HTTP 200 {"hello":"world"}
+写入 s1/run/server.json（pid、真实 StartTime、port=18882）。
+  start-lan -CheckOnly -Port 18883 -DataDir s1：
+    EXIT=0
+    {"ok":true,...,"alreadyRunning":{"ok":true,"running":false}}
+  status -Json -Port 18882 -DataDir s1：
+    EXIT=1
+    {"ok":false,...,"server":{"ok":false,"port":18882,"rooms":0,"connections":0,
+     "reason":"健康检查返回的不是 RichMan 服务"},...}
+真实隧道也验证了同一个判断：隧道 /health 返回
+  {"ok":true,"service":"richman",...}
+status tunnel.ok=true；普通 200 不再被当成 RichMan。结论：S1 PASS。
+
+五、S2 写状态失败独立复现
+5.1 start-lan（dataDir/run 是普通文件）
+  start-lan -Port 18884 -DataDir s2 -TimeoutSec 40
+  S2_EXIT=1
+  服务启动失败（... WriteAllText ... 未能找到路径 ...\run\server.json.tmp ...），
+  已回收本次子进程（如可确认）。
+  netstat：NO_LISTENER_18884
+  http.ts 进程：无新增
+  run 仍是文件；没有 server.json；logs/*.log 保留。
+5.2 start-tunnel（拿到假 URL 后写状态失败）
+  在临时 cwd 放 `tunnel` 脚本，假 cloudflared.exe 输出
+  https://probe.trycloudflare.com 并休眠；dataDir/run 是普通文件。
+  start-tunnel -Port 18891 -DataDir s2t2-tunnel -Cloudflared <fake> -TimeoutSec 10
+  TUNNEL_EXIT=1
+  隧道启动失败（... WriteAllText ... tunnel.json.tmp ...），已回收本次子进程（如可确认）。
+  假 cloudflared：无残留；tunnel.json：无；logs/*.log 保留。
+结论：S2 PASS；失败路径只回收到本次子进程，端口/进程无孤儿，.tmp 清理。
+
+六、S3 坏 JSON 独立复现
+  s3/run/server.json 内容：{not valid json；无关 node 27804 存活。
+  stop -DataDir s3：
+    EXIT=2
+    WARN：状态文件存在但无法解析（可能损坏）...未按端口杀进程，请人工检查。
+    {"ok":false,"reason":"STATE_UNRESOLVED","stopped":[],"warnings":[...]}
+    DUMMY27804_ALIVE=true；server.json 仍存在。
+  status -Json -DataDir s3：
+    EXIT=1
+    {"ok":false,...,"server":{"ok":false,"reason":"状态文件损坏，无法确认进程归属"},...}
+结论：S3 PASS。
+
+七、F6 完整生命周期与端口
+  start-lan -Port 18885 -DataDir f6 -TimeoutSec 30：
+    START_EXIT=0；/health 200（带三安全头）。
+  status -Json -DataDir f6（不带 -Port）：
+    STATUS_EXIT=0；{"ok":true,"port":18885,...,"server":{"ok":true,"port":18885,...}}
+  stop -CheckOnly -DataDir f6：
+    PLAN_EXIT=0；planned[0]={"kind":"server","pid":30584,"port":18885,"running":true}
+    CheckOnly 后 18885 仍 LISTENING（只报计划，不动进程）。
+  stop -DataDir f6：
+    STOP_EXIT=0；已停止 server（pid 30584）；NO_LISTENER_18885；状态删除。
+  文件重定向下 start-lan 耗时 4 秒（START_SECONDS=4），未等待服务退出。
+结论：F6 PASS。
+
+八、变异探针（仓库外副本，逐组还原）
+副本：D:\Lianjunjie\biancheng\richman-09b-fix-mutation
+复制 scripts、scripts.test.ts、apps/server/src、apps/web/dist、packages；
+node_modules 与 apps/server/node_modules 用 junction 指向仓库；基线 12/12 绿。
+
+A. Get-RunStateProcess 跳过启动时间比较
+   改 common.ps1 的 `if ($diffSeconds -gt 2) { ... return mismatch }` 为注释。
+   目标 T6：
+     MUT_A_EXIT=1
+     FAIL ... > 6 无关 node + 旧启动时间：stop 不杀、exit 2、保留状态
+     expected +0 to be 2
+     ❯ apps/server/tests/scripts.test.ts:217:51
+     Tests 1 failed | 11 skipped (12)
+   结果：T6 红。还原 common.ps1 后 diff 完全一致。
+
+B. start-tunnel 的 Resolve-DataDir $DataDir 改回 ''
+   目标 T7：
+     MUT_B_EXIT=1
+     FAIL ... > 7 start-tunnel 认 -DataDir，stop 停掉同目录假 cloudflared
+     expected false to be true
+     ❯ apps/server/tests/scripts.test.ts:240:74
+     另有 EPERM: unlink ...\cloudflared.exe（失败清理问题，见 should-fix）
+     Tests 1 failed | 11 skipped (12)
+   结果：T7 红。还原后 diff 完全一致。
+
+C. Wait-HttpHealth 去掉 ok/service 校验，只看 2xx/3xx
+   目标 T8：
+     MUT_C_EXIT=1
+     FAIL ... > 8 普通 HTTP 200 JSON 不被当成 RichMan
+     expected true to be false
+     ❯ apps/server/tests/scripts.test.ts:269:80
+     Tests 1 failed | 1 passed | 10 skipped (12)
+   结果：T8 红。还原后 diff 完全一致。
+
+D. 删掉 start-lan catch 里的 Stop-LaunchedProcess 块
+   目标 T9：
+     MUT_D2_SHELL_EXIT=1
+     × 9 状态目录写入失败时回收本次子进程、端口释放 40071ms
+     Error: 等待条件超时
+     ❯ waitFor apps/server/tests/scripts.test.ts:89:50
+     ❯ apps/server/tests/scripts.test.ts:282:5
+     另有 EBUSY: unlink ...\logs\server-...-err.log
+     Tests 1 failed | 11 skipped (12)
+     实际留下 http.ts 孤儿 PID 27512，监听端口未释放；复核只杀该孤儿并清临时目录。
+   结果：T9 红。还原 start-lan 后 diff 完全一致。
+   注意：D 的第一次运行中，复核员提前杀了孤儿，导致 T9 变绿；该次结果作废，
+   报告采用不干预、硬超时后的第二次红。此处也暴露 T9 失败清理问题。
+
+E. stop 坏 JSON 分支改回静默 continue
+   目标 T10：
+     MUT_E_EXIT=1
+     FAIL ... > 10 坏 JSON 状态文件：stop exit 2、保留文件、不杀进程
+     expected +0 to be 2
+     ❯ apps/server/tests/scripts.test.ts:295:51
+     Tests 1 failed | 11 skipped (12)
+   结果：T10 红。还原 stop.ps1 后 diff 完全一致。
+
+最终：五个脚本与 orig 备份逐文件 diff 均一致；副本 12/12 绿（FINAL_BASELINE_EXIT=0，
+Duration 72.52s）。仓库未做任何变异。
+
+九、独立复跑（仓库）
+  corepack pnpm -s test
+    65 files passed (65)；793 tests passed (793)；Duration 75.25s；TEST_EXIT=0
+    （793 = 旧 731 + security 50 + scripts 12；不是 781 + 50 + 12，见 MF-2）
+  corepack pnpm -s typecheck
+    TSC_EXIT=0（无诊断）
+  corepack pnpm -s build
+    BUILD_EXIT=0；141 modules；index--JyM_5JG.css 18.07 kB、
+    index-CrCvzBNf.js 425.13 kB；built in 321ms
+  git diff --name-only：
+    README.md、scripts.test.ts、5 个 scripts、5 份 09B 交接、项目当前状态
+    没有 apps/server/src、packages/**、apps/web/src、协议、package.json/依赖改动。
+  五个 .ps1 字节头均 EF BB BF；PS 5.1.26100.9711 实测；pwsh 7 未安装。
+
+十、真实隧道复测（修复后）
+  start-lan -Port 18892 -DataDir realserver
+  start-tunnel -Port 18892 -DataDir realtunnel -TimeoutSec 90
+    隧道https://burst-sake-entity-organizer.trycloudflare.com
+    PID=29988；state.startedAtUtc 与该 cloudflared 进程 StartTime 完全一致
+    隧道 /health 重试 5 次 000 后 200：
+      {"ok":true,"service":"richman",...}
+    status -Json -DataDir realtunnel：
+      {"ok":true,...,"tunnel":{"ok":true,"url":"...","processRunning":true,"reason":""}}
+    stop -DataDir realtunnel：已停止 tunnel（pid 29988），状态删除。
+    本机 server 的 dataDir 是 realserver，另行 stop；18892 端口最终释放。
+  说明：隧道 URL 每次重启会变，本 URL 只作本次证据；手机真机未测。
+
+十一、E1–E4 判断
+E1 status 在 stale 状态 + 同端口健康 RichMan 时直接 ok=false
+  判定：YES，属于诊断失真，应该修复（should-fix）。
+  证据：18886 /health 返回 200 service=richman；另一 dataDir 写 stale 状态
+  （pid=999999，port=18886）；status -Json -DataDir staleDir 输出：
+    {"ok":false,"port":18886,...,"server":{"ok":false,...,"reason":"状态文件记录的进程已退出"}}
+    exit 1
+  原因：status.ps1:39-45 在 state 非 running 时直接写 reason，只有 else 分支才探测
+  /health（status.ps1:46-63）。stale/mismatch 不等于服务一定不健康。
+  建议：state 非 running 时仍探测生效端口 /health；若返回 RichMan 健康，可报
+  server.ok=true 并附 “状态文件过期” 警告；或至少增加 healthOk 字段，避免诊断失真。
+  严重度：should-fix（只读诊断；不影响 stop 安全）。
+
+E2 旧版 startedAtUtc 是健康检查后的 UtcNow，新 stop 可能判 mismatch
+  判定：YES，需要文档标注迁移方式（should-fix，文档）。
+  证据：无关 node 实际 StartTime 14:46:28，旧式 state 写 14:46:32（差 4 秒）：
+    stop exit 2，WARN“相差 4 秒，pid 可能已被复用”，state 保留，dummy 仍活。
+    改成真实 StartTime 后 stop exit 0 并杀掉。
+  旧 start-lan 在健康检查之后才取 UtcNow；旧 tunnel 更是在 URL 捕获后才取时间，
+  差值可能 >2 秒。升级时旧实例仍在运行，新 stop 会安全地拒绝停止并 exit 2。
+  建议：在 注意事项/运行与验收 写明迁移步骤：升级前用旧脚本 stop；
+  或人工确认后手动停止旧进程并删除旧 server.json/tunnel.json；
+  不要为了迁移放宽 ±2 秒或退回只看 pid+名称。
+  严重度：should-fix（安全行为正确，缺运维说明）。
+
+E3 管道捕获脚本输出时子进程句柄继承
+  判定：真实控制台/文件重定向不受影响；CI 管道需要更强约定（nit）。
+  证据：同一 start-lan（18885）文件重定向耗时 4 秒返回；
+  用隐藏 PowerShell 控制台启动 start-lan（18887）3.5 秒返回 exit 0；
+  但用 `... start-lan.ps1 | ...` 仍会等 node 子进程退出。
+  文档 注意事项 §5、运行与验收 §六已如实写；不建议为此改生产脚本。
+  建议：README/运行验收明确“CI 必须重定向到文件或 Start-Process 包装”，
+  不要让测试把常驻服务输出直接接管道。严重度：nit。
+
+E4 stop “幂等”承诺 vs mismatch exit 2、状态保留
+  判定：文档自相矛盾，必须修文档（must-fix 文档）。
+  现状代码：无状态文件 → “未在运行” exit 0（幂等）；mismatch/unknown/坏 JSON →
+  exit 2、状态保留、不杀；stale → 清状态 exit 0。这个行为是正确的、可重复的
+  （重复 mismatch 仍是 exit 2、状态不动），但“幂等 = 成功/exit 0”的旧表述不准确。
+  矛盾位置：
+    成果报告:43 “不匹配/已退出只清理状态并 WARN”（旧行为）；
+    注意事项:25-26 “PID 复用时进程名不匹配就只 WARN 并清理状态”（旧行为）；
+    下一阶段:19/53 “只按 pid + 进程名白名单停止”（漏了真实启动时间）；
+    README:45 “可重复执行（幂等）”与 exit 2 并列，容易被理解为总是成功。
+  建议：明确写成“无状态文件幂等 exit 0；mismatch/unknown/坏 JSON 是人工确认态，
+  exit 2 且不删状态；stale 才清状态”。严重度：must-fix（文档）。
+
+十二、Must-fix（提交前）
+MF-1 文档仍把旧 stop 语义当现状（安全文档错误）
+  位置：
+    handoff/单元09B-成果报告.txt:43
+    handoff/单元09B-注意事项.txt:25-26
+    handoff/单元09B-下一阶段交接.txt:19,53
+    （同文件 17/20/33/48/50 仍是旧 Wait-HttpHealth/Get-ProcessInfo/5 条测试描述）
+  实际：stop 只杀 pid+进程名+真实 StartTime（±2 秒）三者匹配；
+        mismatch/unknown/坏 JSON 不杀不删、exit 2；stale 才清状态。
+  为什么阻塞：照旧文档维护会重新引入“PID 复用清状态/不校验启动时间”的错误。
+  修复：按当前代码重写这些段落；保留上一轮的“只看 pid+名字”只作为历史说明。
+
+MF-2 测试数与算术错误（数字不一致）
+  位置：
+    handoff/单元09B-成果报告.txt:70：“旧 781 + 09A security 50 + 09B scripts 12”
+      = 843，不是 793；正确是 731 + 50 + 12，或 781 + 12。
+    handoff/项目当前状态.txt:17,46 同样写错。
+    handoff/单元09B-成果报告.txt:50 仍写 scripts.test 5 条；实际 12 条（T1–T12）。
+    handoff/单元09B-运行与验收.txt:108 写“四个脚本都支持 -Port 8001”；
+      stop.ps1 没有 -Port（只有 -DataDir/-CheckOnly）。
+  为什么阻塞：用户要求文档数字与实跑一致；这些是可直接核对的硬数字。
+  修复：统一 793 的分解；把 5 条改为 12 条；把 -Port 限定为 start-lan/start-tunnel/status。
+
+MF-3 09Bfix-typecheck.log 缺失
+  位置：handoff/单元09B-成果报告.txt:73、handoff/单元09B-运行与验收.txt:18
+  实际：artifacts/test-logs/09Bfix-typecheck.log 不存在；复核独立运行 typecheck
+        TSC_EXIT=0。09Bfix-test.log（793）、09Bfix-scripts.log（12）、
+        09Bfix-manual.log、09Bfix-build.log 均存在且与文档一致。
+  为什么阻塞：交接以该日志为证据，文件缺失导致“typecheck 通过”无法按文档复核。
+  修复：补生成并保留 09Bfix-typecheck.log，或删除该日志引用并改引实际证据。
+
+十三、Should-fix
+S-1 E1 状态诊断失真（status.ps1:39-45）
+  见十一节；建议 state 非 running 时仍探测 /health，或增加 healthOk 字段。
+S-2 stop 在 Stop-Process 失败时仍报成功（代码）
+  位置：stop.ps1:69-71 catch 只加 warning，未设置 $hasUnresolved；
+        stop.ps1:99-140 最终仍打印“已全部停止”、ok=true、exit 0。
+  影响：进程在查询后退出/权限不足等情况下，stop 可能警告但退出码 0，用户误以为已停。
+  建议：catch 设 $hasUnresolved/$stopFailed=true，最终 exit 2（或 1），
+        不要打印“已全部停止”。本次未实跑该分支（难在安全前提下制造权限拒绝），按代码审查。
+S-3 T9 全局 http.ts 计数会误伤已运行的合法服务（测试隔离）
+  位置：apps/server/tests/scripts.test.ts:136-144（richmanHttpProcessCount）、:283。
+  复现：先 start-lan 一个临时服务（18889），再跑 T9；T9 自身清理正确，
+        但全局计数仍为 1，T9 在 19.99s 后 waitFor 超时变红。
+  影响：用户在运行 RichMan 时跑测试会得到假失败；应改为比较测试前后计数或记录本次 PID。
+S-4 T7/T9 失败清理不完整（测试卫生）
+  位置：afterEach:23-27、T7:223-248、T9:275-284。
+  证据：变异 B 的 T7 失败后出现 EPERM: unlink ...cloudflared.exe，临时目录残留；
+        变异 D 的 T9 失败后出现 EBUSY: unlink ...server-...-err.log，并留下 http.ts
+        孤儿 PID 27512（复核手动清理）。
+  建议：kill 后等待进程退出；rm 失败重试；T9 记录本次 start-lan 子进程 PID 并 finally 回收。
+S-5 E2 迁移说明缺失（文档）
+  见十一节 E2；在 注意事项/运行与验收 增补迁移步骤。
+S-6 E4 幂等语义需要统一（文档）
+  见十一节 E4；与 MF-1 一并修。
+S-7 旧 8000 真实验收链未在修复后重跑
+  位置：成果报告:80-95、运行与验收:26-101 引用 09B-acceptance.log（旧 pid/URL）。
+  本次复核另做了 18892 真实隧道并 PASS，但文档不应把旧链当作“修复后”证据；
+  建议标注“首版历史”或补一次修复后的 8000 链。
+S-8 “五个入口”与 pwsh 7 表述
+  实际入口 4 个 + common 库；成果报告:116 写“五个入口脚本使用 [CmdletBinding()]”
+  不准确；common 没有 param/CmdletBinding，符合库用法。建议改“四个入口 + 公共库”。
+  pwsh 7 未安装，只在 注意事项:72 标注；运行与验收:4 仍说“另有 pwsh 7 兼容写法”，
+  建议在成果报告/运行验收的未验证项也明确“pwsh 7 未实测”。
+S-9 baseline 表述
+  成果报告:4、下一阶段:4 写“基线 HEAD 1ebdbe0（09B 复核修复前）”；
+  当前工作区 HEAD 是 8268aba（修复单提交）。如果指代码基线，请写清“代码基线 1ebdbe0，
+  当前修复单 HEAD 8268aba”；否则与用户给的基线不一致。
+
+十四、Nits
+N-1 E3 管道限制已写清；正常控制台/文件重定向 3.5–4 秒退出，无需改代码；
+    CI 必须在 README/运行验收再强调重定向。
+N-2 T12 单条 36 秒、全量 70–75 秒；可能是子进程句柄继承/等待，未失败但值得关注。
+N-3 Stop-LaunchedProcess 的 -Kind 参数未使用（common.ps1:188-190），可删或用于日志。
+N-4 Get-RunStateProcess 直接读 $process.StartTime（common.ps1:173），
+    极少数权限异常会抛出而不是 unknown；可包 try/catch。
+N-5 start-tunnel 对 mismatch/unknown 状态没有提示（start-tunnel.ps1:25-31），
+    与 start-lan 的提示不一致；可选统一。
+N-6 start-lan 在 mismatch 状态但端口空闲时会启动新服务并覆盖旧状态
+    （start-lan.ps1:54-65、:171-172）；安全上不杀旧进程，但会丢失 mismatch 现场，
+    可考虑先 WARN 并保留旧状态/重命名。
+N-7 T12 里 stop CheckOnly 的 planned[0] 顺序依赖 targets 先 tunnel 后 server；
+    当前无 tunnel 时 [0] 是 server，未来加 tunnel 断言需按 kind 查找。
+N-8 09Bfix-manual.log 的 M1/M2 与文档一致；M1 的 PID 24268 是无关 node，证据有效。
+
+十五、未验证项（不得当作已验证）
+1) pwsh 7 未安装，未实测；只验证 Windows PowerShell 5.1。
+2) 真机手机浏览器经 LAN/隧道访问未测；18892 真实隧道只做了 curl health/status，
+   不是手机 UI/Origin 全链路（09D）。
+3) 防火墙规则未实际添加；计划任务未迁移；非 Windows 未测。
+4) start-tunnel 真实隧道未做“写状态失败”实跑（用假 cloudflared 完成结构验证）；
+   真实 cloudflared 的失败路径未验证。
+5) stop 的 Stop-Process 失败分支（S-2）未实跑，仅代码审查。
+6) 旧 8000 验收链未在第五轮修复后重跑；本次用 18885/18892 随机端口替代。
+7) 日志轮转、多实例、代理层 429/503、多段 X-Forwarded-For 未验证（09C/09D）。
+
+十六、清理声明
+- 复核使用随机端口 18881–18892 与临时目录 D:\Lianjunjie\biancheng\richman-09b-fixprobe；
+  未触碰 8000，未写 apps/server/data。
+- 所有测试 server/cloudflared/dummy 已停止；1888x/1889x 无 LISTENING；
+  临时目录 richman-09b-fixprobe、richman-09b-fix-mutation 及 richman-scripts-* 已删除。
+- 仓库未改源码/测试/脚本/README/交接，未 commit；本次仅新增本复核文件。

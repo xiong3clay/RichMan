@@ -5,7 +5,8 @@
 1. 编码与语法（最容易踩）
    - 五个 .ps1 必须保存为 UTF-8 with BOM；Windows PowerShell 5.1 对无 BOM 的 UTF-8
      会按 ANSI 解析，中文注释里的字节可能变成反引号/引号，导致 Unexpected token。
-   - 入口脚本首行必须是 param(（BOM 之后），公共脚本可除外。
+   - 入口脚本必须是 [CmdletBinding()] + param(（BOM 之后，允许中间没有空行）；
+     公共脚本可除外。未知命名参数会直接报错，不再静默吞进 $args。
    - 禁止使用 ??、?:、三元表达式、-Parallel 等 PowerShell 7 专有语法；
      同时兼容 PS 5.1 与 pwsh 7 是硬要求。
    - 用编辑器改脚本后要重新确认 BOM（可用
@@ -21,9 +22,11 @@
 3. 状态文件与日志
    - run/server.json / run/tunnel.json 是 stop 的唯一依据；写入必须 .tmp + Move-Item，
      JSON 单行、UTF-8（无 BOM），避免半截文件。
-   - stop 只白名单（server: node；tunnel: cloudflared）。PID 被系统复用时进程名不匹配
-     就只 WARN 并清理状态，绝不按端口杀陌生进程。
-   - 无状态文件时 stop 是幂等操作（打印未在运行，exit 0）。
+   - stop 只认“pid + 进程名白名单（server: node；tunnel: cloudflared）+ 真实启动时间
+     （±2 秒）”三者匹配；不匹配/unknown/坏状态文件绝不杀、绝不删状态，告警并 exit 2；
+     只有 stale（进程确已退出）才清理状态。
+   - 无状态文件时 stop 是幂等操作（打印未在运行，exit 0）；mismatch/坏状态文件下重复
+     执行仍是 exit 2 且状态不动，这是“可重复但需人工确认”，不是幂等成功。
    - 端口仍被非本服务占用时 exit 2，不强行杀；需人工换端口或排查。
    - logs 目录没有轮转；长期运行会累积，09C 处理。
 
@@ -55,10 +58,11 @@
 
 8. 绝不重复的错误
    - 不要按端口杀进程；不要相信端口占用就是本服务。
+   - 不要信任“pid + 进程名”就杀进程：必须核对状态文件里的真实 startedAtUtc（±2 秒）。
    - 不要在健康检查成功前写 server.json / tunnel.json。
    - 不要把 stdout 和 stderr 重定向到同一个文件。
    - 不要把日志或状态写到仓库根/静态目录；只能写 dataDir。
-   - 不要用无 BOM 的 UTF-8 保存 .ps1。
+   - 不要用无 BOM 的 UTF-8 保存 .ps1；入口脚本必须保留 [CmdletBinding()]。
    - 不要用 `Start-Process -Wait` 等待 start-lan/start-tunnel（-Wait 会等整棵进程树，
      即等到服务退出）；需要退出码时用 `& script; $LASTEXITCODE` 的包装方式。
    - 不要把 -CheckOnly 的输出混入多行非 JSON；最后一行必须可解析。
@@ -67,3 +71,34 @@
 9. 本轮未验证
    - 真机手机 LAN/隧道访问、防火墙实际规则、计划任务迁移、非 Windows。
    - 日志轮转、多实例、代理层 429/503、多段 X-Forwarded-For（转 09C/09D）。
+   - pwsh 7 未安装，只实测 Windows PowerShell 5.1；兼容写法已避免 7 专有语法。
+
+10. 第五轮复核修复后的三条不变量
+   a) 状态文件必须含真实 startedAtUtc（Start-Process 后立刻读取子进程 StartTime，
+      不得用健康检查后的 UtcNow）；缺失、无法解析、或与进程启动时间相差超过 2 秒，
+      一律 mismatch/unknown：stop 不得杀进程、不得删状态，告警并 exit 2。
+   b) 任何“启动后失败”的路径（健康超时、URL 超时、写状态失败、Move 失败）
+      必须用 Stop-LaunchedProcess 只回收本次子进程（核对 StartTime），删除 .tmp，
+      不留无状态文件的孤儿进程，exit 1。
+   c) 坏状态文件（存在但 JSON 无法解析）必须告警、保留文件、不按端口杀进程，
+      并以 exit 2 退出，不得静默当作“未在运行”。
+   另：-CheckOnly 的 planned 必须带 port；status 未显式 -Port 时读 server.json 的 port；
+   Wait-HttpHealth 与 status 必须校验 ok===true 且 service==='richman'。
+
+11. 从 09B 首版升级（旧状态文件迁移）
+   - 首版 start-lan 写的 startedAtUtc 是“健康检查通过后的 UtcNow”，首版 start-tunnel
+     更晚（捕获 URL 之后），可能比真实进程启动时间晚数秒。
+   - 新 stop 会把它判为 mismatch（退出 2、不杀、保留状态），这是预期的安全行为。
+   - 升级步骤：升级前先用首版 stop.ps1 停掉；若已升级且旧实例仍在跑，人工确认后
+     手动停止该进程并删除旧 server.json / tunnel.json，再用新 start-lan 启动。
+   - 不要为了兼容旧文件放宽 ±2 秒，也不要退回“只看 pid + 进程名”。
+
+12. 停止失败与诊断语义（第六轮）
+   a) Stop-Process 抛错（权限不足等）必须 ok=false、reason=STOP_FAILED、exit 2，
+      且不得删除状态文件；绝不能打印“已全部停止”。
+   b) status 在状态文件 stale/mismatch/unknown/broken 时仍必须探测 /health：
+      健康即 ok=true、exit 0，并用 server.stateNote 标注状态文件不可信；
+      只有不健康才 exit 1。诊断不得因状态文件失真而谎报服务挂了。
+   c) 测试不得依赖“全局 http.ts 进程数 == 0”；用测试前后 PID 集合差，
+      否则用户本机开着服务时 T9 会假失败。
+   d) 清理必须 kill 后等待退出、目录删除重试，且失败要抛出，不得吞掉造成假绿。

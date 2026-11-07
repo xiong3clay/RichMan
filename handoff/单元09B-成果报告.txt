@@ -1,8 +1,8 @@
 单元 09B 成果报告（一键启动 / 隧道 / 停止 / 状态脚本）
 ================================================================
 日期：2026-11-07
-基线：HEAD 793bb83（09B 规格提交）；实现位于工作区，未 commit。
-规格：handoff/单元09B-一键启动与停止脚本.txt
+基线：代码基线 HEAD 8268aba（09A 第四轮补强后的复核修复单；09B 第五轮修复在其工作区之上）；09B 首版实现 6491fe9、文档 39dc1b9；第六轮补强提交后以 git log 为准。
+规格：handoff/单元09B-一键启动与停止脚本.txt、单元09B-复核修复.txt
 结论：完成（自动化与真实验收链通过；真机/计划任务/非 Windows 未验证）。
 
 一、完成项
@@ -17,7 +17,8 @@
      2xx/3xx 成功，失败不打印堆栈）。
    - Get-CloudflaredPath（显式 > RICHMAN_CLOUDFLARED > Get-Command > 
      D:\Lianjunjie\tools\cloudflared.exe）。
-   - Get-ProcessInfo（pid 存活且进程名白名单 node/cloudflared，防 PID 复用误杀）。
+   - Get-RunStateProcess（missing/stale/running/mismatch/unknown；pid 存活 + 进程名白名单
+     node/cloudflared + 真实 startedAtUtc（±2 秒）三者匹配才算 running）。
    - Get-LanAddresses（.NET NetworkInterface 非回环 IPv4）。
    - Write-CheckJson（单行 JSON 到 stdout）。
 2) scripts/start-lan.ps1
@@ -39,20 +40,21 @@
      未通过只 WARN、仍 exit 0。
 4) scripts/stop.ps1
    - 参数 -DataDir/-CheckOnly。
-   - 先 tunnel 后 server；只按状态文件 pid + 进程名白名单 Stop-Process；
-     不匹配/已退出只清理状态并 WARN，绝不按端口杀陌生进程；CheckOnly 不动进程与文件。
+   - 先 tunnel 后 server；只有 pid + 进程名 + 真实启动时间（±2 秒）三者匹配才 Stop-Process；
+     不匹配/unknown/坏状态文件不杀不删、告警并 exit 2；stale（进程确已退出）才清理状态；
+     绝不按端口杀陌生进程；CheckOnly 不动进程与文件。
    - server 停止后轮询端口 10s；仍占用 WARN 并 exit 2（不强行杀）。
    - 无状态文件打印“未在运行” exit 0（幂等）。
 5) scripts/status.ps1
    - 本地 /health 打印 ok/rooms/connections；隧道状态 + pid 存活 + URL /health（5s）；
      -Json 输出单行 {ok,server:{ok,port,rooms,connections},tunnel:{url,ok}}；
      server 不健康 exit 1；-CheckOnly 接受但不改变状态。
-6) apps/server/tests/scripts.test.ts（仅 win32，5 条）：
-   - 六个文件存在 + 五个 ps1 UTF-8 BOM + 入口脚本 param( 开头；
-   - start-lan CheckOnly 空闲端口 ok=true；
-   - 端口被占 ok=false/PORT_IN_USE/exit 1；
-   - stop CheckOnly 空目录 ok=true/exit 0/不创建 run；
-   - status CheckOnly -Json 无服务 ok=false/exit 1 不挂起。
+6) apps/server/tests/scripts.test.ts（仅 win32，12 条 = 首版 5 条 + T6–T12）：
+   - 首版 5 条：六个文件存在 + 五个 ps1 UTF-8 BOM + 入口脚本 param( 开头；
+     start-lan CheckOnly 空闲端口 ok=true；端口被占 ok=false/PORT_IN_USE/exit 1；
+     stop CheckOnly 空目录 ok=true/exit 0/不创建 run；status 无服务 ok=false/exit 1。
+   - T6–T12：无关 node + 旧启动时间 stop exit 2；start-tunnel -DataDir；普通 HTTP
+     200 不算 RichMan；写状态失败无孤儿；坏 JSON exit 2；未知参数报错；完整生命周期。
 7) README「## 一键启动 / 停止（Windows）」：命令、参数、日志、隧道域名变化、
    防火墙/防睡眠提示、非 Windows 用 corepack pnpm -s start。
 
@@ -63,20 +65,23 @@
 新增：handoff/单元09B-成果报告.txt、运行与验收.txt、下一阶段交接.txt、注意事项.txt
 更新：handoff/项目当前状态.txt
 未改：apps/server/src/**、packages/**、apps/web/src/**、协议、既有测试、package.json/依赖。
-所有 .ps1 均为 UTF-8 with BOM（字节 EF BB BF），入口脚本首行 param(。
+所有 .ps1 均为 UTF-8 with BOM（字节 EF BB BF），入口脚本为 [CmdletBinding()] + param(。
 
-三、验收命令与真实结果（2026-11-07 19:24）
+三、验收命令与真实结果（2026-11-07 23:45，第六轮补强后）
 1) corepack pnpm -s test
-   65 文件 / 786 条全部通过（旧 781 未删改/跳过/放宽 + scripts.test 5）。
-   TEST_EXIT=0；Duration 9.04s。日志：artifacts/test-logs/09B-test.log
+   65 文件 / 796 条全部通过（796 = 731 旧 + 09A security 50 + 09B scripts 15）。
+   TEST_EXIT=0；Lead 实测 Duration 57s。日志：artifacts/test-logs/09Bfix3-full-test.log
 2) corepack pnpm -s typecheck
-   TSC_EXIT=0；日志：artifacts/test-logs/09B-typecheck.log
+   TSC_EXIT=0；日志：artifacts/test-logs/09Bfix3-typecheck.log
 3) corepack pnpm -s build
    BUILD_EXIT=0；141 modules；index--JyM_5JG.css 18.07 kB、index-CrCvzBNf.js 425.13 kB；
-   built in 196ms。日志：artifacts/test-logs/09B-build.log
-4) 单文件 scripts.test.ts：5/5 passed，EXIT=0；日志：artifacts/test-logs/09B-scripts-test.log
+   built in 307ms。日志：artifacts/test-logs/09Bfix3-build.log
+4) 单文件 scripts.test.ts：15/15 passed，EXIT=0（54s）；日志：09Bfix3-scripts.log。
+（旧轮次 793/786 条与 12/5 条 scripts 测试作为历史保留在 09Bfix-test.log、09B-test.log。）
 
-四、真实验收链（完整输出见 artifacts/test-logs/09B-acceptance.log）
+四、真实验收链（首版历史，修复前；完整输出见 artifacts/test-logs/09B-acceptance.log）
+注：本节是 09B 首版（6491fe9）的验收记录，保留作历史；第五轮修复后的真实链见
+    handoff/复核-单元09B-修复验证.txt 第十节（18892 隧道）与 09Bfix-manual.log。
 1) start-lan（8000）：EXIT 0；http://127.0.0.1:8000/health → 200，rooms=0。
 2) start-tunnel（8000）：EXIT 0；隧道 URL
    https://catalogs-organize-listings-garage.trycloudflare.com
@@ -104,14 +109,74 @@
 - 未做日志轮转/清理（logs 会累积）。
 
 六、已知问题 / 风险
-1) stop 依赖白名单（node/cloudflared）与状态文件 pid；若用户在启动后手工改换进程，
-   状态文件过期只会 WARN 并清理，不会按端口误杀。
-2) 端口仍被非本服务占用时 stop exit 2，需人工处理。
-3) cloudflared 启动后 trycloudflare DNS 可能延迟数秒；status 可能短暂 WARN。
-4) start-lan 的 CheckOnly 会在数据目录写删一个临时探针文件（规格要求），
+1) stop 只杀“pid + 进程名 + 真实启动时间（±2 秒）”三者匹配的进程；
+   不匹配/无启动时间/坏状态文件绝不杀进程、绝不删状态，告警并 exit 2。
+   端口仍被非本服务占用时同样 exit 2，需人工处理。
+2) cloudflared 启动后 trycloudflare DNS 可能延迟数秒；status 可能短暂 WARN。
+3) start-lan 的 CheckOnly 会在数据目录写删一个临时探针文件（规格要求），
    stop/status 的 CheckOnly 不写任何文件。
-5) logs 无轮转；长期运行需 09C 增加清理策略。
-6) `-Build` 依赖 corepack pnpm 可用；纯 node 环境只能手工 build。
+4) logs 无轮转；长期运行需 09C 增加清理策略。
+5) `-Build` 依赖 corepack pnpm 可用；纯 node 环境只能手工 build。
+6) 四个入口脚本（start-lan/start-tunnel/stop/status）使用 [CmdletBinding()]：未知参数
+   直接报错，不再静默吞进 $args；richman-common.ps1 是被 dot-source 的公共库，无 param。
 
-七、被验证的提交号
-基线 793bb83（09B 规格）；本轮无新提交（按用户要求不 commit）。
+七、复核修复（第五轮，M1/M2/S1-S3/F6）
+M1 PID 复用误杀：
+- 新增 Get-RunStateProcess（missing/stale/running/mismatch/unknown，比较真实
+  startedAtUtc ±2 秒）；start-lan/start-tunnel 不再用启动后的 UtcNow，而是在
+  Start-Process 后立刻读子进程 StartTime 写入状态。
+- stop 替换四个调用点；mismatch/unknown/坏 JSON 绝不杀、绝不删状态，exit 2。
+- 测试 6（无关 node + 2020 启动时间）：STOP_EXIT=2、dummy 仍活、状态保留、
+  输出含“不匹配/复用”；手工复现一致（09Bfix-manual.log）。
+M2 start-tunnel -DataDir：
+- 新增 [string]$DataDir，Resolve-DataDir $DataDir；四个入口脚本加 [CmdletBinding()]（common 是库，无 param）。
+- 测试 7：dirA 状态 running=true/ALREADY_RUNNING；dirB false；stop dirA 停掉假
+  cloudflared（node.exe 复制为 cloudflared.exe）并删状态。
+S1 伪健康：
+- Wait-HttpHealth 要求 JSON ok===true 且 service==='richman'；status 同样。
+- 测试 8：普通 HTTP 200 {"hello":"world"} 不被判 alreadyRunning，status ok=false。
+S2 写状态失败孤儿：
+- start-lan/start-tunnel 的“读启动时间→健康/URL→写状态”整体 try/catch；
+  新增 Stop-LaunchedProcess（核对 StartTime 后只杀本次子进程）、删 .tmp、exit 1；
+  Write-RunState 的 Move 失败先删 tmp。
+- 测试 9：run 为普通文件时 exit 1、端口释放、无残留 http.ts node。
+S3 坏 JSON：
+- 测试 10：坏 server.json → exit 2、文件保留、无关 node 不被杀、输出含“无法解析/损坏”。
+F6：
+- stop -CheckOnly planned 带 port；status 未显式 -Port 时读 server.json 的 port。
+- 测试 11（未知参数报错）；测试 12（start→status 默认端口→stop planned port→
+  端口释放完整生命周期）。
+
+八、第六轮：Qoder 修复验证后的 should-fix（S-1..S-4）
+Qoder handoff/复核-单元09B-修复验证.txt 判“需修复”，must-fix 全在文档（本文件与其余三份
+交接已按实际行为改正），另列 4 条代码/测试 should-fix；Lead 决定提交前全部修掉。
+F1 stop 停止失败必须失败（S-2）
+- catch 增加 $hasStopFailure；失败出口 reason=STOP_FAILED、ok=false、exit 2，
+  不打印“已全部停止”，不删除状态文件（进程可能仍在跑）。
+- 新增 T13：PowerShell 函数遮蔽 Stop-Process 注入 ACCESS_DENIED_TEST，真实无关 node +
+  真实 StartTime；断言 exit 2、ok=false、reason=STOP_FAILED、无“已全部停止”、状态保留、进程仍活。
+F2 status 状态文件不可信时仍探测健康（S-1）
+- 任何 stateStatus 下只要端口 > 0 就请求 /health；健康则 ok=true、exit 0，
+  server.stateNote 取 ""/stale/mismatch/unknown/broken；不健康保留原 reason 与 exit 1。
+- 新增 T14（stale + 真实 RichMan 健康服务 → exit 0/stateNote=stale/reason=""）、
+  T15（坏 JSON + 健康 → stateNote=broken）；Lead 另手工测 mismatch：真实无关 node +
+  startedAtUtc 故意 +1 小时 + 健康服务 →
+  {"ok":true,...,"server":{"ok":true,"rooms":3,"connections":2,"reason":"","stateNote":"mismatch"}}
+  exit 0，dummy 未被杀。
+F3 T9 不再依赖全局进程计数（S-3）
+- 改为“测试前后 http.ts PID 集合差”，只回收新增 pid；不再要求全局计数为 0。
+- 证据：本机先用 start-lan 起真实服务（端口 63409，/health 200），再跑整个
+  scripts.test.ts → 15/15 通过；stop 后 /health DOWN，无 http.ts 孤儿。
+F4 清理（S-4）
+- 新增 killAndWait（SIGKILL 后等 exit，10s）、killPidAndWait、rmDirWithRetry（3×200ms）；
+  afterEach 先杀子进程再删目录；T9 用 before 集合只杀新增 pid；清理失败抛出而非吞掉。
+变异探针（仓库内临时改后立即还原，sha256 前后一致）
+- MUT A 把 stop.ps1 的 STOP_FAILED 改成 STATE_UNRESOLVED → T13 红
+  （expected 'STATE_UNRESOLVED' to be 'STOP_FAILED'）。
+- MUT B 把 status.ps1 的 $stateNote = $stateStatus 改成 '' → T14 红
+  （expected '' to be 'stale'）。
+
+九、被验证的提交号
+09B 实现 6491fe9、文档 39dc1b9；本修复单提交后以 git log 为准。
+本轮工作区只改五个 .ps1、scripts.test.ts、README 09B 节、09B 四份交接与项目状态。
+

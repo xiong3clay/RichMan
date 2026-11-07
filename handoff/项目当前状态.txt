@@ -1,6 +1,6 @@
 RichMan 项目当前状态
 更新日期：2026-11-07
-更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复；07A/07B/07C 由 Trae 实现，Qoder 三轮复核，Lead 验收；08A/08B/08C 由 Trae 实现并完成复核修复；09A 已提交 eeec8ca，第四轮测试补强已提交 bb7c2f2（交接 1ebdbe0，Qoder 复核 PASS）；09B 已提交 6491fe9（文档 39dc1b9），Qoder 复核 FAIL（M1/M2），修复中）
+更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复；07A/07B/07C 由 Trae 实现，Qoder 三轮复核，Lead 验收；08A/08B/08C 由 Trae 实现并完成复核修复；09A 已提交 eeec8ca，第四轮测试补强已提交 bb7c2f2（交接 1ebdbe0，Qoder 复核 PASS）；09B 已提交 6491fe9（文档 39dc1b9），Qoder 复核 FAIL(M1/M2)，第五/六轮修复已完成、待提交；Qoder 修复验证 code PASS、文档 must-fix 已改）
 
 【版本】
 方案版本：V1.3.3（V1.3.2 + 引导式界面 + 连接实测）
@@ -9,17 +9,18 @@ RichMan 项目当前状态
 游戏版本：未发布，目标 V1.0
 
 【进度与范围】
-已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（已提交 eeec8ca，第四轮补强 bb7c2f2，交接 1ebdbe0）、09B（已提交 6491fe9，文档 39dc1b9；复核修复待提交）。
-当前子任务：09B 复核修复（M1 PID 复用误杀、M2 start-tunnel 缺 -DataDir、S1–S3、N1/N2），
-修复单 handoff/单元09B-复核修复.txt 已提交；下一单元 09C 备份恢复、安全测试补强与文档/许可证/版本记录。
+已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（已提交 eeec8ca，第四轮补强 bb7c2f2，交接 1ebdbe0）、09B（已提交 6491fe9，文档 39dc1b9；M1/M2 与 S-1..S-4 修复待提交）。
+当前子任务：09B 第五轮（M1 PID 复用、M2 -DataDir、S1 伪健康、S2 孤儿、S3 坏 JSON、
+F6 planned/status 端口）与第六轮（F1 STOP_FAILED、F2 status 仍探健康、F3 T9 PID 集合差、
+F4 清理）已完成，待 Lead 验收提交。下一单元 09C 备份恢复、安全测试补强与文档/许可证/版本记录。
 08C 已提交 d7b67f8 并通过 Qoder 二次验证（63 文件/731 条、typecheck/build 0、6 个 WAV + 播放器/事件音效），真机音频未测。
-09A 完成 64 文件/781 条，第四轮补强后 65 文件/786 条（旧 781 未削弱 + scripts.test 5），typecheck/build 0；Qoder 第四轮复核 PASS。
+09A 完成 64 文件/781 条；09B 第六轮修复后 65 文件/796 条（旧 781 + security 50 + scripts 15），typecheck/build 0；Qoder 复核 code PASS、Lead 复验 PASS。
 一键脚本：scripts/start-lan.ps1、start-tunnel.ps1、stop.ps1、status.ps1 + richman-common.ps1；
 所有 .ps1 为 UTF-8 BOM、兼容 PS 5.1/pwsh 7；真实验收：start-lan→/health 200→
 start-tunnel 打印 https://catalogs-organize-listings-garage.trycloudflare.com→
 外部重试 /health 200→status→stop→8000/8001 无 LISTENING、node/cloudflared 无残留。
 05B 真人试玩：2026-11-06 用户在 07C 后完整玩过一局并确认“不错”，判为真人试玩通过；清单中的等待时长与 360px 截图未逐项记录，并入 08 记录。
-09 拆分：09A 服务加固与限流（已提交）→ 09B 启动/隧道/停止一键脚本（已提交，复核 FAIL 后修复中）→ 09C 备份恢复、
+09 拆分：09A 服务加固与限流（已提交）→ 09B 启动/隧道/停止一键脚本（已提交，复核修复待提交）→ 09C 备份恢复、
   安全测试补强与文档/许可证/版本记录（当前）→ 09D 真机发布验收矩阵（局域网 + 隧道 + 2/10 人）。
 08C 音频：全部素材由 make-audio.mjs 合成（无第三方采样），6 个 sha256 见 08C 交接；
       首次手势才 unlock，不自动播放；失败降级不影响游戏。
@@ -41,11 +42,11 @@ start-tunnel 打印 https://catalogs-organize-listings-garage.trycloudflare.com�
      终局名单与本人破产说明；只改 apps/web，BET_SETTLED 只取本人条目。
 06 起会话与命令去重已落盘（apps/server/data，RICHMAN_DATA_DIR 可覆盖），服务重启后房间恢复为暂停态，房主 resume_game 继续。
 
-【测试与构建（2026-11-07 单元09B 后实测，工作区未提交）】
-pnpm -s test    65 文件 / 786 条（旧 781 未删改 + scripts.test 5），TEST_EXIT=0，9.04s
+【测试与构建（2026-11-07 单元09B 第六轮后实测，工作区未提交）】
+pnpm -s test    65 文件 / 796 条（旧 781 + security 50 + scripts 15），TEST_EXIT=0，57s
 pnpm typecheck  TSC_EXIT=0
 pnpm -s build   BUILD_EXIT=0（index--JyM_5JG.css 18.07kB、index-CrCvzBNf.js 425.13kB，
-                141 modules，196ms；dist/audio 6 文件不变）
+                141 modules，266ms；dist/audio 6 文件不变）
 09B 真实验收：start-lan EXIT 0、/health 200；start-tunnel EXIT 0（URL 见上，脚本内
           30s 健康检查 DNS 延迟 WARN，外部重试 200）；status EXIT 0；stop EXIT 0，
           NETSTAT 8000/8001 LISTENING=0、两个 pid 不存活、状态文件已删；
@@ -89,13 +90,19 @@ pnpm smoke:lan PASS（05D 验收时）
 - 限流是单进程内存态、重启清零；trustProxy 默认关，直连公网开启会被伪造 XFF 绕过。
 
 【09B 不得回退的点】
-- 五个 .ps1 必须 UTF-8 with BOM；入口首行 param(；禁止 PowerShell 7 专有语法。
+- 五个 .ps1 必须 UTF-8 with BOM；四个入口为 [CmdletBinding()] + param(；禁止 PowerShell 7 专有语法。
 - 起服必须单进程 node（--import tsx），stdout/stderr 分文件；不得回到 pnpm 父进程模式。
-- stop 只按 run/server.json、run/tunnel.json 的 pid + 进程名白名单停止；
-  绝不按端口杀陌生进程；无状态文件幂等 exit 0；端口仍占用只 WARN + exit 2。
+- stop 只按 run/server.json、run/tunnel.json 的 pid + 进程名 + 真实启动时间（±2 秒）
+  三者匹配才停止；绝不按端口杀陌生进程；无状态文件幂等 exit 0；
+  mismatch/unknown/坏状态文件不杀不删并 exit 2；端口仍占用只 WARN + exit 2。
 - start-lan 健康成功后才写 server.json；失败必须停进程且不写状态。
 - start-tunnel 先本地 /health；已有存活 tunnel.json 幂等打印旧 URL；URL /health
   30s 失败只 WARN 仍 exit 0；域名每次重启会变。
+- Stop-Process 失败（权限等）必须 reason=STOP_FAILED、ok=false、exit 2，状态文件保留，
+  不得打印“已全部停止”。
+- status 在任何 stateStatus 下都探测 /health：健康即 ok=true/exit 0，server.stateNote
+  标注 ""/stale/mismatch/unknown/broken；只有不健康才 exit 1。
+- scripts 测试按“测试前后 http.ts PID 集合差”判断新增进程，不依赖全局计数。
 - 状态 JSON 单行 UTF-8、.tmp + Move-Item 原子写；dataDir 默认 apps/server/data，
   可被 -DataDir / RICHMAN_DATA_DIR 覆盖；日志/状态只写 dataDir。
 - 所有脚本支持 -CheckOnly，最后一行单行 JSON；stop/status 的 CheckOnly 不写文件。
@@ -222,7 +229,21 @@ https://diego-rotary-inclusive-hughes.trycloudflare.com（2026-11-06 21:5x 重�
     M2 start-tunnel 无 -DataDir 且被静默忽略 → stop -DataDir 漏停隧道；S1 健康只认 HTTP 码；
     S2 写状态失败留孤儿进程；S3 坏 JSON 当未运行；S4 tests 只有 5 条 CheckOnly 路径。
     复核报告 handoff/复核-单元09B.txt，修复单 handoff/单元09B-复核修复.txt（F1–F7）。
-    初版内容：
+    第五轮修复结果（工作区，待提交）：
+    M1 新增 Get-RunStateProcess（missing/stale/running/mismatch/unknown，真实
+    startedAtUtc ±2 秒），四个调用点替换；stop 对 mismatch/unknown/坏 JSON 不杀不删、
+    exit 2。M2 start-tunnel 增加 -DataDir；五个入口加 [CmdletBinding()]。
+    S1 Wait-HttpHealth/status 校验 ok=true + service=richman；S2 Start-Process 后
+    全段 try/catch + Stop-LaunchedProcess + 清 .tmp；S3 坏 JSON stop exit 2/status 报损坏。
+    F6 planned 带 port，status 默认读 server.json 端口。
+    测试 65 文件/793 条（scripts 12 条，新增 T6–T12）、typecheck/build 0；
+    M1/M2 手工复现 PASS（09Bfix-manual.log）。
+    第六轮（Qoder 修复验证后）：F1 stop 停止失败 → STOP_FAILED/exit 2/状态保留（T13）；
+    F2 status 在 stale/mismatch/broken 下仍探 /health，健康即 ok=true/exit 0 并给
+    server.stateNote（T14/T15，Lead 另测 mismatch）；F3 T9 改 PID 集合差，真实服务
+    在跑时 scripts 15/15 绿；F4 killAndWait/rmDirWithRetry/按 pid 回收。
+    796 条、typecheck/build 0；变异 A/B 分别令 T13/T14 红，还原后绿。
+   初版内容：
    新增 scripts/richman-common.ps1、start-lan.ps1、start-tunnel.ps1、stop.ps1、
    status.ps1、apps/server/tests/scripts.test.ts（5 条），README 增加一节。
    65 文件/786 条、typecheck/build 0；真实验收 start-lan→health 200→

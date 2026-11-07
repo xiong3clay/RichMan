@@ -1,0 +1,84 @@
+RichMan 单元 09B 第六轮复核补强（Qoder 修复验证后的 should-fix）
+================================================================
+日期：2026-11-07
+基线：HEAD 8268aba + 工作区第五轮修复（未提交，代码侧已被 Qoder 判 PASS）。
+依据：handoff/复核-单元09B-修复验证.txt（Qoder，结论“需修复”，但 must-fix 全在文档；
+      它另列了 4 个代码/测试 should-fix：S-1..S-4）。Lead 决定提交前把这 4 项一并修掉。
+范围（只允许改这些文件）：
+  - scripts/stop.ps1
+  - scripts/status.ps1
+  - scripts/richman-common.ps1（仅当需要共享小函数）
+  - apps/server/tests/scripts.test.ts（T9 内部实现可改；T1–T12 的断言语义不得放宽；
+    允许追加 T13/T14/T15）
+禁止：README.md、handoff/**（Lead 负责文档）、apps/server/src/**、packages/**、
+      apps/web/**、package.json / pnpm-lock / 协议；不得 commit；不得引入新依赖。
+兼容：Windows PowerShell 5.1（pwsh 7 未安装）；.ps1 必须保持 UTF-8 with BOM；
+      四个入口保持 [CmdletBinding()] + param(；禁止 PowerShell 7 专有语法。
+
+F1 stop：Stop-Process 失败必须失败（Qoder S-2）
+现状：stop.ps1 的 catch 只把 warning 加入 $warnings，没有置 $hasUnresolved；
+      最终仍打印“已全部停止”、ok=true、exit 0（stop.ps1:69-71、:132-141）。
+要求：
+  1) catch 中置 $hasUnresolved = $true（复用现有“需人工确认”态），保留 warning。
+  2) 存在停止失败时走与 mismatch 相同的失败出口：逐条 WARN、最后一行单行 JSON
+     {ok:false, reason:"STOP_FAILED", stopped, warnings, dataDir}、exit 2；
+     不得打印“已全部停止”；不得删除该状态文件（进程可能仍在跑）。
+  3) 其它 target 已正常停止的结果仍保留在 stopped 数组里。
+测试 T13（不允许为测试在生产脚本加开关）：
+  用 PowerShell 函数遮蔽 cmdlet 注入失败：
+    powershell -NoProfile -Command "function Stop-Process { throw 'ACCESS_DENIED_TEST' }; & '<repo>\scripts\stop.ps1' -DataDir '<dir>'; exit $LASTEXITCODE"
+  准备：真实无关 node（setTimeout 120s）+ 真实 StartTime 写入 <dir>/run/server.json。
+  断言：exit 2；json.ok=false；json.reason=STOP_FAILED；stdout 不含“已全部停止”；
+        状态文件仍存在；dummy 仍存活。
+  说明：PowerShell 函数优先于同名 cmdlet，能稳定命中 catch，不需要改生产代码。
+
+F2 status：状态文件不可信时仍探测健康（Qoder S-1）
+现状：status.ps1:37-45 在 broken/stale/mismatch 时直接写 reason，只有 else 才请求
+      /health；服务实际健康但状态文件过期时误报 ok=false、exit 1（诊断失真）。
+要求：
+  1) 先算 stateStatus（missing/running/stale/mismatch/unknown/broken）与生效端口
+     （显式 -Port > server.json.port > 8000），逻辑与现状一致。
+  2) 无论 stateStatus 如何，只要端口 >0 就探测 http://127.0.0.1:<port>/health，
+     仍按 ok===true 且 service==='richman' 判定。
+  3) 健康时 server.ok=true、rooms/connections 取自健康响应、exit 0；JSON 的
+     server 下新增 stateNote（健康时为 ""，否则 stale/mismatch/unknown/broken）；
+     非 JSON 输出在 OK 行后追加“注意：状态文件已过期/损坏，进程归属无法确认，
+     但端口上的 RichMan 服务健康”。健康时 server.reason 为空串。
+  4) 不健康时保持原有 reason 与 exit 1；broken 且不健康时 reason 仍为
+     “状态文件损坏，无法确认进程归属”。
+  5) status 仍只读，不修改/删除状态文件。
+测试：
+  T14：起一个返回 {"ok":true,"service":"richman","rooms":0,"connections":0} 的 node
+       HTTP 服务（随机端口），写 stale 状态（pid=999999、port=该端口）到临时 dataDir；
+       status -Json -Port <port> -DataDir dir → exit 0、server.ok=true、stateNote='stale'。
+  T15：同一服务 + 坏 JSON server.json → exit 0、server.ok=true、stateNote='broken'。
+  两条都必须用真实 HTTP，不允许源码字符串 smoke。
+
+F3 T9 测试隔离（Qoder S-3）
+现状：scripts.test.ts:283 用全局 richmanHttpProcessCount()===0；用户本机已有合法
+      RichMan 服务时 T9 必假失败。
+要求：
+  - 改为“测试前后 http.ts PID 集合差”：T9 开始前记录 pid 集合，失败后轮询直到
+    新增 pid 集合为空且端口释放；不得要求全局计数为 0。
+  - 保留 exit 1 与端口释放断言。
+  - 自验：先在本机起一个真实 start-lan 服务，再跑 T9，必须绿（Qoder 会复验）。
+
+F4 测试清理（Qoder S-4）
+现状：afterEach 只 child.kill 后立刻 rm，失败时 T7 出现 EPERM unlink cloudflared.exe；
+      T9 出现 EBUSY 删日志并留下 http.ts 孤儿。
+要求：
+  - 新增 killAndWait(child)：SIGKILL 后等 exit（10s 超时）。
+  - 新增 rmDirWithRetry(dir)：rm 失败重试 3 次、每次 200ms；仍失败则抛出带路径错误。
+  - T7/T9 在自己的 finally 里用记录的 pid 回收本测试创建的进程，再交给 afterEach；
+    不允许吞掉清理失败造成残留假绿。
+
+验收（必须真实执行并贴关键输出）：
+  corepack pnpm -s test         → 期望 65 文件、796 条（793 + T13/T14/T15）全绿
+  corepack pnpm -s typecheck    → 0
+  corepack pnpm -s build        → 0
+  corepack pnpm -s vitest run apps/server/tests/scripts.test.ts → 15/15
+手工证据：
+  a) 按 F1 的遮蔽命令实跑，贴 exit/JSON/进程是否存活；
+  b) 本机起一个真实服务后跑 T9，确认不再假失败；
+  c) git diff --stat 证明未改 README/handoff/服务端/前端/依赖。
+不 commit。完成后报告：改动文件、测试数与耗时、F1–F4 各自证据、遗留风险。
