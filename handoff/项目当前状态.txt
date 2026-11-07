@@ -9,12 +9,14 @@ RichMan 项目当前状态
 游戏版本：未发布，目标 V1.0
 
 【进度与范围】
-已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B。
-当前子任务：08B 已提交并通过 Qoder 复核修复验证（67c6e38；62 文件/703 条、typecheck/build 0、
-6 张移动截图 + 可复跑 metrics），剩余真机验收；已进入 08C 音频（规格 handoff/单元08C-音频素材与音量.txt）。
+已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C。
+当前子任务：08C 音频已提交 d7b67f8，并通过 Qoder 二次验证（63 文件/731 条、
+typecheck/build 0、6 个自制 WAV + 播放器/面板/事件音效 + dev/production 播放证据）；
+真机音频未测；下一入口 09 加固/跨网/验证/一键发布包。
 05B 真人试玩：2026-11-06 用户在 07C 后完整玩过一局并确认“不错”，判为真人试玩通过；清单中的等待时长与 360px 截图未逐项记录，并入 08 记录。
-下一入口：08C 音频；09 加固/跨网/验证/一键发布包。
-08C 音频要求：轻松幽默的配乐；只用自制或明确授权素材，记录来源/许可证，加载失败不阻塞。
+下一入口：09 加固/跨网/验证/一键发布包。
+08C 音频：全部素材由 make-audio.mjs 合成（无第三方采样），6 个 sha256 见 08C 交接；
+      首次手势才 unlock，不自动播放；失败降级不影响游戏。
 05D：BETTING 猜点步可直接“放弃本轮下注”（SUBMIT_BET 0 注）+ GAME_OVER 后房主再来一局（rematch）。
 05E：顶部 .game-sticky = header + 单条反馈横幅 + 事件通知架，.stage 只放当前步骤卡；
      反馈优先级 本地提示 > 服务端 error > 命令回执；失败横幅 role=alert、通知架 role=log。
@@ -33,10 +35,11 @@ RichMan 项目当前状态
      终局名单与本人破产说明；只改 apps/web，BET_SETTLED 只取本人条目。
 06 起会话与命令去重已落盘（apps/server/data，RICHMAN_DATA_DIR 可覆盖），服务重启后房间恢复为暂停态，房主 resume_game 继续。
 
-【测试与构建（2026-11-07 单元08B 复核修复后实测）】
-pnpm -s test    62 文件 / 703 条（684 + 08B 初版 14 + 复核新增 5），TEST_EXIT=0，6.68s
+【测试与构建（2026-11-07 单元08C 后实测）】
+pnpm -s test    63 文件 / 731 条（703 + 08C 音频 28），TEST_EXIT=0，6.06s
 pnpm typecheck  TSC_EXIT=0
-pnpm -s build   BUILD_EXIT=0（index-8_zW1uiN.css 16.51kB、index-BH0A3_xm.js 417.72kB，138 modules，558ms）
+pnpm -s build   BUILD_EXIT=0（index--JyM_5JG.css 18.07kB、index-DIQs21ey.js 425.04kB，
+                141 modules，402ms；dist/audio 6 文件共 391,652 bytes）
 pnpm smoke:lan PASS（05D 验收时）
 旧 481 条中只有两条断言按 Lead 明确授权改正（都在 persistence.test.ts）：
   after_rename_identity_write：旧 token 连接必须 NOT_JOINED，只有恢复码换的新 token 能继续；
@@ -120,6 +123,18 @@ https://diego-rotary-inclusive-hughes.trycloudflare.com（2026-11-06 21:5x 重�
    6 状态 scrollWidth<=clientWidth 全 PASS，另 3 条 computed font PASS。
    已知边界：无头 Edge 非真机、iOS 15 以下 100dvh 退化、interactive-widget 仅 Chromium、
    横屏 Q3 需滚动（按钮可见可点）、未做软键盘像素测量。
+0c) 08C 音频已提交 d7b67f8，Qoder 二次验证「可提交」（63 文件/731 条、typecheck/build 0）：
+   M1 删除 React cleanup dispose，改 pagehide；dev StrictMode 探针
+   pointerdown 后 new/play bgm 已验证。
+   M2 addNote 逐样本减 dc，振幅 melody30/bass20/shaker6；6 文件 mean≤2、
+   peak=70、first/last=128、BGM 16s/352844、两次 sha 一致；
+   BGM sha=811811013ae823036b41be3d5996c712fbd4e6bf5011b7db5952d19bc02bf3ac。
+   M3 App 改 Set<number> 去重，derive 仍传 300 条；400 批回归不重播，新局清空。
+   S1 muted 时 unlock 不播；S2 SFX reject 清理 active；S3 两批/300/null/dormant 测试。
+   audio.test.ts 28 条；dist/audio 391,652 bytes。
+   已知边界：8-bit 音质、300 条风暴丢 LOAN 映射、ROUND_SETTLED dormant、
+   N1（pagehide persisted 也 dispose，bfcache 返回静音）、N2（HMR 重复 BGM）、
+   N2/N3/N7 旧 nit 未处理；真机音频未测。
    07C 已完成并验收（54 文件/646 条）：全部还款/全部催收、返回上一步、房主销毁房间；
    遗留：360px 真机截图未采集、销毁仅单进程验证、S-B 毫秒竞态无端到端用例（有判定单测 + peer 兜底）。
 1) 05B 真机复测：按 handoff/单元05B-试玩清单.txt 记录等待/卡点，重点看 05E 提示可见性与 05F 额度数字/禁用态。

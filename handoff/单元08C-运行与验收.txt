@@ -1,0 +1,78 @@
+单元 08C 运行与验收说明（音频 / 音量 / 静音 + 复核修复）
+================================================================
+环境（本机实测）：
+- Node v24.18.0
+- pnpm 11.7.0
+- Windows PowerShell 5.1
+- 浏览器：Edge/Chromium（真机清单见下）
+
+一、生成素材
+node apps/web/scripts/make-audio.mjs
+两次重跑输出逐字节与 sha256 完全一致；脚本自身检查均值/峰值/首尾：
+bgm-loop.wav   duration=16.000s bytes=352844 mean=0.043 peak=70 first=128 last=128
+  sha256=811811013ae823036b41be3d5996c712fbd4e6bf5011b7db5952d19bc02bf3ac
+sfx-tap.wav    duration=0.060s  bytes=1367   mean=-0.077 peak=70 first=128 last=128
+  sha256=a543ab4ae558027b9a81b3421ac83cb24510d3aa4d062295a68887da884ad533
+sfx-submit.wav duration=0.140s  bytes=3131   mean=-0.019 peak=70 first=128 last=128
+  sha256=b4f5c8e7b50c8d5056c48b543867f9d85f16ac169dba84209285659fd3f2cbe1
+sfx-win.wav    duration=0.600s  bytes=13274  mean=0.029  peak=70 first=128 last=128
+  sha256=43745cf2f4d9fb9a712869a7fefa11d60130b3a1a6aa8bc25e951c2912a773f4
+sfx-lose.wav   duration=0.500s  bytes=11069  mean=0.052  peak=70 first=128 last=128
+  sha256=4a893e88b176d019ae9073fbb9897ace01b317b9e97a57af6cbacdf83128427c
+sfx-alert.wav  duration=0.450s  bytes=9967   mean=0.050  peak=70 first=128 last=128
+  sha256=b932037c836bab543354f5478e4f3d1fb3679068ae3b74c9567eda9e3d0a2d7d
+
+二、自动化验收
+pnpm -s test
+  Test Files  63 passed (63)
+       Tests  731 passed (731)
+    Duration  6.06s
+pnpm typecheck
+  $ tsc --noEmit -p tsconfig.json
+  exit 0
+pnpm -s build
+  ✓ 141 modules transformed.
+  dist/index.html 0.49 kB（gzip 0.31）
+  dist/assets/index--JyM_5JG.css 18.07 kB（gzip 4.10）
+  dist/assets/index-DIQs21ey.js 425.04 kB（gzip 124.87）
+  ✓ built in 402ms
+dist/audio：6 文件，总 391,652 bytes。
+旧 703 条测试未删除、未修改、未跳过、未放宽；audio.test.ts 28 条。
+
+三、M1 dev StrictMode 证据
+pnpm exec vite --host 127.0.0.1 --port 5175 --strictPort
+用 window.Audio 包装记录 new/play，页面 mounted 后先等 1.2s，再 dispatch pointerdown：
+strictmode_before=[]
+strictmode_after_pointerdown=["new:/audio/bgm-loop.wav","play:/audio/bgm-loop.wav"]
+说明 StrictMode 的 mount→cleanup→mount 不再 dispose controller；首次手势真实创建并播放 BGM。
+
+四、浏览器手动验收
+1. pnpm dev，打开 http://localhost:8000/。
+2. 首次进入：未点击前无音乐；首次 pointerdown/keydown 后才创建 BGM。
+3. 声音面板：静音、背景音乐、音效三控件；取消/勾选静音 BGM 暂停/恢复；
+   两滑杆写 localStorage.richman.audio.v1；Esc、遮罩、关闭按钮都能关；
+   360px 不横向滚动，粗指针控件 ≥44px。
+4. 对局：顶栏“声音”打开同一面板；BET 赢/输、失信、借款拒绝/过期、
+   危险解除触发对应音效；最多 3 个同时音效，同毫秒同名不重复。
+5. 重载：静音/音量恢复；已读 audio 状态不自动播放，直到下一次手势。
+6. 失败降级：无法创建 Audio 时显示“当前设备无法播放声音，不影响游戏”，
+   两个滑杆禁用，游戏命令不受影响。
+
+五、真机验收清单（由用户执行）
+1. 耳机/外放：BGM 与 5 个音效都能听到，音量滑杆实际生效。
+2. 手机静音键/勿扰模式：系统静音后不骚扰，游戏与面板不崩。
+3. 后台切换：切后台再回来 BGM 不叠加、不重复 play；静音状态保持。
+4. 首次手势：iOS Safari/Android Chrome 首次点击后 BGM 才开始，无自动播放报错。
+5. 360px 面板：滑杆、复选框、关闭按钮 ≥44px，遮罩关闭不误触。
+6. 断网/离线：音频是本地资源，断网不影响已加载的 BGM/音效；失败不阻塞游戏。
+
+六、已知边界
+- 8-bit 22050Hz 自制复古音质；无曲目切换/淡出；滑杆无键盘级进。
+- 无头/Node 无真实音频设备；耳机、静音键、后台切换未验证。
+- 首次手势前到达的事件音效会跳过。
+- LOAN_REQUEST_CLOSED 映射依赖 300 条事件窗口；超过 300 条风暴会丢映射，
+  该 lose 不播（已记录并测试）。
+- engine 没有 ROUND_SETTLED；该分支 dormant。
+- N7（Esc 双触发，幂等）、N2（CSS 契约测试）、N3（滑杆 UI 映射）未处理。
+- N1（pagehide persisted 也 dispose，bfcache 返回静音）与 N2（HMR 重复 BGM）未修，记为已知 nit。
+- 已提交 d7b67f8。

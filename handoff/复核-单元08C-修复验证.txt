@@ -1,0 +1,235 @@
+============================================================
+RichMan 单元 08C 复核修复二次验证报告
+============================================================
+复核员：Qoder（独立复核，只读）
+复核时间：2026-11-07
+工作区：D:\Lianjunjie\biancheng\RichMan
+实际 HEAD：7c83f81（08C 复核修复规格提交）
+实现状态：08C 实现与复核修复仍为工作区未提交改动
+复核方式：真实 make-audio×2、test/typecheck/build；独立 WAV 解码；真实 Vite dev
+          与 production build 的 window.Audio 探针；仓库外 60 批去重/50 窗口
+          变异探针；真实 Build+浏览器 360 面板；只读源码，未改源码、未 commit；
+          仅新增本报告。
+
+结论：可提交。
+  A(M1) PASS：dev StrictMode 与 production 都能在首次 pointerdown 后
+               new/play bgm-loop.wav；React cleanup dispose 已移除，只有 pagehide。
+  B(M2) PASS：BGM mean=0.043、peak=70、first/last=128、16.000s/352844；
+              六个文件均值/峰值/首尾均合格；两次 sha256 一致、manifest 一致。
+  C(M3) PASS：60 批事件 0 重播；400 批仓库测试通过；把 Set 改成 50 窗口的
+              变异探针会失败。
+  D(S1/S2/S3) PASS：muted→unlock 不播、unmute 播；SFX reject 后 active=0；
+                     REQUESTED/CLOSED 两批仍 lose；>300、GAME_OVER null、
+                     ROUND_SETTLED dormant 均有边界测试。
+  E PASS：63 文件/731 条、旧 703 未动、无依赖/服务端/协议越界、
+          dist/audio 6 文件 391,652 bytes、交接数字与 sha 一致。
+  仅有 5 条不阻塞的 nit，见第七节；没有新 must-fix。
+  特别说明：M1 的 dev 结论是我亲自用 Vite dev + initScript 包装 window.Audio
+  实测的（见第二节），不是读源码推断。
+
+------------------------------------------------------------
+一、真实命令与素材结果
+------------------------------------------------------------
+$ node apps/web/scripts/make-audio.mjs   (两次)
+两次输出逐行相同；diff 为空；脚本自检 mean/peak/first/last 均通过。
+bgm-loop.wav   duration=16.000s bytes=352844 mean=0.043  peak=70 first=128 last=128
+  sha256=811811013ae823036b41be3d5996c712fbd4e6bf5011b7db5952d19bc02bf3ac
+sfx-tap.wav    duration=0.060s  bytes=1367   mean=-0.077 peak=70 first=128 last=128
+  sha256=a543ab4ae558027b9a81b3421ac83cb24510d3aa4d062295a68887da884ad533
+sfx-submit.wav duration=0.140s  bytes=3131   mean=-0.019 peak=70 first=128 last=128
+  sha256=b4f5c8e7b50c8d5056c48b543867f9d85f16ac169dba84209285659fd3f2cbe1
+sfx-win.wav    duration=0.600s  bytes=13274  mean=0.029  peak=70 first=128 last=128
+  sha256=43745cf2f4d9fb9a712869a7fefa11d60130b3a1a6aa8bc25e951c2912a773f4
+sfx-lose.wav   duration=0.500s  bytes=11069  mean=0.052  peak=70 first=128 last=128
+  sha256=4a893e88b176d019ae9073fbb9897ace01b317b9e97a57af6cbacdf83128427c
+sfx-alert.wav  duration=0.450s  bytes=9967   mean=0.050  peak=70 first=128 last=128
+  sha256=b932037c836bab543354f5478e4f3d1fb3679068ae3b74c9567eda9e3d0a2d7d
+
+$ pnpm -s test
+  Test Files  63 passed (63)
+       Tests  731 passed (731)
+    Start at  14:00:40
+    Duration  8.28s
+TEST_EXIT=0
+
+$ pnpm typecheck
+$ tsc --noEmit -p tsconfig.json
+TSC_EXIT=0
+
+$ pnpm -s build
+✓ 141 modules transformed.
+apps/web/dist/index.html                   0.49 kB │ gzip:   0.31 kB
+apps/web/dist/assets/index--JyM_5JG.css   18.07 kB │ gzip:   4.10 kB
+apps/web/dist/assets/index-DIQs21ey.js   425.04 kB │ gzip: 124.87 kB
+BUILD_EXIT=0
+dist/audio：6 文件，总 391,652 bytes；dist/index.html 只引用本地
+/assets/index-DIQs21ey.js 与 /assets/index--JyM_5JG.css，无新增外链。
+
+------------------------------------------------------------
+二、A M1：StrictMode / 生命周期（亲自 dev 实测）
+------------------------------------------------------------
+PASS。
+代码现状：
+- App.tsx:188-193 只保留 pagehide：
+  const onHide=()=>audio.dispose();
+  window.addEventListener("pagehide",onHide);
+  return ()=>window.removeEventListener("pagehide",onHide);
+- 已无 `useEffect(() => () => audio.dispose(), [audio])`；
+  grep 中 audio.dispose 只有 App.tsx:190 这一处。
+- audio.ts:167-170 unlock 仍以 disposed 保护，正常；没有其他 React cleanup 调 dispose。
+
+真实 dev 探针（Vite dev，StrictMode）：
+1) `pnpm exec vite --host 127.0.0.1 --port 5174 --strictPort`
+2) 浏览器 initScript 包装 window.Audio，记录 new/play/pause；
+3) 打开 http://127.0.0.1:5174/，等 1.8s；
+   `window.__audioLog` before = []（unlock 前不创建 Audio，符合预期）；
+4) 在 window dispatch `new PointerEvent("pointerdown",{bubbles:true})`；
+   800ms 后 after =
+   ["new:/audio/bgm-loop.wav","play:/audio/bgm-loop.wav"]。
+即 StrictMode 的 mount→cleanup→mount 后 controller 仍可 unlock，首次手势真的
+创建并播放 BGM，不再出现上一轮 dev 永久静音。
+
+production 对照：
+- `python -m http.server 8125` 服务 apps/web/dist；
+- 同一 initScript，打开后 before=[]，pointerdown 后
+  after=["new:/audio/bgm-loop.wav","play:/audio/bgm-loop.wav"]。
+production 同样正常；dev bug 已修。
+
+HMR/重渲染路径：
+- re-render 不会触发该 effect 的 cleanup（依赖 [audio] 稳定），不会 dispose。
+- HMR full reload 会新建页面/controller，旧页面 pagehide 后销毁；
+- HMR Fast Refresh 若只 remount 组件而不触发 pagehide，旧 controller 不会被
+  dispose（不会回到原来的 disposed bug），但可能继续播放旧 BGM，和新的
+  controller 叠加；这是 dev-only nit N2，不是当前 A 的阻塞项。
+- pagehide 的 bfcache 变体见 nit N1：pagehide 带 persisted=true 也会 pause，
+  返回 bfcache 后 controller 已 disposed；若要支持 bfcache，需检查
+  event.persisted 或在 pageshow 重建；本轮验收未覆盖。
+
+------------------------------------------------------------
+三、B M2：BGM 直流偏移 / 峰值 / 确定性
+------------------------------------------------------------
+PASS。
+- make-audio.mjs:51-61 的 addNote：
+  dc=2*duty-1；buffer += (square - dc)*amplitude*envelope；
+  BGM 振幅 melody 30 / bass 20 / shaker 6（:84-86）。
+- 我独立解码 8-bit PCM 的结果：
+  bgm mean=0.043（|mean|≤2）、peak=70、first/last=128、16.000s、352844 bytes；
+  5 个 sfx mean=-0.077..0.052、peak=70、first/last=128，大小 1367/3131/13274/
+  11069/9967 与 manifest 一致。
+- peak=70 而不是贴 100，说明没有靠钳位硬切；encodeWav 的 MAX_AMPLITUDE=100
+  是兜底，不是实际截断路径。make-audio.mjs:182-218 的 inspectPcm 会在写文件前
+  检查 mean/peak/first/last，实测两次均通过。
+- 两次 make-audio 的六个 sha256 完全一致；manifest.ts 的 bgm hash 已更新为
+  811811...bf3ac，AUDIO_BYTES.bgm=352844；audio.test.ts:188-193 校验 hash。
+- 均值断言有效性（变异探针，仓库外 full copy）：
+  1) 基线 A1 通过；
+  2) 把 temp bgm 每个 PCM 样本 +3（mean≈3.043）→ A1 在 audio.test.ts:181
+     报 `expected 3.043... to be less than or equal to 2`，测试变红；
+  3) 从 temp test 删掉 audio.test.ts:180-181 的均值断言，再跑同一 DC 文件
+     → A1 变绿。
+  结论：断言确实在守护 mean；删断言本身不会让测试红，但删后 DC 注入不再被
+  发现。仓库文件未改，探针结束已恢复。
+
+------------------------------------------------------------
+四、C M3：300 事件窗口去重
+------------------------------------------------------------
+PASS。
+代码：
+- App.tsx:57 `playedSfxSeqRef: Set<number>`；
+- App.tsx:219 `collectNewSfx(deriveSfxEvents(events, ownPlayerId), Set)`；
+  derive 仍接收完整 events 数组（保留 LOAN_REQUESTED→CLOSED 映射）。
+- clear 覆盖：
+  - startRoom:83；onStarted:109；房间销毁:135；events=[] effect:214；
+  - backToLobby 的 setEvents([])（:300）也会触发 events=[] effect 清空。
+- audio.ts:265-280 collectNewSfx 只用 Set，不做 50 截断；旧 takeNewSfx 已移除。
+独立探针（仓库外）：
+- 60 批递增 BET_SETTLED，每批 `events` 累积、`derive` 整个数组、Set 去重：
+  `plays=60, replays=[]`，0 重播。
+- 将 temp collectNewSfx 注入 50 窗口 cap 后重跑同一探针：失败，累计播放数
+  明显超过 60（输出 +555 的差异），证明测试能抓到 50 窗口回归。
+- 仓库 audio.test.ts:424-439 的 400 批测试覆盖 300 窗口滚动；:435-438
+  清空 Set 后 seq 1 能重新播放；通过。
+- audio.ts:302 注释仍写“调用方负责按 seq 去重（最近 50 个）”，与当前
+  Set/300 实现不符；仅注释，记 nit N3。
+
+------------------------------------------------------------
+五、D S1/S2/S3
+------------------------------------------------------------
+D PASS。
+S1（muted 先于 unlock）：
+- audio.ts:187 `if (!current.muted) safePlay(bgm);`；测试 audio.test.ts:261-271。
+- 独立探针：setMuted(true)→unlock→playCalls=0；setMuted(false)→playCalls=1。
+  PASS。
+
+S2（SFX reject active 清理）：
+- audio.ts:136-151 safePlay 返回同步启动结果，并接受 onFailure；:241-247
+  active.push 后 safePlay，失败/异步 reject 都 removeEnded；:167 暴露
+  activeSfxCount。
+- 独立探针：BGM 正常、SFX reject → `activeSfxCount=0`、unavailable=true、
+  后续 playSfx=false；audios 只有 BGM+失败 SFX 两个对象。PASS。
+- audio.test.ts:298-314 覆盖；通过。
+
+S3（真实时序/边界）：
+- audio.test.ts:441-453 两批：先 REQUESTED，再加 280 个 filler，再加 CLOSED；
+  300 窗口内仍播 lose。PASS。
+- audio.test.ts:455-465 超过 300 条时 REQUESTED 被淘汰，lose 不播；这是
+  交接已记录的边界，测试明确写出。
+- audio.test.ts:467-474 GAME_OVER winnerId=null → lose；ROUND_SETTLED
+  dormant，ROUND_STARTED 不触发结算音效。PASS。
+- 这些测试是纯函数层（collect/derive），不是完整 App 渲染；验收规格允许
+  抽纯函数测试；App 的 Set/300 走查见 C。无 must-fix。
+
+------------------------------------------------------------
+六、E 回归/范围/文档
+------------------------------------------------------------
+PASS。
+- 测试：63 文件 / 731 条，实际输出全绿；旧 703 条未改；
+  `git diff --name-only HEAD -- '*test*'` 为空（audio.test.ts 是新未跟踪文件）。
+- 731 = 703 + 08C 初版 21 + 复核新增 7；audio.test.ts 实际 28 条。
+- 依赖：git diff HEAD -- package.json pnpm-lock.yaml apps/web/package.json 为空；
+  无新增依赖。
+- 禁改范围：git diff HEAD -- packages apps/server apps/web/src/net '**/steps.ts'
+  为空；无协议/服务端/引擎改动。
+- build：141 modules；dist/audio 6 文件 391,652 bytes；
+  dist/index.html 只有本地 assets 引用，无新增外链。
+- 交接/状态文档：四份 08C 交接与项目当前状态均写 731、新的 bgm sha256、
+  M1/M2/M3/S1/S2/S3 修复说明；与实测一致。
+- `audio.ts:302` 注释“最近 50 个”未同步为 Set/300，nit N3（仅注释）。
+- 文档里的 M1 证据（dev pointerdown 后 new/play）与我本次实测一致；
+  文档的 N2/N3/N7 未处理已如实写明，属于 nit。
+
+------------------------------------------------------------
+七、must-fix 与 nit
+------------------------------------------------------------
+新 must-fix：无。
+
+nit（均不阻塞本轮验收）：
+N1 pagehide 的 bfcache 变体：我用 production build dispatch
+   `PageTransitionEvent("pagehide",{persisted:true})` 后观察
+   audioLog 追加 `pause:/audio/bgm-loop.wav`；再次 pointerdown 没有 new/play。
+   即 bfcache 返回时 controller 已 disposed。若 bfcache 是目标场景，建议
+   `if (!event.persisted) audio.dispose()`，或在 pageshow 重建 controller。
+   本次验收的 StrictMode/dev 与普通 production 页面加载均通过。
+N2 HMR Fast Refresh remount（不触发 pagehide）可能让旧 controller 继续播放、
+   新 controller 再起 BGM；不会回到“disposed”原 bug，但 dev-only 可能叠加。
+   如要彻底消除，可用 ref 保留 controller 或统一 pagehide/pageshow。
+N3 audio.ts:302 注释仍写“最近 50 个”，实际是 Set 去重（覆盖 300 条窗口）；
+   仅注释 stale，不影响行为。
+N4 上一轮的 N2/N3/N7 未处理（AudioPanel CSS 契约测试、滑杆 UI 映射测试、
+   Esc 双触发收敛），交接已如实写明；不影响本轮修复。
+N5 真机/真实音频设备（耳机、静音键、后台切换、iOS 自动播放）仍未测；
+   交接有清单，无头探针不能替代。
+
+------------------------------------------------------------
+八、最终结论
+------------------------------------------------------------
+可提交。
+A(M1)、B(M2)、C(M3)、D(S1/S2/S3)、E 全部 PASS；M1 是本次亲自用 Vite dev
++ window.Audio initScript 测到 before=[]、pointerdown 后
+new/play bgm-loop.wav，production 对照也 new/play；M2 均值/峰值/首尾/时间/
+字节/hash 全部复核；M3 60 批 0 重播、50 窗口变异会红；S1/S2/S3 均有测试和
+独立探针。仅剩 5 条 nit（pagehide bfcache、HMR 叠加、stale 50 注释、旧
+N2/N3/N7、真机未测），不阻塞本轮提交。
+
+复核基线：实际 HEAD 7c83f81；08C 修复为工作区未提交改动；本轮未改源码、
+未 commit；仅新增本报告，make-audio 重跑只重写了确定性 WAV。

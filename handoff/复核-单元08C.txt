@@ -1,0 +1,334 @@
+============================================================
+RichMan 单元 08C 独立复核报告（音频/音量/静音）
+============================================================
+复核员：Qoder（独立复核，只读）
+复核时间：2026-11-07
+工作区：D:\Lianjunjie\biancheng\RichMan
+基线：HEAD 8e7eaf7（08C 音频规格提交）；08C 实现为工作区未提交改动
+复核方式：真实 make-audio×2、test/typecheck/build；WAV 逐样本分析；真实 Vite dev
+          与 production build 的 StrictMode 对照；仓库外控制器/去重探针；真实浏览器
+          360px 面板测量；只读源码，未改源码、未 commit；只新增本报告。
+
+结论：需修复。
+  M1 StrictMode 开发环境：首次 mount→cleanup→mount 把 controller dispose，之后
+     unlock() 直接 return，Vite dev 中永不播 BGM/音效；production build 不受影响。
+  M2 BGM 有明显直流偏移：bgm-loop.wav 的 PCM 均值约 -21.6（8-bit 中值 128），
+     峰值 83、首尾 128，A2 的“无直流偏移”不成立；现有测试只查峰值/首尾。
+  M3 App 事件去重：events 保留 300 条，但 takeNewSfx 只保留最近 50 个 seq；
+     从第 51 个事件起，旧事件会被反复当成新事件重播（60 个事件探针复现 45 次）。
+  S1（should-fix）muted 先于 unlock：持久化 muted=true 时首次手势仍 play BGM。
+  S2（should-fix）play reject 后 active 数组不清理，失败 Audio 留在 active，
+     直到第 4 个或 dispose；当前立刻 unavailable，所以用户影响有限。
+  S3（should-fix）LOAN_REQUEST_CLOSED 的 45 秒真实时序、300 条累积与
+     GAME_OVER winnerId=null 没有 App 级测试；现有测试把两个事件塞进同一批。
+
+------------------------------------------------------------
+一、真实命令与素材结果
+------------------------------------------------------------
+$ node apps/web/scripts/make-audio.mjs   (第一次)
+$ node apps/web/scripts/make-audio.mjs   (第二次)
+两次输出逐字符相同；diff 为空；六个 sha256 与 manifest/交接完全一致：
+bgm-loop.wav   104eef54ea9863d7a9b74c480bf3a946cc697805f7980f0a0cbfdf2f157f15fa
+sfx-tap.wav    a543ab4ae558027b9a81b3421ac83cb24510d3aa4d062295a68887da884ad533
+sfx-submit.wav b4f5c8e7b50c8d5056c48b543867f9d85f16ac169dba84209285659fd3f2cbe1
+sfx-win.wav    43745cf2f4d9fb9a712869a7fefa11d60130b3a1a6aa8bc25e951c2912a773f4
+sfx-lose.wav   4a893e88b176d019ae9073fbb9897ace01b317b9e97a57af6cbacdf83128427c
+sfx-alert.wav  b932037c836bab543354f5478e4f3d1fb3679068ae3b74c9567eda9e3d0a2d7d
+
+$ pnpm -s test
+  Test Files  63 passed (63)
+       Tests  724 passed (724)
+    Duration  7.89s
+TEST_EXIT=0
+
+$ pnpm typecheck
+$ tsc --noEmit -p tsconfig.json
+TSC_EXIT=0
+
+$ pnpm -s build
+✓ 141 modules transformed.
+apps/web/dist/index.html                   0.49 kB │ gzip:   0.31 kB
+apps/web/dist/assets/index--JyM_5JG.css   18.07 kB │ gzip:   4.10 kB
+apps/web/dist/assets/index-CElliT67.js   424.84 kB │ gzip: 124.84 kB
+BUILD_EXIT=0
+dist/audio：6 文件，总 391,652 bytes；dist/index.html 只有本地 assets 引用，
+没有新增外链。
+
+------------------------------------------------------------
+二、A 素材
+------------------------------------------------------------
+A1 PASS（头/格式/时长/大小）
+- 六个 WAV 都是标准 44 字节 RIFF/WAVE/fmt/data：
+  format=1、channels=1、sampleRate=22050、bits=8、blockAlign=1、byteRate=22050。
+- 数据长度/时长：bgm 352800 samples=16.000s；tap 1323=0.060s；
+  submit 3087=0.140s；win 13230=0.600s；lose 11025=0.500s；alert 9923=0.450s。
+- 字节：352844 / 1367 / 3131 / 13274 / 11069 / 9967，和 AUDIO_BYTES 一致；
+  bgm ≤420000、每个 sfx ≤40960。
+- audio.test.ts:143-169 覆盖头/时长/大小；通过。
+
+A2 FAIL（峰值合格，BGM 有直流偏移）
+- 全文件峰值相对 128 的最大偏差：bgm 83，五个 sfx 70；均 ≤100 PASS。
+- BGM 首样本=128、末样本=128，首尾接近中值 PASS。
+- 但全轨 PCM 均值（采样值-128）为 -21.626，第一半 -21.644、第二半 -21.608；
+  这是明显的直流偏移。audio.test.ts:171-181 只查峰值与首尾，不查均值，
+  所以测试全绿但 A2 的要求未满足。
+- 原因：make-audio.mjs:81-82 主旋律用 25% 占空比方波，25% 方波均值非 0
+  （约 -0.5×振幅）；低音 50% 和沙锤不能抵消。可改为 50% 占空比，
+  或在每音/整轨编码前减均值（DC blocking），再重跑并同步 manifest/hash。
+- sfx 的均值在 -0.077..0.052，基本无直流，问题集中在 bgm-loop.wav。
+
+A3 PASS（确定性/清单）
+- 两次运行输出完全相同；sha256 与 manifest、交接一致；无 Math.random/
+  Date.now/时间戳；make-audio.mjs 只 import node:crypto/fs/path/url。
+- AUDIO_SHA256/AUDIO_BYTES 与实际文件一致；audio.test.ts:183-188 通过。
+
+A4 PASS（来源/依赖）
+- 脚本无外部采样、无网络读取、无第三方库；只写 public/audio。
+- 交接的“全部由 make-audio.mjs 合成”声明与代码一致。
+- nit：A1 未显式断言 blockAlign/byteRate，虽然实际头正确。
+
+------------------------------------------------------------
+三、B 播放层
+------------------------------------------------------------
+B1 PASS（基本生命周期；muted 例外见 S1）
+- audio.ts:167-183 unlock 前不创建 Audio；unlock 只创建一次并 loop/play；
+  createAudio 返回 null/抛异常置 unavailable 不抛；重复 unlock 无副作用。
+- audio.test.ts:227-242 覆盖；D2 覆盖 null→unavailable。
+- 例外：持久化 muted=true 时 unlock 无视 muted 直接 safePlay（见 S1）。
+
+B2 PASS（音量/持久化）
+- 默认 {false,0.5,0.7}；key richman.audio.v1；loadState 校验 boolean/number/
+  0..1，损坏/越界回默认并写回；setBgm/SfxVolume round 0..1 两位小数。
+- audio.test.ts:190-225 覆盖默认/恢复/损坏/越界/clamp；通过。
+- 备注：roundVolume(NaN) 仍是 NaN，但 UI 只传合法 number，规格未要求 NaN。
+
+B3 部分通过（核心行为 PASS；reject 后 active 泄漏 FAIL → S2）
+- unlock 前 playSfx false、不创建；muted、sfxVolume=0、unavailable 都先返回 false；
+  同一 now 毫秒同名去重；active 最多 3，超出 pause 最旧；测试 :244-292 通过。
+- audio.ts:233 先 active.push(audio)，随后 safePlay；safePlay 的 promise reject
+  只在 :135-144 markUnavailable，不调用 removeEnded；onended 在 reject 时不会触发。
+  因此 reject 的 audio 仍留在 active，直到第 4 个或 dispose。由于 reject 已把
+  unavailable 置 true，后续 playSfx 全部 false，用户影响有限，但这是真实的
+  列表泄漏/槽位占用，建议清理；见 S2。
+
+B4 PASS（dispose 本体）/ C 失败（App 调用时机）
+- audio.ts:237-249 dispose pause BGM、pause active、清 listeners；之后 playSfx
+  false；audio.test.ts:294-303 通过。
+- 但 App.tsx:185 `useEffect(() => () => audio.dispose(), [audio])` 在
+  StrictMode 首次 mount 的模拟 cleanup 就 dispose controller，见 C。
+
+B5 事件映射：PASS（映射）/ FAIL（300 实时序未证）
+- BET_SETTLED PASS：engine.ts:584-588 发 `players: settled.map(({result})=>result)`，
+  gamble.ts 的 BetSettlement 字段是 playerId/deltaCents；audio.ts:313-323 正确取
+  players[].playerId/deltaCents，>0 win、<0 lose、=0 不播；他人过滤。
+- BANK_LOAN_DEFAULTED PASS：engine.ts:677-683/1266-1272 带 borrowerId；
+  audio.ts:324-325 只对本人 alert。
+- LOAN_REQUEST_CLOSED/EXPIRED 映射 PASS（函数层）：engine.ts:1063 的 REFUSED
+  没有 borrowerId；audio.ts:328-334 从同一批 LOAN_REQUESTED 建 requestId→borrower。
+  LOAN_REQUESTED 的 audience 是 [borrower,lender]（engine.ts:991-1001），
+  LOAN_REQUEST_CLOSED 是公开事件（无 audience），服务端按 ws.ts:187-188
+  发送，App.tsx:115-117 累积 300 条，因此正常 45 秒窗口内两事件都在。
+  但 audio.test.ts:334-352 只把两事件放进同一批测试，没有模拟 App 的
+  onEvents 分批、300 条截断或超过 300 事件的极端时序；这一点未独立证明，
+  见 S3。App 的 takeNewSfx 还有 M3 重播问题。
+- GAME_OVER PASS（含 winnerId=null）：audio.ts:338-340 winnerId=本人 win，
+  否则 lose；winnerId=null 走 else lose。engine.ts:604-605/708-709 的 null
+  只在 alive.length=0（全员破产）出现，此时本人不可能存活，lose 正确。
+  但测试只覆盖 me/other，未覆盖 null；见 nit。
+- ROUND_SETTLED：engine 没有该事件，只有 ROUND_STARTED（engine.ts:615/718）；
+  audio.ts:336-337 只匹配精确 ROUND_SETTLED，没有把 ROUND_STARTED 当结算；
+  当前分支 dormant，交接 :44-45 已写明，PASS。测试 C2 的 ROUND_SETTLED
+  是人为构造，不代表引擎已有事件（nit）。
+
+------------------------------------------------------------
+四、C StrictMode / 生命周期（重点）
+------------------------------------------------------------
+FAIL（开发环境实际静音；production build 不受影响）
+代码：
+- main.tsx:9 使用 React.StrictMode；
+- App.tsx:185 `useEffect(() => () => audio.dispose(), [audio])`；
+- audio.ts:237-240 dispose 置 disposed=true；
+- audio.ts:167-168 unlock 看到 disposed 直接 return；
+- 手势 effect（App.tsx:188-200）在第二次 setup 后监听仍在，但 controller 已 disposed。
+
+真实复现（不是推理）：
+1) `pnpm exec vite --host 127.0.0.1 --port 5174 --strictPort`；
+2) 用浏览器 initScript 包装 window.Audio，记录 new/play/pause；
+3) 打开 http://127.0.0.1:5174/，等 2s；页面已有入口/教程，
+   `window.__audioLog = []`（unlock 前无 Audio，正确）；
+4) 在 window 上 dispatch pointerdown（生产同事件已验证）后等 800ms：
+   `window.__audioLog` 仍为 []，没有 new Audio，也没有 play；
+5) 对照组：`python -m http.server 8125` 服务 production build，
+   同样 initScript + pointerdown，log 为
+   `new:/audio/bgm-loop.wav`、`play:/audio/bgm-loop.wav`。
+结论：StrictMode 的 mount→effect cleanup→mount 把 controller 永久 disposed，
+首次手势 unlock 被 `disposed` 拦截；Vite dev/React StrictMode 测试环境永远不响。
+Production build 里 React 不执行这次模拟 cleanup，因此用户生产路径正常。
+
+最小修法（任选，均不改音频 API）：
+A. 删除 App.tsx:185 的 cleanup dispose；改在真实页面离开时释放：
+   `useEffect(() => { const onHide=()=>audio.dispose(); window.addEventListener("pagehide", onHide); return ()=>window.removeEventListener("pagehide", onHide); }, [audio]);`
+B. 完全去掉该 effect，由浏览器页面卸载释放 controller；BGM 在页面销毁时随页面结束。
+（dispose 本体 B4 仍应有单测；只是不要用 React StrictMode 会调用的 unmount cleanup。）
+判定：M1，must-fix（dev/StrictMode 路径；production 已实测不受影响）。
+
+------------------------------------------------------------
+五、D 界面
+------------------------------------------------------------
+D1 PASS
+- 入口页 App.tsx:384 有 AudioButton；LobbyView.tsx:88-100 有；GameView.tsx:1596
+  顶栏 game-top-side 有；AudioButton 是原生 button，aria-label="声音设置"，
+  键盘可聚焦；audio.test.ts:414-433 覆盖对局/大厅入口，入口页 D3 源码覆盖。
+- 面板 role=dialog、aria-modal、aria-label，聚焦面板；关闭按钮/Esc/遮罩
+  由 audio.test.ts:384-412 覆盖。
+
+D2 PASS（实测 360 + CSS 静态）
+- 真实 dev iframe 360 宽（内容视口 356，竖滚动条占 4px）：
+  `.audio-overlay` computed z-index=30、padding 0；`.audio-panel` width=356、
+  clientWidth=356、scrollWidth=356，documentElement scrollWidth=clientWidth=356；
+  无横向溢出。
+- styles.css:1408-1523：audio-overlay z30（game-sticky 6、tutorial 40 之间），
+  panel max-height 100vh 再 100dvh，≤560 面板通栏；
+  pointer:coarse 下 range min-height 44、checkbox 44×44；audio-close 44×44；
+  overlay/panel 使用 safe-* 四角。
+- nit：audio.test.ts 没有 audio CSS 契约（z-index/360/44/safe）测试；本次是
+  手动 iframe 实测，建议补 source contract 或 Playwright 视口断言。
+
+D3 PASS
+- range min=0 max=100 step=1，onChange Number(value)/100；显示 Math.round*100；
+  muted 时只禁用 unavailable，不因 muted 禁用滑杆；符合规格允许。
+- 无键盘级进（range 默认行为）是交接已记录边界，不是本轮缺陷。
+
+D4 PASS（除 C 的 dispose 时机）
+- App.tsx:188-200 首次 pointerdown/keydown 只注册一次，onGesture 内 remove 两个
+  监听并 cleanup remove；不自动 unlock、不 new Audio、不 fetch/权限。
+- 生产 build 在 pointerdown 前 __audioLog=[]，pointerdown 后才有 BGM；
+  不自动播放 PASS。
+- 源码 audio 目录没有 fetch/XMLHttpRequest/WebSocket；资源 URL 只由 manifest
+  BASE_URL 拼本地 audio/；不联网 PASS。
+- 但在 StrictMode dev 下该 controller 被 dispose，见 C。
+
+------------------------------------------------------------
+六、E 回归与范围
+------------------------------------------------------------
+PASS。
+- 旧测试：git diff --name-only HEAD -- '*test*' -> 空；旧 703 条未删/跳过/放宽。
+- 总数：63 文件 / 724 条 = 703 + audio.test.ts 21；实际输出通过。
+- 05E/08A 旧契约仍在 724 全绿中执行；未改旧断言。
+- 依赖：git diff --name-only HEAD -- package.json pnpm-lock.yaml apps/web/package.json
+  -> 空；没有新增依赖。
+- 禁改范围：git diff --name-only HEAD -- packages apps/server apps/web/src/net
+  '**/steps.ts' -> 空；PROTOCOL_VERSION 未动。
+- build：141 modules；dist/audio 6 文件 391,652 bytes；index.html 只引用
+  /assets/index-CElliT67.js 与 /assets/index--JyM_5JG.css，无新增外链。
+- 08C 改动仅 App/GameView/Lobby/styled + public/audio + scripts + audio/** +
+  audio.test.ts；无 commit。
+
+------------------------------------------------------------
+七、must-fix（均可复现）
+------------------------------------------------------------
+M1. StrictMode 开发环境 dispose 后 unlock 永久失效
+文件/行：apps/web/src/main.tsx:9、App.tsx:185、audio.ts:167-168/237-240。
+复现：见第四节：Vite dev 5174 + window.Audio 探针，pointerdown 后 log 仍 [];
+production build 8125 同操作 log 有 new/play BGM。
+影响：开发/StrictMode 测试环境 BGM 与全部音效永不响；生产 build 不受影响。
+修法：去掉 React unmount cleanup 的 dispose，改 pagehide/beforeunload；
+不要在没有重建 controller 的情况下在 StrictMode cleanup 里 dispose。
+判定：must-fix（dev-only，但代码行为确定错误）。
+
+M2. bgm-loop.wav 有 -21.6 直流偏移
+文件/行：apps/web/scripts/make-audio.mjs:36-40/71-95/111-134；
+apps/web/public/audio/bgm-loop.wav；audio.test.ts:171-181。
+复现：
+  node - <<'NODE'
+  const b=require('fs').readFileSync('apps/web/public/audio/bgm-loop.wav');
+  let s=0; for(let i=44;i<b.length;i++) s+=b[i]-128;
+  console.log(s/(b.length-44));
+  NODE
+  -> -21.626；peak deviation 83，first/last 128。
+原因：25% 方波均值非 0；测试只查峰值/首尾，不查均值。
+影响：8-bit 波形整体偏置，A2“无直流偏移”失败，可能带来低频偏移/播放链 DC。
+修法：改用 50% 占空比，或每音/整轨去均值（DC blocking）后编码；重跑脚本、
+更新 AUDIO_SHA256/BYTES 与测试，并给 A2 加均值阈值断言。
+
+M3. App 300 事件 + recent 50 导致旧事件重播
+文件/行：App.tsx:115-117（events slice(-300)）、App.tsx:204-213
+（deriveSfxEvents(events) + takeNewSfx）、audio.ts:257-271（recent limit 50）。
+复现（仓库外临时 vitest）：
+  let recent=[]; let seen=new Set(); let replays=[];
+  for (let n=1;n<=60;n++) {
+    const derived=Array.from({length:n},(_,i)=>({seq:i+1,name:"tap"}));
+    for (const x of takeNewSfx(derived,recent)) {
+      if (seen.has(x.seq)) replays.push({step:n,seq:x.seq});
+      seen.add(x.seq);
+    }
+  }
+  -> step 52 重播 seq 1；step 60 前累计 replays=45。
+原因：每次 events 变化都把整个 300 条数组重新 derive，而只有最近 50 个 seq
+被视为已播；旧 seq 被排除在 seen 外后重新播放。
+影响：对局超过 50 个事件后，旧 win/lose/alert 会反复响；不是简单“重渲染一次”。
+修法：用全事件窗口（300）的 seq 集合去重，或记录 lastEventSeq 只 derive 新事件
+（同时单独维护 requestId→borrower 映射），并补 60/300 事件重复调用测试。
+
+------------------------------------------------------------
+八、should-fix（非阻塞但应修）
+------------------------------------------------------------
+S1 muted 先于 unlock 仍播放 BGM
+- audio.ts:167-183 unlock 不检查 current.muted；audio.ts:184-193 setMuted 只在
+  bgm 已存在时 pause。
+- 探针：controller.setMuted(true); controller.unlock();
+  -> FakeAudio.playCalls=1、pauseCalls=0（muted 真，仍播放）。
+- 影响：上局静音、刷新后首次手势仍出 BGM；与“静音”预期冲突。
+- 修法：unlock 创建 BGM 后 `if (!current.muted) safePlay(bgm)`；补
+  muted→unlock→playCalls=0、unmute→playCalls=1 测试。
+
+S2 play reject 后 active 泄漏
+- audio.ts:233 active.push 后 safePlay；:135-144 catch 只 markUnavailable，
+  不 removeEnded；reject 的音频不会触发 onended，留在 active 直到第 4 个/dispose。
+- 影响：reject 后已 unavailable，后续不再播，用户影响有限；但 active 槽位/对象
+  未释放，违反“最多 3 个音效”的资源语义。
+- 修法：在 play promise reject 分支 removeEnded(audio)（或传清理回调），再
+  markUnavailable；补 test。
+
+S3 B5 的真实时序/300 证据不足 + GameOver null 未测
+- audio.test.ts:334-352 把 LOAN_REQUESTED 与 CLOSED 放在同一个 derive 数组，
+  没有 App.onEvents 分批、300 条截断或 45 秒真实等待；App.tsx:115-117 的
+  300 截断只是代码推断，不是证据。
+- engine 的 LOAN_REQUESTED audience [borrower,lender] 和 LOAN_REQUEST_CLOSED
+  公开事件（engine.ts:991-1001/1063）是支持映射的，但请补 App 级测试或实际
+  两批 events 的模拟；若事件风暴超过 300，映射会丢，应在规格里说明。
+- GAME_OVER winnerId=null 测试缺失；本实现 null→lose 与 engine（全员破产）
+  一致，但请补一条 null 用例，防止未来误改。
+- ROUND_SETTLED 测试是人为事件；engine 只有 ROUND_STARTED（engine.ts:615/718），
+  当前 code 不会误播（PASS），但测试不能证明引擎存在该事件。
+
+------------------------------------------------------------
+九、nit
+------------------------------------------------------------
+N1 audio.test.ts:171-181 的 A1 只查峰值/首尾，不查 PCM 均值/DC；M2 修复后
+   应加均值和首尾一起断言，避免“全绿但有 DC”。
+N2 audio.test.ts 没有 audio-overlay/panel 的 CSS 契约（z-index 30、360 不溢出、
+   coarse 44px、safe-area）；本次手动 iframe 实测通过，建议补 source contract
+   或 Playwright。
+N3 D3 的 0–100↔0..1 映射没有 UI 测试；代码正确，补一条 onChange 值断言。
+N4 audio.test.ts:256-269 只覆盖 BGM play reject；没有覆盖 SFX reject 的
+   active 清理（S2），也没有覆盖“createAudio 抛异常/没有 Audio”的 B 项。
+N5 audio.test.ts:334-352 的 LOAN 测试同一批；S3 的 App 级/300 时序测试缺失。
+N6 audio.test.ts:365-382 的 takeNewSfx 只测一次调用；M3 需要重复调用/300 窗口。
+N7 AudioPanel 的 Esc 同时有 panel onKeyDown 与 window keydown；实际关闭是幂等的，
+   但可能触发两次 onClose；不阻塞，可后续收紧为只保留一个。
+N8 首次手势前的事件音效会被跳过；交接已写明，属策略取舍，不是缺陷。
+
+------------------------------------------------------------
+十、最终结论
+------------------------------------------------------------
+需修复。
+M1/M2/M3 必须先关：
+1) StrictMode dev 的 dispose 时机；
+2) bgm-loop.wav 直流偏移（改合成/去均值并更新 hash/manifest/测试）；
+3) App 300 事件与 recent 50 的去重重播。
+S1/S2/S3 建议同轮修：muted 先于 unlock、reject active 清理、300/真实时序测试。
+D/E 回归通过，A1/A3/A4 通过；B5 的映射函数基本正确，但 300 实时序证据不足；
+T13 类自证问题不存在于此单元（audio.test.ts 是实际行为测试），但仍需补上述缺口。
+
+复核基线 8e7eaf7；08C 实现为工作区未提交改动；本轮未改源码、未 commit。

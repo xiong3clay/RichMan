@@ -1,0 +1,107 @@
+单元 08C 成果报告（音频 / 音量 / 静音 + 复核修复）
+================================================================
+日期：2026-11-07
+基线：HEAD 8e7eaf7（08C 音频规格）+ 工作区未提交 08C 实现。
+本轮结束：63 文件 / 731 条；已提交 d7b67f8；无新增依赖。
+
+一、复核修复（M1/M2/M3/S1/S2/S3 + nit）
+M1 StrictMode dev 被 dispose：
+- 删除 App.tsx 的 `useEffect(() => () => audio.dispose(), [audio])`，
+  改为 pagehide 时 dispose（只移除监听，不在 React cleanup 里释放 controller）。
+- dev Vite + React.StrictMode 实测（window.Audio 探针）：
+  strictmode_before=[]
+  strictmode_after_pointerdown=["new:/audio/bgm-loop.wav","play:/audio/bgm-loop.wav"]
+  证明首次 pointerdown 后真的 new Audio + play BGM，不再被 StrictMode cleanup 永久 dispose。
+M2 BGM 直流偏移：
+- make-audio.mjs 的 addNote 改为逐样本减 dc=(2*duty-1)，并下调振幅
+  melody 30、bass 20、shaker 6，避免补偿后撞 100 钳位。
+- 6 个文件硬指标全部通过：
+  bgm  mean=0.043  peak=70  first=128 last=128  duration=16.000s bytes=352844
+  tap  mean=-0.077 peak=70  first=128 last=128  0.060s 1367
+  submit mean=-0.019 peak=70 first=128 last=128 0.140s 3131
+  win  mean=0.029  peak=70  first=128 last=128  0.600s 13274
+  lose mean=0.052  peak=70  first=128 last=128  0.500s 11069
+  alert mean=0.050 peak=70  first=128 last=128  0.450s 9967
+  连跑两次 sha256 完全一致；BGM 新 sha256 见下。
+- manifest 的 AUDIO_SHA256.bgm 已更新；AUDIO_BYTES.bgm 仍 352844；
+  audio.test.ts A1 增加 6 个文件的 PCM 均值 ≤2 断言（N1）。
+M3 事件去重窗口 50 < 300：
+- App 改为 `playedSfxSeqRef: Set<number>`，derive 仍传完整 300 条事件
+  （保留 LOAN_REQUESTED→CLOSED 的 requestId 映射），只播 Set 中不存在的 seq。
+- 新局/started/房间销毁/events=[] 时 clear Set。
+- audio.ts 新增 collectNewSfx(derived, Set)；takeNewSfx 已移除。
+- 回归测试：连续 400 批递增事件只播 400 次、300 窗口滚动后旧 seq 不重播、
+  新局 seq 1 可重播；60 批包含在 400 批内。
+S1 muted 先于 unlock：
+- unlock 创建 BGM 后 `if (!current.muted) safePlay(bgm)`；muted=true 时首次手势
+  playCalls=0，setMuted(false) 后 playCalls=1（测试通过）。
+S2 SFX reject active 泄漏：
+- safePlay 返回同步启动结果，并在 promise reject 时调用 onFailure；
+  playSfx 失败/异步 reject 都 removeEnded，并 markUnavailable。
+- 新增 activeSfxCount 只读 getter；SFX reject 测试断言 activeSfxCount=0、
+  后续 playSfx=false。
+S3 测试缺口：
+- 补 REQUESTED/CLOSED 两批、300 窗口内仍播 lose；
+- 补 >300 条窗口 REQUESTED 被淘汰、映射丢失的“已记录边界”测试；
+- 补 GAME_OVER winnerId=null → lose；
+- 补 ROUND_SETTLED dormant：引擎当前只有 ROUND_STARTED，不把 ROUND_STARTED
+  当结算，不删 ROUND_SETTLED 分支。
+nit：
+- N1 均值断言已并入 A1；
+- N4 createAudio 抛异常（null 已有 D2）与 SFX reject 已补；
+- N6 collectNewSfx 重复调用/400 批已补；
+- N7 未收敛（AudioPanel 的 panel onKeyDown 与 window keydown 仍可能双触发，
+  onClose 幂等；按范围未改 AudioPanel UI 结构，留作 nit）。
+- N2（AudioPanel CSS 契约测试）、N3（滑杆 0–100↔0..1 UI 映射断言）未在本轮补。
+
+二、素材来源声明
+全部由 apps/web/scripts/make-audio.mjs 合成，无第三方采样；
+随项目仓库分发（与源码同一许可证）。
+
+三、sha256（重跑两次一致）
+bgm-loop.wav   811811013ae823036b41be3d5996c712fbd4e6bf5011b7db5952d19bc02bf3ac
+sfx-tap.wav    a543ab4ae558027b9a81b3421ac83cb24510d3aa4d062295a68887da884ad533
+sfx-submit.wav b4f5c8e7b50c8d5056c48b543867f9d85f16ac169dba84209285659fd3f2cbe1
+sfx-win.wav    43745cf2f4d9fb9a712869a7fefa11d60130b3a1a6aa8bc25e951c2912a773f4
+sfx-lose.wav   4a893e88b176d019ae9073fbb9897ace01b317b9e97a57af6cbacdf83128427c
+sfx-alert.wav  b932037c836bab543354f5478e4f3d1fb3679068ae3b74c9567eda9e3d0a2d7d
+
+四、改动文件
+修改：apps/web/src/App.tsx、apps/web/src/audio/audio.ts、
+      apps/web/tests/audio.test.ts、apps/web/scripts/make-audio.mjs、
+      apps/web/src/audio/manifest.ts、apps/web/public/audio/bgm-loop.wav、
+      四份 08C 交接、项目当前状态。
+未改 packages/**、apps/server/**、net/**、steps.ts、协议、package.json/pnpm-lock.yaml；
+未新增依赖；未改 AudioPanel.tsx UI 结构。
+
+五、真实命令与数字
+node apps/web/scripts/make-audio.mjs（连跑两次）
+  输出同上，6 文件 mean/peak/first/last/duration/bytes/sha256 完全一致。
+pnpm -s test
+  Test Files  63 passed (63)
+       Tests  731 passed (731)
+    Duration  6.06s
+pnpm typecheck
+  tsc --noEmit -p tsconfig.json，exit 0
+pnpm -s build
+  ✓ 141 modules transformed.
+  apps/web/dist/index.html                   0.49 kB │ gzip:   0.31 kB
+  apps/web/dist/assets/index--JyM_5JG.css   18.07 kB │ gzip:   4.10 kB
+  apps/web/dist/assets/index-DIQs21ey.js   425.04 kB │ gzip: 124.87 kB
+  ✓ built in 402ms
+dist/audio：6 文件，总 391,652 bytes（bgm 仍 352844）。
+
+六、测试增量
+08C 初版 audio.test.ts 21 条；复核新增 7 条（S1、S2、N4、C3/collect、
+M3 400 批、S3 两批、S3 >300、S3 GAME_OVER/ROUND），共 28 条；
+旧 703 条未删除、未改、未跳过、未放宽；总 731 条 / 63 文件。
+
+七、已知边界
+- 8-bit 22050Hz 自制复古音质；无曲目切换/淡出；滑杆无键盘级进。
+- 无头/Node 无真实音频设备；真机耳机、静音键、后台切换未验证。
+- 首次手势前事件音效跳过（不自动播放取舍）。
+- LOAN_REQUEST_CLOSED 映射依赖 300 条事件窗口；若 REQUESTED 被 300 条风暴
+  淘汰，映射丢失，该 lose 不播（已有边界测试）。
+- engine 当前无 ROUND_SETTLED（只有 ROUND_STARTED）；分支 dormant。
+- N7/N2/N3 未处理，见第一节 nit；N1（pagehide persisted 也 dispose）与 N2 同上。
+- 已提交 d7b67f8。

@@ -1,0 +1,65 @@
+单元 08C 下一阶段交接（音频 / 音量 / 静音 + 复核修复）
+================================================================
+基线：HEAD 8e7eaf7；本轮结束 63 文件 / 731 条，已提交 d7b67f8（08C 实现）+ 本 docs 提交。
+
+一、结构与入口（复核后）
+- apps/web/scripts/make-audio.mjs：确定性合成 6 个 WAV；addNote 做 DC 补偿，
+  BGM 振幅 melody 30 / bass 20 / shaker 6；脚本自检 mean/peak/first/last。
+  改素材必须重跑并同步 manifest.ts 的 AUDIO_SHA256 / AUDIO_BYTES。
+- apps/web/src/audio/manifest.ts：AUDIO_MANIFEST、6 文件 sha256/字节。
+  当前 bgm sha256 811811013ae823036b41be3d5996c712fbd4e6bf5011b7db5952d19bc02bf3ac。
+- apps/web/src/audio/audio.ts：
+  createAudioController({storage?, createAudio?, now?})；
+  AudioController：state/unavailable/activeSfxCount getter、getState/isUnavailable/
+  isUnlocked/subscribe/unlock/setMuted/setBgmVolume/setSfxVolume/playSfx/dispose；
+  unlock 创建 BGM 后仅 !muted 才 play；safePlay 返回同步启动结果并在 reject 时清理；
+  deriveSfxEvents(events, ownPlayerId)；collectNewSfx(derived, Set)。
+- apps/web/src/audio/AudioPanel.tsx：AudioButton + AudioPanel（UI 结构未改）。
+- App.tsx：
+  pagehide 时 dispose（不在 React cleanup dispose）；
+  首次 pointerdown/keydown unlock；
+  playedSfxSeqRef: Set<number>，derive 完整 300 条，collectNewSfx 只播新 seq；
+  events=[] / startRoom / onStarted / 房间销毁时 clear Set；
+  统一渲染 AudioPanel（z-index 30，低于教程/规则 40）；
+  入口页 AudioButton；向 Lobby/Game 传 onOpenAudio。
+- GameView/LobbyView：可选 onOpenAudio，顶栏/大厅入口。
+
+二、行为与不变量
+- 不自动播放：unlock 前不创建 Audio、不调用 play；首次 pointerdown/keydown 才 unlock。
+- muted=true 时 unlock 只创建 BGM 不 play；setMuted(false) 恢复。
+- playSfx 在 unlock 前、muted、sfxVolume=0、unavailable 时 false 且不创建。
+- 同一 now 毫秒同名去重；最多 3 个；safePlay reject 清理 active 并 unavailable。
+- 状态 {muted:false,bgmVolume:0.5,sfxVolume:0.7}，key richman.audio.v1；
+  clamp 0..1 两位小数；损坏/越界回默认并覆盖。
+- 事件音效只按本人：BET deltaCents、BANK_LOAN_DEFAULTED borrowerId、
+  LOAN_REQUEST_CLOSED REFUSED / LOAN_REQUEST_EXPIRED、DANGER_RESCUED、
+  ROUND_SETTLED、GAME_OVER winnerId（null → lose）。
+- LOAN 映射依赖同批 LOAN_REQUESTED；REQUESTED 被 300 条风暴淘汰时映射丢失，
+  该 lose 不播（已记录边界）。
+- engine 只有 ROUND_STARTED，没有 ROUND_SETTLED；分支 dormant，不得把
+  ROUND_STARTED 当结算。
+- 旧 703 条未改；audio.test.ts 28 条；未新增依赖、未改协议/服务端/引擎。
+
+三、协议/存档变化
+- 无。PROTOCOL_VERSION 仍为 1；音频状态只在 localStorage，不进 session/恢复码/快照。
+- dist/audio 由 Vite 从 public/ 拷贝；当前总 391,652 bytes。
+
+四、下一单元入口
+- 09 加固/跨网/一键发布包：
+  - 音频本地静态资源，打包时确认 dist/audio 随 dist 发布。
+  - 真机验收：耳机/静音键/后台切换/首次手势/360px。
+  - 若做音乐开关/曲目切换，扩展 AudioController，不要在组件里直接 new Audio。
+- 08C 剩余 nit（未做）：
+  N2 audio CSS 契约测试；N3 滑杆 0–100↔0..1 UI 映射；
+  N7 Esc 双触发（panel onKeyDown + window keydown，onClose 幂等）。
+- 不要回调成 takeNewSfx 50 窗口；不要用 React cleanup dispose controller；
+  不要把 BGM 振幅调回 45/30/10。
+
+五、已知边界
+- 8-bit/22050Hz 音质有限；无曲目切换/淡出；滑杆无键盘级进。
+- 无头/Node 无真实音频设备；真机未验证。
+- 首次手势前事件音效跳过。
+- 300 条事件风暴会丢 LOAN_REQUESTED→CLOSED 映射。
+- pagehide 带 persisted=true 也会 dispose，bfcache 返回后静音（N1，未修）。
+- HMR Fast Refresh remount 可能叠加新旧 controller 的 BGM（N2，开发态）。
+- 已提交 d7b67f8。
