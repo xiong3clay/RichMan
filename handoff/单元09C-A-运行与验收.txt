@@ -1,0 +1,94 @@
+单元 09C-A 运行与验收说明（备份恢复核心）
+================================================================
+日期：2026-11-08
+适用：单元 09C-A 的三个新增文件与 17 条测试；不是 09C-B 的 PowerShell 脚本验收。
+
+一、环境（本机实测）
+- OS：Windows
+- Node：v24.18.0
+- pnpm：11.7.0（corepack pnpm）
+- Vitest：5.0.5
+- 测试只用 mkdtemp(os.tmpdir())，不访问 apps/server/data，不监听 8000。
+
+二、安装 / 运行
+无需新增依赖，沿用仓库既有 pnpm 安装：
+  corepack pnpm install
+备份 CLI（不 import 进服务端运行时）：
+  node --import tsx apps/server/src/storage/backup-cli.ts <命令> <参数>
+
+三、验收命令与真实输出
+1) 单文件
+   corepack pnpm -s vitest run apps/server/tests/backup.test.ts
+   真实结果：
+     Test Files  1 passed (1)
+          Tests  17 passed (17)
+       Duration  3.11s
+     EXIT 0
+   日志：artifacts/test-logs/09C-A-backup-final.log
+
+2) 全量
+   corepack pnpm -s test
+   真实结果：
+     Test Files  66 passed (66)
+          Tests  813 passed (813)
+       Duration  48.74s
+     TEST_EXIT=0
+   说明：原 796 条全部保留且通过，新增 17 条；未跳过、未削弱。
+   日志：artifacts/test-logs/09C-A-full-test.log
+
+3) 类型检查
+   corepack pnpm -s typecheck
+   真实结果：TSC_EXIT=0（无诊断输出）
+   日志：artifacts/test-logs/09C-A-typecheck-final.log（0 字节）
+
+4) 构建
+   corepack pnpm -s build
+   真实结果：
+     ✓ 141 modules transformed
+     apps/web/dist/index.html 0.49 kB
+     apps/web/dist/assets/index--JyM_5JG.css 18.07 kB
+     apps/web/dist/assets/index-CrCvzBNf.js 425.13 kB
+     ✓ built in 198ms
+     BUILD_EXIT=0
+   日志：artifacts/test-logs/09C-A-build.log
+
+四、恢复演练步骤（T17 自动化等价流程）
+1. diskHarness() 启动真实服务（随机端口）并开一局（2 人）。
+2. 客户端发送一条 BORROW_BANK 命令，等待 command_result.ok=true。
+3. manager.persist(code)，确保 snapshot.json 已落盘。
+4. 记录 manager.exportRoom(code) 的关键字段与摘要。
+5. createBackup({root: harness.dir, outDir: <临时备份目录>})。
+6. harness.store.deleteRoom(code)，确认 rooms/<code> 不存在。
+7. restoreRoom({backupDir, root: harness.dir, code})，keptPath=null。
+8. new FileRoomStore(harness.dir).loadAll()：
+   - 得到 1 个房间；
+   - paused=true、players.online=false（loadAll 统一设置）；
+   - gameId/version/eventSeq/phase/deadlineAt/players.cents/bankLoans/
+     privateLoans/bets/commands 与 players.tokenDigest、
+     sessions.tokenDigest+recoveryDigest 全部与导出值相等；
+   - validateSnapshot 不抛；
+   - 恢复目录不生成 snapshot.bak.json。
+以上步骤由 T17 实跑通过。
+
+五、手工 CLI 冒烟（本轮附加，不改生产数据）
+- list --dir <临时备份根>：stdout 一行 JSON，exit 0。
+- cleanup --data <临时数据目录> --keep-logs 0 --dry-run：
+  stdout 一行 JSON，exit 0，临时日志文件仍在。
+（正式验收以 T15/T16 的 CLI 测试为准。）
+
+六、CLI 操作示例（09C-B 可直接复用）
+  node --import tsx apps/server/src/storage/backup-cli.ts create --data apps/server/data --out <目录>/richman-backup-20261108-120000 --with-audit --keep 10
+  node --import tsx apps/server/src/storage/backup-cli.ts verify --backup <目录>/richman-backup-20261108-120000
+  node --import tsx apps/server/src/storage/backup-cli.ts restore --data apps/server/data --backup <目录>/richman-backup-20261108-120000 --room 0042
+  node --import tsx apps/server/src/storage/backup-cli.ts restore --data apps/server/data --backup <目录>/richman-backup-20261108-120000 --room 0042 --force
+  node --import tsx apps/server/src/storage/backup-cli.ts list --dir <目录>
+  node --import tsx apps/server/src/storage/backup-cli.ts cleanup --data apps/server/data --dry-run
+
+七、验证状态与未验证项
+已验证：
+- 17 条自动化测试、全量 813 条、typecheck、build、git status 范围。
+- 备份/校验/恢复/强制恢复/回滚/清理全部在真实磁盘临时目录跑过。
+未验证：
+- 09C-B 的 PowerShell 包装、服务运行中拒绝恢复、真实生产数据目录演练。
+- 断电场景的 rename 持久性（Windows fsync 局限，见注意事项）。
+- 大目录性能（>10 房间、数百 MB 审计）未做压力测试。

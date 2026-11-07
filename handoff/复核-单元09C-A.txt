@@ -1,0 +1,244 @@
+RichMan 单元 09C-A 备份恢复核心 独立复核
+================================================
+复核员：Qoder（只读复核；未改实现/测试/交接，未 commit）
+日期：2026-11-08
+代码基线：c522bb4（09C-A 规格提交）；工作区新增 3 个未跟踪文件 + 4 份交接
+复核对象：
+  - apps/server/src/storage/backup.ts（728 行）
+  - apps/server/src/storage/backup-cli.ts（234 行）
+  - apps/server/tests/backup.test.ts（509 行，T1–T17）
+  - handoff/单元09C-A-{成果报告,运行与验收,下一阶段交接,注意事项}.txt
+  - 约束来源：file-store.ts 的 validateSnapshot/commitRoom/loadAll、atomic.ts
+
+结论：可提交（无 must-fix）
+  核心备份/校验/恢复/清理/CLI 均满足规格；T1–T17 全部通过；全量 66 文件/813 条；
+  typecheck/build 0；既有文件零修改，旧 796 条未被削弱。
+  以下 should-fix/nit 是测试覆盖与边界策略建议，不构成本轮阻塞。
+
+一、独立执行结果
+1) corepack pnpm -s vitest run apps/server/tests/backup.test.ts
+   Test Files 1 passed (1)；Tests 17 passed (17)；Duration 3.22s；EXIT 0
+   （交接记录 3.11s，差异为运行耗时，不构成缺陷）
+2) corepack pnpm -s test
+   Test Files 66 passed (66)；Tests 813 passed (813)；Duration 55.24s；EXIT 0
+   （交接记录 48.74s；旧 796 条全部保留，新增 17 条）
+3) corepack pnpm -s typecheck → TSC_EXIT=0（无诊断）
+4) corepack pnpm -s build → BUILD_EXIT=0；141 modules；built in 205ms
+5) git status：仅 3 个新增源码/测试 + 4 份 09C-A 交接；git diff --stat 为空；
+   没有 apps/server/src 既有文件、packages、apps/web、协议、package.json/依赖改动。
+6) 未发现旧 796 条被删除、skip 或放宽；全量 813 = 796 + 17。
+7) 交接里的 09C-A 日志与正文数字一致：
+   09C-A-backup-final.log 17/17、3.11s；
+   09C-A-full-test.log 66/813、48.74s；
+   09C-A-typecheck-final.log 0 字节；
+   09C-A-build.log 198ms、141 modules。
+
+二、A. 一致性备份（PASS）
+代码事实：
+- createBackup 只读整个 snapshot.json 字节（backup.ts:290-297），先写每个房间的
+  snapshot/events，再在最后写 manifest（:335-338）；manifest 用 writeFileAtomic。
+- outDir 不存在时记录 outCreated=true；任何异常时只 rm 自己创建的 outDir
+  （:229-244、:340-342）。outDir 已存在且非空 → BACKUP_OUT_EXISTS，不删除内容。
+- roomCodes 指定时先校验全部 code/存在性（:246-265），不会先写一半再报缺房。
+- 无任何房间成功 → BACKUP_EMPTY；指定码缺房 → RESTORE_ROOM_NOT_FOUND（规格如此）。
+- T1/T2/T3/T4/T5 覆盖字节一致、audit、非空 outDir、空数据清理、坏房间 skip。
+独立对抗：
+  EMPTY_CREATE → BACKUP_EMPTY，out 不存在（false）。
+  OUT_EMPTY_CREATE → rooms=1，manifest 存在（已有空目录允许）。
+  OUT_NONEMPTY → BACKUP_OUT_EXISTS，keep.txt 仍为 "keep"。
+  MIXED（0042 好 + 0099 坏）→ rooms=["0042"]、skipped=["0099"]。
+结论：A PASS。边界 nit：outDir 是“已存在的空目录”时中途失败不会清理已写入的
+部分文件；规格只要求清“本轮创建的 outDir”，当前行为与规格字面一致，但 09C-B
+应提示用户不要复用已有空目录。
+
+三、B. 校验强度（PASS）
+代码事实：
+- parseManifest（backup.ts:117-216）校验 backupFormatVersion=1、createdAt、
+  sourceRoot、rooms/roomCount 一致性、code 正则、重复 code、snapshotSha256 格式、
+  snapshotBytes/audit.bytes 非负安全整数、audit.file 固定 events.ndjson。
+- verifyRoomFiles（:363-423）按 文件存在/普通文件 → 大小 → sha256 → JSON.parse
+  → validateSnapshot → audit 声明则大小/sha 校验 的顺序；
+  manifest 读取失败返回 manifest=null + problems，不抛。
+- T6 改一字节 → sha256 problem；T7 改 cents 并同步 manifest hash → validate problem。
+独立 manifest 矩阵（真实临时备份）：
+  FORMAT_VERSION 2 → ok=false，“backupFormatVersion 必须为 1”
+  DUPLICATE_CODE → ok=false，“manifest 中房间码重复：0042”
+  ROOM_COUNT_MISMATCH → ok=false，“roomCount 与 rooms 数量不一致”
+  SHA_UPPER → ok=false，snapshotSha256 非法
+  BYTES_FRACTION / BYTES_NEGATIVE → ok=false，snapshotBytes 非法
+  SNAPSHOT_BYTES=-1 → ok=false；SNAPSHOT_BYTES=1e9 → 大小不匹配
+  AUDIT_MISSING（manifest 声明但文件删除）→ ok=false，读取 events.ndjson 失败
+  AUDIT_BAD（file=other）→ ok=false，audit 字段非法
+结论：B PASS。两个边界：
+  (a) 空 manifest（rooms=[]、roomCount=0）当前 verifyBackup 返回 ok=true；
+      规格未要求拒绝空备份，createBackup 也不会生成，故列为 nit；
+  (b) parseManifest 不强制 rooms/skipped 已排序；规格格式要求排序，但校验清单
+      没列排序，列为 nit。
+
+四、C. 恢复安全（PASS）
+代码事实：
+- 先 verifyBackup（backup.ts:456-465），备份不合法 → RESTORE_VERIFY_FAILED，
+  details.problems 原样带；目标存在且 !force → RESTORE_TARGET_EXISTS，目标不动
+  （:478-480）；force 先 rename 到 rooms/restore-keep-<UTC>-<code>（:482-490）。
+- 写入 snapshot（+audit），再读回复校验大小/sha/validateSnapshot（:493-504）；
+  失败 rm 新目标、把 keptPath rename 回原位置（:505-521）；rollback 失败时错误
+  消息带“恢复失败且回滚旧档失败”及 keptPath/target（:511-515）。
+- 不修改 snapshot 字段、不写 snapshot.bak、不伪造 events；code 正则拒绝穿越。
+独立对抗：
+  RESTORE_TARGET_FILE（目标为普通文件、无 force）→ RESTORE_TARGET_EXISTS，
+  文件内容仍为 "OLD-TARGET-FILE"。
+  路径穿越 CLI `--room ../0042` → BAD_ARGUMENT exit 1，未创建目标。
+  T8/T10/T11：空 root 恢复、force 保留旧档、备份校验失败目标不动，均 PASS。
+  故障注入（仓库外副本，在 restore 写入后抛 INJECTED_AFTER_WRITE）：
+    {"code":"RESTORE_VERIFY_FAILED","message":"恢复后复校验失败：INJECTED_AFTER_WRITE",
+     "oldRestored":true,"keptDirs":[],"targetExists":true}
+    即 post-write 失败确实删新目录并回滚旧档；副本已还原 sha256。
+  软链接对抗：
+    backupDir 为 junction 到有效备份 → verify ok/restore 成功；
+    outDir 为 junction 到空目录 → create 写穿到链接目标（manifest 在目标可见）。
+    规格未要求拒绝 symlink；当前实现用 stat/readdir/path.resolve，会跟随。
+结论：C PASS。should-fix：T11 只覆盖“verify 失败前置”，没有覆盖
+“写入后复校验失败/回滚失败”的自动化测试；本次用副本故障注入验证了回滚路径，
+但生产测试缺该回归。若 backups/outDir 可能不受信任，建议用 lstat/realpath
+拒绝 symlink（见 should-fix）。
+
+五、D. 清理安全（PASS）
+代码事实：
+- cleanupData 只处理四类：logs/server-*.log 与 logs/tunnel-*.log（各自 keepLogs）、
+  backups/richman-backup-*（listBackups 按 createdAt）、rooms/corrupt-*（按名字
+  数字时间戳）、.tmp 下普通文件（mtime 早于 now-tmpMaxAgeMs）；不删除 rooms/<code>、
+  run/、backups 根目录本身、restore-keep-*、.tmp 目录（:589-728）。
+- 参数负数/非整数 → CLEANUP_BAD_ARGUMENT；pruneBackups keep=0/负数/小数 →
+  PRUNE_KEEP_INVALID（:578-580）。
+- dryRun：tmp 计数保留、logs/backups/corrupt 只跳过删除，removed 数组为空。
+独立对抗（cleanupFixture 风格）：
+  CLEANUP keepLogs=1/keepBackups=1/keepCorrupt=1：
+    tmpFilesRemoved=2；logsRemoved=server-1/2；backupsRemoved=richman-backup-2/1；
+    corruptRemoved=两个较旧 corrupt；保留 rooms/0042、run/server.json、
+    backups 根目录、最新一份 corrupt；tmp 只剩 new。
+  CLEANUP_DRY：tmpFilesRemoved=1，三个 removed 数组为空，文件未删。
+  CLEANUP_NEGATIVE / CLEANUP_FRACTION → CLEANUP_BAD_ARGUMENT；
+  PRUNE_ZERO → PRUNE_KEEP_INVALID。
+  keep=0（cleanupData）：删除四类可删项，rooms/0042、run/server.json、目录本身保留。
+结论：D PASS。should-fix：单项 unlink/rm 失败被 catch 吞掉，CleanupResult 只有
+removed 列表，没有失败计数/错误字段（backup.ts:641-646、659-665、686-690、
+713-721；规格要求“失败计数/错误不上抛，返回结果里能看出来”）。本次并未成功
+制造锁文件删除失败（Windows 锁行为不稳定），按代码审查提出；建议在
+CleanupResult 增加 failed/errors 或文档明确“removed 缺失=可能失败”，09C-B
+不要把“数组为空”当成“无内容”。这是可观测性 should-fix，不是数据安全 must。
+
+六、E. CLI 契约（PASS）
+代码事实：
+- parseArgs（backup-cli.ts:39-76）拒绝未知/缺值/位置参数；`--keep -1`、
+  `--tmp-hours -1` 作为值进入数值校验并报 BAD_ARGUMENT；`--room` 先做 4–8 位
+  数字校验，核心再校验一次。
+- stdout 只由 emit 写一次 JSON；进度/警告仅 stderr（create prune 警告）。
+- 退出码：0 成功；1 运行失败/参数错误/VERIFY_FAILED；2 RESTORE_TARGET_EXISTS、
+  BACKUP_OUT_EXISTS；create --keep 在成功后对 out 父目录 prune。
+独立输出（均 stdout 恰好 1 行）：
+  verify 有效备份 → EXIT 0，{"ok":true,"command":"verify","rooms":1,"problems":[]}
+  restore 目标普通文件 → EXIT 2，code=RESTORE_TARGET_EXISTS，details.target
+  restore --room ../0042 → EXIT 1，code=BAD_ARGUMENT
+  create --out 已存在非空 → EXIT 2，code=BACKUP_OUT_EXISTS
+  create --keep -1 → EXIT 1，code=BAD_ARGUMENT
+  cleanup --keep-logs -1 → EXIT 1，code=BAD_ARGUMENT
+结论：E PASS。
+
+七、F. 变异探针（仓库外副本，逐组还原，sha256 前后一致）
+副本基线：backup.test.ts 17/17 绿（4.01s/3.07s）。
+M1 删掉 verifyRoomFiles 的 sha256 比较：
+  T6 红：FAIL ... T6 verify_detects_hash_tamper
+        AssertionError: expected true to be false；backup.test.ts:217:27
+  Tests 1 failed | 16 skipped (17)
+  backup.ts sha256 前后：a7b620bbe6e184d195f2624f81ec2a7f0b5461b244f0a73aa003f03f727408f5
+  还原后 diff 完全一致。
+M2 删掉 verifyRoomFiles 的 validateSnapshot 调用：
+  T7 红：FAIL ... T7 verify_detects_invalid_snapshot
+        AssertionError: expected true to be false；backup.test.ts:236:29
+  Tests 1 failed | 16 skipped (17)
+  sha256 前后同上；还原一致。
+M3 force 分支不 rename 原目录：
+  T10 红：FAIL ... T10 restore_force_keeps_original
+        ENOENT: ...\restore-keep-20261108-123456-0042\snapshot.json；
+        backup.test.ts:295:11
+  Tests 1 failed | 16 skipped (17)
+  sha256 前后一致。
+M4 cleanup 改成匹配所有 rooms 子目录：
+  T13 红：FAIL ... T13 cleanup_retention
+        expected [Array(3)] to have a length of 2 but got 3；
+        backup.test.ts:400:33
+  Tests 1 failed | 1 passed | 15 skipped (17)
+  sha256 前后一致。
+副本最终还原后 17/17 绿。
+附加故障注入（副本：restore 写入后抛 INJECTED_AFTER_WRITE）：
+  RESTORE_VERIFY_FAILED；oldRestored=true；keptDirs=[]；targetExists=true；
+  说明 post-write 失败回滚旧档有效。副本备份已还原 sha256。
+注意：故障注入是副本行为，不是生产代码改动；仅为验证回滚分支。
+
+八、G. 对抗场景汇总（真实临时目录，不碰 apps/server/data）
+1) manifest snapshotBytes=-1 → manifest 非法；
+   1e9 → verify 大小不匹配（期望 1e9，实际 1314）。
+2) audit 声明存在但文件缺失 → verify ok=false，读取 events.ndjson ENOENT。
+3) restore 目标为普通文件（无 force）→ RESTORE_TARGET_EXISTS，字节不变。
+4) backupDir junction → verify/restore 跟随成功；outDir junction 到空目录 →
+   create 写穿到目标；规格未禁止，列为 should-fix/nit。
+5) 空数据目录 create → BACKUP_EMPTY，且新建 outDir 已清理。
+6) 两房间一坏 → 好房间成功、坏房间进 skipped，不中断。
+7) --out 已存在空目录 → 允许创建；非空目录 → BACKUP_OUT_EXISTS，内容不变。
+补充：空 manifest（rooms=[]）verify ok=true；未发现数据丢失/越权后果，列 nit。
+
+九、Must-fix
+无。
+未发现会导致：恢复覆盖唯一现存档、备份字节不一致、manifest 最后写失败仍被当完整、
+目标未 force 被修改、清理误删 rooms/<code>/run/backups 根、CLI 退出码错等
+数据安全/契约级缺陷。
+
+十、Should-fix
+S1 CleanupResult 缺少失败/错误信息（可观测性）
+   位置：backup.ts:641-646、659-665、686-690、713-721；接口 :52-57。
+   规格第 120 行要求“失败计数/错误不上抛（返回结果里能看出来）”；当前单项
+   unlink/rm 失败被 catch 吞掉，只从 removed 数组缺席，调用方无法区分“未选中”
+   与“删除失败”。建议增加 failed/errors 或明确文档；09C-B 不要只凭数组为空判断。
+S2 恢复 post-write 校验/回滚缺少自动化回归
+   位置：backup.ts:493-521；T11 backup.test.ts:301-318 只覆盖 verify 前置失败。
+   本次副本故障注入证明旧档可回滚，但生产测试没有覆盖“写入后 validate/回滚失败”
+   与“回滚本身失败”的错误信息；建议补测试（T13/T14 或 T18）。
+S3 symlink/junction 策略未定义（路径安全）
+   位置：createBackup:232-244（stat/readdir）；verify/restore path.resolve
+   :425-450。实测 backupDir junction 可读、outDir junction 会写穿。若 09C-B
+   的备份目录可能由不可信用户指定，建议 lstat/realpath 拒绝 symlink，或明确
+   跟随策略；当前不算规格违反。
+S4 空 manifest verify 通过
+   位置：parseManifest:181-187、verify:436-439。实测 rooms=[]、roomCount=0
+   返回 ok=true。createBackup 不会生成空备份；建议决定是否让 verify 拒绝空备份，
+   或文档说明“空备份可 verify、restore 必然 ROOM_NOT_FOUND”。（nit 也可）
+S5 dryRun 只保留 tmp 计数
+   位置：cleanupData:639-646、656-665、684-690。dryRun 下 logs/backups/corrupt
+   的 removed 数组为空，没有各自“将删除数量”；规格“计数保留”是否包含三类，
+   建议明确。T14 已按当前解释断言。
+S6 回滚失败 details 只含原错误
+   位置：backup.ts:511-515。消息含 rollback 错误，但 details.problems 只放原错误；
+   人工排查时建议同时放 rollbackError/keptPath（当前已可诊断，属 nit 偏 should）。
+
+十一、Nits / 遗留风险
+- `restoreRoom` 目标为普通文件 + force 会 rename 文件到 kept 再建目录；无 force
+  已正确拒绝；force 的“文件变目录”语义未在规格/测试中定义，建议补文档。
+- `restoreRoom` 复制 audit 后未重新校验 audit 文件；规格只要求复校验 snapshot。
+- `createBackup` 复用已存在空 outDir 时中途失败会留下部分 room 文件（规格只要求
+  清本轮创建的 outDir）；09C-B 应使用全新 outDir。
+- verifyBackup 不强制 rooms/skipped 排序（格式要求排序，校验清单未列）。
+- `pruneBackups` 的 now 参数未使用；不影响当前排序语义。
+- T13/T14 没覆盖 cleanup 单项删除失败；与 S1 相关。
+- 大目录/数百 MB 审计、断电 rename 持久性、真实生产数据未测（交接已列）。
+- 真机/09C-B PowerShell/服务运行中拒绝恢复/云上传/加密均未做（交接已列）。
+
+十二、结论
+可提交。核心实现、17 条测试、全量 813、typecheck/build、既有文件零修改均成立；
+must-fix 无。S1–S6 为可观测性/测试覆盖/边界策略的 should-fix，建议在 09C-B
+开始前至少处理 S1（cleanup 失败可见性）与 S2（post-write 回滚测试）。
+
+十三、清理声明
+- 只使用随机端口/临时目录；未触碰 apps/server/data、8000；未修改实现/测试/交接。
+- 所有临时服务/进程已停止；richman-09c-probe、richman-09ca-mut 及 run-* 临时目录已删除。
+- 仓库当前仅有 3 个新增源码/测试 + 4 份 09C-A 交接（未跟踪），本报告为新增复核文件；
+  git diff --stat 为空，未 commit。

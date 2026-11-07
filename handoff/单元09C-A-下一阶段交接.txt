@@ -1,0 +1,109 @@
+单元 09C-A 下一阶段交接（给 09C-B）
+================================================================
+日期：2026-11-08
+代码基线：c522bb4 + 本轮未提交的 3 个新增文件。
+下一单元：09C-B（PowerShell 备份/恢复/清理脚本、服务运行中保护、默认备份目录与文档）。
+
+一、09C-B 应直接复用的接口
+文件：apps/server/src/storage/backup.ts
+  createBackup({root, outDir, roomCodes?, withAudit?, now?})
+    → BackupManifest；outDir 必须不存在或为空；roomCodes 缺房间抛
+      RESTORE_ROOM_NOT_FOUND；一房未成功抛 BACKUP_EMPTY。
+  loadBackupManifest(backupDir) → BackupManifest（manifest 不合法抛
+    BackupError(BACKUP_MANIFEST_INVALID)）。
+  verifyBackup(backupDir) → {ok, manifest, problems}（不抛异常）。
+  restoreRoom({backupDir, root, code, force?, now?})
+    → {code, keptPath}；先 verify；目标存在且无 force → RESTORE_TARGET_EXISTS；
+    force 保留到 rooms/restore-keep-<UTC yyyyMMdd-HHmmss>-<code>；
+    写入后复校验失败会删新目录并把保留目录 rename 回去。
+  listBackups(dir) → {name,dir,createdAt,roomCount,ok}[]（createdAt 倒序）。
+  pruneBackups({dir,keep,now?}) → {removed}；keep 必须 >=1。
+  cleanupData({root,keepLogs?,keepBackups?,keepCorrupt?,tmpMaxAgeMs?,now?,
+    dryRun?}) → {tmpFilesRemoved,logsRemoved,backupsRemoved,corruptRemoved}。
+文件：apps/server/src/storage/backup-cli.ts
+  node --import tsx apps/server/src/storage/backup-cli.ts <命令>
+  create  --data <root> --out <dir> [--with-audit] [--keep n]
+  verify  --backup <dir>
+  restore --data <root> --backup <dir> --room <code> [--force]
+  list    --dir <备份根>
+  cleanup --data <root> [--keep-logs n] [--keep-backups n]
+          [--keep-corrupt n] [--tmp-hours n] [--dry-run]
+  stdout 一行 JSON，进度/警告 stderr；退出码 0/1/2（2 = 需人工：
+  RESTORE_TARGET_EXISTS、BACKUP_OUT_EXISTS）。
+  参数错误 → JSON code=BAD_ARGUMENT，exit 1。
+
+二、09C-B 脚本层必须自己做的事
+1. 服务运行中拒绝 restore：核心库只操作磁盘，不感知 HTTP 服务。
+   建议脚本先读 <root>/run/server.json + status.ps1 -Json；若 /health 健康
+   或 server.json 进程 running，则 restore 直接拒绝（exit 2，提示先 stop）。
+   不要因为“目标不存在”就允许在线恢复：内存中的房间会覆盖磁盘。
+2. 默认备份目录：<root>/backups（root 默认 apps/server/data）。
+   命名建议 richman-backup-<UTC 或本地 yyyyMMdd-HHmmss>。
+   create 的 --keep 会对 out 的父目录执行 pruneBackups；父目录应是 backups。
+3. stop 后再恢复；恢复完成后启动服务，房间会在 loadAll 中 paused=true、
+   online=false，需要房主 resume_game 继续（不要自动 resume）。
+4. cleanup 的日志默认保留每类 20 个（server-* 与 tunnel-* 分别计），
+   备份 10、corrupt-* 5、.tmp 普通文件 24h；--dry-run 先给用户看。
+5. 备份目录绝不可挂静态目录或上传公网：其中 snapshot 含 tokenDigest/
+   recoveryDigest（不是原文，但仍是身份摘要）。
+
+三、数据流与恢复语义
+- 一致性点：服务端 commitRoom 用整文件 rename 替换 snapshot.json；
+  createBackup 只读整个 snapshot.json 字节，因此读到的是某次完整提交。
+- 备份目录：manifest.json 最后写；中途崩溃不会留下“看起来完整”的备份。
+- 恢复只复制 snapshot.json（+可选 events.ndjson），不写 snapshot.bak.json，
+  不改 savedAt/paused/任何字段；下次服务提交会自然生成 bak。
+- 恢复后必须暂停再继续：loadAll 统一置 paused=true、online=false。
+- 审计缺行：loadAll 的 checkAudit 只告警、保留快照，不重建 events.ndjson。
+- force 保留目录不自动清理；cleanupData 只清 rooms/corrupt-*，不会动
+  restore-keep-*（需要人工或后续脚本单独保留策略）。
+
+四、不可破坏的不变量
+- 备份/恢复必须复用 validateSnapshot；不得另写结构校验。
+- 恢复必须先 verify 再落地；目标存在且无 force 一个字节都不改。
+- force 必须先把旧目录 rename 到 restore-keep-*，失败必须回滚。
+- 备份/写入只能 tmp+fsync+rename；不得直接覆盖半成品。
+- cleanup 只处理 logs/server-*、logs/tunnel-*、backups/richman-backup-*、
+  rooms/corrupt-*、.tmp 普通文件；绝不碰 rooms/<code>、restore-keep-*。
+- 不新增依赖、不改 package.json/pnpm-lock/tsconfig。
+
+五、下一入口
+- 先做 09C-B 的 scripts/backup.ps1（或一组脚本），把 CLI 退出码 0/1/2
+  映射为 PowerShell 输出；补 Pester/Node 脚本测试。
+- 再做 09C-C（若拆分）：文档、版本记录、真实数据恢复演练、性能与断电风险。
+
+六、09C-B 开始前必须先处理（Qoder 复核 should-fix）
+来源：handoff/复核-单元09C-A.txt 第十节。已提交的实现是 2bd84cd，以下为增量修复。
+
+S1（必做，可观测性）
+- apps/server/src/storage/backup.ts 的 CleanupResult（:52-57）增加：
+    failed: { group: 'tmp'|'logs'|'backups'|'corrupt'; path: string; message: string }[]
+  或 failedCount: number + errors: string[]；四类删除的 catch（:641-646、659-665、
+  686-690、713-721）不再静默吞错，逐项记录且不上抛。
+- 新增测试：构造一个无法删除的目标（Windows 上可用“目录占用”或注入 rm 失败），
+  断言 failed 非空且其余项仍按保留策略处理；不得只看 removed 为空。
+- 09C-B 的 PowerShell 输出必须同时打印 removed 与 failed，并在 failed 非空时 exit 非 0。
+
+S2（必做，测试覆盖）
+- 在 apps/server/tests/backup.test.ts 增加 T18（可再加 T19）：
+  T18 用可注入的失败点让 restore 在“写入完成后的复校验”抛错，
+       断言抛出 RESTORE_VERIFY_FAILED、新目标已被删除、旧档已 rename 回原位
+       （kept 目录不存在或已回滚）。
+  T19（可选）让回滚本身失败，断言错误消息同时含“回滚失败”与 keptPath/target
+       且 details 中包含 rollback 错误（见 S6）。
+  实现方式：把 restoreRoom 内部的 verify/write/rollback 步骤抽成可注入的依赖，
+  或用模块级测试钩子（仅测试可见）——不得为了测试放宽生产校验。
+
+S3（策略决定，写文档）
+- 二选一并写进 09C-B 交接：a) 用 lstat/realpath 拒绝 backupDir/outDir 为 symlink/junction；
+  b) 明确“跟随”策略并在 README 警告不要把不可信目录作为 --out。
+- 若选 a，补一条“junction → BAD_ARGUMENT/路径不安全”的测试。
+
+S4/S5/S6（文档或小改，不阻塞）
+- S4 空 manifest verify ok=true：在 README/交接写明“空备份可 verify，restore 必然
+  RESTORE_ROOM_NOT_FOUND”，或让 verify 返回 problem；二选一，不得两头都不写。
+- S5 dryRun 目前只给 tmpFilesRemoved，logs/backups/corrupt 数组为空：在 README 写明
+  “dryRun 下三类只做保留判断不计数”，或补三个 wouldRemove 计数字段。
+- S6 回滚失败 details 增加 rollbackError 与 keptPath（与 message 保持一致）。
+- nits：force 目标是普通文件时的语义、恢复 audit 不复校验、复用已存在空 outDir
+  中途失败会留部分文件——09C-B 必须使用全新 outDir，并在文档记这三条边界。

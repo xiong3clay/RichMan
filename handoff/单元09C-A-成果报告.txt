@@ -1,0 +1,172 @@
+单元 09C-A 成果报告（备份恢复核心）
+================================================================
+日期：2026-11-08
+代码基线：c522bb4（09C-A 规格提交）
+本轮性质：只新增文件，不改任何既有源码/测试/配置/脚本/README。
+提交状态：已由 Lead 验收并提交。实现 2bd84cd（feat(09C-A)，3 文件 +1471 行）；
+本交接与 Qoder 复核报告随 docs 提交归档。
+
+一、完成项
+1. apps/server/src/storage/backup.ts（728 行）
+   一致性备份、manifest、校验、恢复、列表、保留清理；全部复用
+   apps/server/src/storage/file-store.ts 的 validateSnapshot，未另写结构校验。
+2. apps/server/src/storage/backup-cli.ts（234 行）
+   只供 PowerShell/验收调用的命令行入口，不 import 进服务端运行时。
+3. apps/server/tests/backup.test.ts（509 行，17 条测试）
+   T1–T17 全部通过；T17 用 persistence-harness.ts 的 diskHarness 真开一局、
+   打一条 BORROW_BANK 命令、备份、删房间、恢复，再 loadAll 比较关键字段与摘要。
+
+二、改动文件（git status）
+新增（未跟踪）：
+  apps/server/src/storage/backup.ts
+  apps/server/src/storage/backup-cli.ts
+  apps/server/tests/backup.test.ts
+新增交接（本轮末尾写入）：
+  handoff/单元09C-A-成果报告.txt
+  handoff/单元09C-A-运行与验收.txt
+  handoff/单元09C-A-下一阶段交接.txt
+  handoff/单元09C-A-注意事项.txt
+既有文件零修改：git diff --stat 为空。
+
+三、备份目录格式（实现值）
+<outDir>/
+  manifest.json
+  rooms/<code>/snapshot.json
+  rooms/<code>/events.ndjson   （仅 withAudit 且源文件存在时）
+manifest.json 字段：
+  backupFormatVersion=1
+  createdAt=now.toISOString()
+  sourceRoot=path.resolve(root)
+  roomCount=rooms.length
+  rooms[]：code/savedAt(string)/gameId/paused/eventSeq/
+           snapshotSha256/snapshotBytes/audit(null 或
+           {file:'events.ndjson',bytes,sha256})
+  skipped[]：{code, reason(前 200 字符)}
+rooms 按 code 升序，skipped 按 code 升序；manifest 使用 2 空格缩进 + 末尾换行。
+注意：现有 snapshot.savedAt 是 number，规格的 BackupRoomEntry.savedAt 是 string，
+实现按规格写 String(snapshot.savedAt)，未改存档内容。
+
+四、backup.ts 导出（真实签名）
+export type BackupErrorCode = 'BACKUP_OUT_EXISTS'|'BACKUP_EMPTY'|
+  'BACKUP_MANIFEST_INVALID'|'BACKUP_FILE_INVALID'|'BACKUP_HASH_MISMATCH'|
+  'RESTORE_TARGET_EXISTS'|'RESTORE_ROOM_NOT_FOUND'|'RESTORE_VERIFY_FAILED'|
+  'PRUNE_KEEP_INVALID'|'CLEANUP_BAD_ARGUMENT';
+export class BackupError extends Error { readonly code: BackupErrorCode;
+  readonly details?: unknown; constructor(code, message, details?) }
+export interface BackupRoomEntry { code; savedAt; gameId; paused; eventSeq;
+  snapshotSha256; snapshotBytes; audit }
+export interface BackupManifest { backupFormatVersion:1; createdAt; sourceRoot;
+  roomCount; rooms; skipped }
+export interface CleanupResult { tmpFilesRemoved; logsRemoved; backupsRemoved;
+  corruptRemoved }
+export async function createBackup(opts:{root;outDir;roomCodes?;withAudit?;
+  now?}): Promise<BackupManifest>
+export async function loadBackupManifest(backupDir: string):
+  Promise<BackupManifest>            // 辅助导出，供 09C-B 读取摘要
+export async function verifyBackup(backupDir: string):
+  Promise<{ok; manifest; problems}>  // 不抛异常
+export async function restoreRoom(opts:{backupDir;root;code;force?;now?}):
+  Promise<{code; keptPath}>
+export async function listBackups(dir: string):
+  Promise<{name;dir;createdAt;roomCount;ok}[]>
+export async function pruneBackups(opts:{dir;keep;now?}):
+  Promise<{removed}>
+export async function cleanupData(opts:{root;keepLogs?;keepBackups?;
+  keepCorrupt?;tmpMaxAgeMs?;now?;dryRun?}): Promise<CleanupResult>
+（规格称“五个导出函数”，实际主函数为 create/verify/restore/list/prune/cleanup
+ 六个，另有 loadBackupManifest 辅助。）
+
+五、CLI
+命令：
+  create  --data <数据目录> --out <备份目录> [--with-audit] [--keep <n>]
+  verify  --backup <备份目录>
+  restore --data <数据目录> --backup <备份目录> --room <code> [--force]
+  list    --dir <备份根目录>
+  cleanup --data <数据目录> [--keep-logs n] [--keep-backups n]
+          [--keep-corrupt n] [--tmp-hours n] [--dry-run]
+stdout 恰好一行 JSON；进度/警告只走 stderr。
+成功：{"ok":true,"command":"create","rooms":2,"out":"...","pruned":0}
+失败：{"ok":false,"command":"restore","code":"RESTORE_TARGET_EXISTS",
+      "message":"..."}；BackupError.details 存在时附 details。
+退出码：0 成功；1 运行失败/参数错误（code=BAD_ARGUMENT）/VERIFY_FAILED；
+        2 RESTORE_TARGET_EXISTS、BACKUP_OUT_EXISTS。
+create --keep 成功后对 out 的父目录执行 pruneBackups。
+
+六、T1–T17 结果（apps/server/tests/backup.test.ts，全部 PASS）
+T1  create_writes_manifest_and_snapshot        PASS
+T2  create_with_audit_copies_events            PASS
+T3  create_refuses_non_empty_out               PASS
+T4  create_empty_room_set                      PASS
+T5  create_skips_corrupt_room                  PASS
+T6  verify_detects_hash_tamper                 PASS
+T7  verify_detects_invalid_snapshot            PASS
+T8  restore_into_empty_root                    PASS
+T9  restore_refuses_existing_without_force     PASS
+T10 restore_force_keeps_original               PASS
+T11 restore_failure_keeps_target               PASS
+T12 prune_keeps_newest                         PASS
+T13 cleanup_retention                          PASS
+T14 cleanup_dry_run                            PASS
+T15 cli_create_and_verify_json                 PASS
+T16 cli_restore_exit_codes                     PASS
+T17 restored_game_equals_original              PASS
+T17 比较：gameId/version/eventSeq/phase/deadlineAt/players.cents/
+         bankLoans/privateLoans/bets/commands，以及 players.tokenDigest、
+         sessions.tokenDigest+recoveryDigest 全部相等；validateSnapshot 不抛；
+         恢复目录无 snapshot.bak.json。
+
+七、真实命令结果
+corepack pnpm -s vitest run apps/server/tests/backup.test.ts
+  Test Files 1 passed (1)；Tests 17 passed (17)；Duration 3.11s；EXIT 0
+  artifacts/test-logs/09C-A-backup-final.log
+corepack pnpm -s test
+  Test Files 66 passed (66)；Tests 813 passed (813)；Duration 48.74s；EXIT 0
+  （旧 796 条未减少、未跳过；新增 17 条）
+  artifacts/test-logs/09C-A-full-test.log
+corepack pnpm -s typecheck
+  TSC_EXIT=0，无输出
+  artifacts/test-logs/09C-A-typecheck-final.log（0 字节，表示无诊断）
+corepack pnpm -s build
+  ✓ 141 modules transformed；✓ built in 198ms；BUILD_EXIT=0
+  CSS/JS 文件名与 09B 基线一致（index--JyM_5JG.css / index-CrCvzBNf.js）
+  artifacts/test-logs/09C-A-build.log
+git status：仅 3 个新增源码/测试 + 4 份交接；git diff --stat 为空。
+
+八、未做项（留给 09C-B 或后续）
+- PowerShell 包装脚本（backup.ps1/create/verify/restore/list/cleanup）。
+- 服务运行中拒绝恢复的脚本层检查（核心库不感知 HTTP 服务）。
+- HTTP 管理接口、定时备份、加密、云上传。
+- README/交接以外的文档、版本号记录。
+- 真机/真实生产数据恢复演练（本轮只用 mkdtemp 临时目录）。
+
+九、已知边界
+- Windows fsync 只保证文件内容落盘，目录项 rename 的持久性依赖文件系统；
+  突然断电仍可能丢最后一次改名。
+- 备份只含 snapshot.json 与可选 events.ndjson；身份摘要（tokenDigest/
+  recoveryDigest）会随快照进入备份，备份目录不得公开或外传。
+- 恢复不改 snapshot 内容；paused/online 仍由 loadAll 统一置位。
+- 规格中的 BACKUP_FILE_INVALID/BACKUP_HASH_MISMATCH 已导出但 verifyBackup
+  通过 problems 文本而不是抛这两个码（CLI 将 verify 失败映射为 VERIFY_FAILED）。
+- cleanup --dry-run 按“removed 列表为空但计数保留”实现：数组为空，
+  tmpFilesRemoved 为将删除数量；日志/备份/损坏目录只保留不删。
+- force 保留目录名固定 restore-keep-<yyyyMMdd-HHmmss>-<code>（UTC）；
+  同一秒重复 force 遇到同名保留目录会报 RESTORE_VERIFY_FAILED，不覆盖旧档。
+
+十、Qoder 独立复核（handoff/复核-单元09C-A.txt，245 行）
+结论：可提交，无 must-fix。复核员独立跑 17/17、66 文件/813 条（55.24s）、
+typecheck/build 0、git diff 为空；对 manifest 版本/重复码/roomCount 不一致/大写 sha/
+负数或小数 bytes/audit 缺失或 file 非 events.ndjson、restore 目标是普通文件、
+--room ../0042、空数据目录、好坏房混合、--out 空/非空等对抗矩阵全部符合预期。
+变异 4 组在仓库外副本真实变红并复原：删 sha256 比较→T6 红；删 validateSnapshot→T7 红；
+force 不 rename→T10 ENOENT；cleanup 匹配所有 rooms 子目录→T13 长度 3。
+故障注入 INJECTED_AFTER_WRITE 后 oldRestored=true、keptDirs=[]、targetExists=true，
+证明写入后失败会回滚旧档。
+
+should-fix（不阻塞本轮提交，按 Qoder 建议先处理 S1/S2）：
+S1 CleanupResult 无 failed/errors（backup.ts:641-646、659-665、686-690、713-721），
+   单项删除失败被 catch 吞掉，调用方无法区分“未选中”与“删除失败”；
+S2 T11 只覆盖 verify 前置失败，缺“写入后复校验失败/回滚失败”的自动化回归；
+S3 symlink/junction 策略未定义（实测 junction backupDir 可读、outDir 写穿）；
+S4 空 manifest（rooms=[]）verify 返回 ok=true；S5 dryRun 只保留 tmp 计数；
+S6 回滚失败 details.problems 只放原错误。
+Qoder 建议 09C-B 开始前至少处理 S1、S2，已写入 handoff/单元09C-A-下一阶段交接.txt 第六节。

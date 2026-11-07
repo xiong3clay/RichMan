@@ -1,0 +1,86 @@
+单元 09C-A 注意事项
+================================================================
+日期：2026-11-08
+对象：备份/恢复核心实现者、09C-B 脚本作者、以后维护存档的人。
+
+一、为什么 rename 就是一致性点
+- file-store.ts commitRoom 先 writeSnapshotAtomic：.tmp 临时文件 → fsync →
+  旧 snapshot 复制为 snapshot.bak.json → rename 到 snapshot.json。
+- rename 是整文件替换，另一个进程读 snapshot.json 时只会看到旧提交或
+  新提交，不会读到“写了一半”的内容。
+- 因此 createBackup 只复制 snapshot.json 的完整字节，不需要暂停服务；
+  不要改成“先读几个字段再拼”或流式边读边写。
+
+二、恢复后必须先暂停再继续
+- restoreRoom 原样复制快照，不改 paused；服务启动时 loadAll 统一置
+  paused=true、online=false。
+- 恢复完直接开着服务让玩家点命令是错的：必须先启动服务确认房间以暂停态
+  载入，再由房主 resume_game 继续。
+- 恢复目录不写 snapshot.bak.json；下次 commitRoom 会自然生成。
+- 恢复会保留所有身份摘要（tokenDigest/recoveryDigest），但不会恢复原文
+  token/恢复码；玩家仍需用原来的 token 或恢复码恢复身份。
+
+三、force 的保留目录
+- 命名：rooms/restore-keep-<UTC yyyyMMdd-HHmmss>-<code>。
+- 内容就是被替换前的完整房间目录；用于人工回退。
+- 同一秒内对同一房间重复 force，第二次 rename 会遇到同名目录并报
+  RESTORE_VERIFY_FAILED（不会覆盖旧保留目录）。
+- cleanupData 不清理 restore-keep-*；需要单独保留策略（建议后续脚本按
+  天数人工清理，不要误删）。
+
+四、备份里的隐私
+- snapshot.json 本来只存 tokenDigest/recoveryDigest，不含 token/恢复码
+  原文；但摘要仍是身份凭据的一部分，备份目录等同于私有账务。
+- 不得把 backups/ 挂到公网静态目录、不得上传云盘、不得贴到工单/聊天。
+- manifest.json 的 sourceRoot 会暴露本机路径；对外提供备份清单时要脱敏。
+
+五、Windows fsync 与断电
+- writeFileAtomic 对临时文件 fsync 后再 rename；但 Windows 不保证目录项
+  本身的元数据落盘，突然断电仍可能丢失最后一次 rename。
+- 因此备份完成应以 manifest.json 出现且 verifyBackup 通过为准；不要仅凭
+  进程返回成功就认为“断电也不会丢”。
+- snapshot.bak.json 是上一提交的备份，不是本次备份；恢复时应使用备份目录
+  的 manifest + sha256 校验，不要依赖 bak。
+
+六、校验与错误码
+- verifyBackup 永远返回 problems，不抛异常；manifest 读不出来时
+  manifest=null。
+- BACKUP_FILE_INVALID、BACKUP_HASH_MISMATCH 已按规格导出，但当前 verify
+  通过 problems 文本报告（大小/sha256/validateSnapshot），CLI 把 verify
+  失败映射成 code=VERIFY_FAILED、exit 1。
+- 恢复失败（含备份不合法、复校验失败、回滚失败）统一
+  RESTORE_VERIFY_FAILED；目标存在且无 force 是 RESTORE_TARGET_EXISTS。
+- 不要为了“让脚本好写”把 RESTORE_TARGET_EXISTS 降级成 exit 1；它必须
+  保持 exit 2（需人工决定）。
+
+七、清理的边界
+- cleanupData 只处理四类：
+  logs/server-*.log、logs/tunnel-*.log（各自保留 keepLogs 个）；
+  backups/richman-backup-*（按 manifest.createdAt 保留 keepBackups 个）；
+  rooms/corrupt-*（按名字里的时间戳保留 keepCorrupt 个）；
+  .tmp 下普通文件（mtime 早于 now - tmpMaxAgeMs 才删）。
+- 不删 rooms/<code>、不删 restore-keep-*、不删 .tmp 目录、不删别的东西。
+- cleanup --dry-run 按规格“removed 列表为空但计数保留”实现：
+  三个 removed 数组为空，tmpFilesRemoved 为将删除数量；日志/备份/损坏
+  目录只保留不删。09C-B 展示 dry-run 时不要声称“这些文件已删除”。
+- 单项删除失败不会中断其它项；失败项不出现在 removed 列表里，也不会
+  抛错，调用方不能把“列表为空”当成“没有可清理内容”。
+
+八、备份格式的小约定
+- snapshot.savedAt 在存档里是 number；规格的 BackupRoomEntry.savedAt
+  是 string，实现写 String(snapshot.savedAt)。不要按 number 重新解析。
+- manifest.json 由 createBackup 写（UTF-8、2 空格、末尾换行、无 BOM）。
+  不要用 PowerShell 5.1 `Set-Content -Encoding UTF8` 重写 manifest：
+  会带 BOM，JSON.parse 会失败（本轮手工冒烟已验证该边界）。
+- events.ndjson 只在 withAudit 且源文件存在时复制；不存在 audit=null，
+  不算失败；不要伪造审计行。
+- 备份目录必须是“不存在或空目录”；不要自动清空用户已有目录，也不要
+  先 mkdir 再判断非空后继续写。
+
+九、绝不能重复的错误
+- 为了省事直接 rm -rf 目标房间再恢复（会丢唯一现存档，force 必须保留）。
+- 先恢复再 verify（校验失败会污染目标）。
+- 把 restore-keep-* 交给 cleanupData 的 corrupt-* 正则误删。
+- 修改 snapshot 内容（例如把 paused 改成 false、把 savedAt 改成恢复时间）。
+- 在备份目录里写 token/恢复码原文或把备份目录当静态资源对外提供。
+- 用端口探测/HTTP 管理接口替代“服务停止后再恢复”的脚本层检查。
