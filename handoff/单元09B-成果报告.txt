@@ -1,0 +1,117 @@
+单元 09B 成果报告（一键启动 / 隧道 / 停止 / 状态脚本）
+================================================================
+日期：2026-11-07
+基线：HEAD 793bb83（09B 规格提交）；实现位于工作区，未 commit。
+规格：handoff/单元09B-一键启动与停止脚本.txt
+结论：完成（自动化与真实验收链通过；真机/计划任务/非 Windows 未验证）。
+
+一、完成项
+1) scripts/richman-common.ps1（公共函数，被其余脚本 dot-source）
+   - Get-RichManRoot：脚本目录的上级仓库根。
+   - Resolve-DataDir：显式参数 > RICHMAN_DATA_DIR > <root>/apps/server/data。
+   - Read-RunState（缺失/坏 JSON 返回 $null，不抛）；Write-RunState（.tmp + Move-Item，
+     父目录自动创建，UTF-8 无 BOM 单行 JSON）；Remove-RunState（存在才删）。
+   - Test-PortFree（TcpClient 探 127.0.0.1；SocketException/InvalidOperationException
+     按空闲处理并在注释写明）。
+   - Wait-HttpHealth（500ms 一次 Invoke-WebRequest -UseBasicParsing -TimeoutSec 2，
+     2xx/3xx 成功，失败不打印堆栈）。
+   - Get-CloudflaredPath（显式 > RICHMAN_CLOUDFLARED > Get-Command > 
+     D:\Lianjunjie\tools\cloudflared.exe）。
+   - Get-ProcessInfo（pid 存活且进程名白名单 node/cloudflared，防 PID 复用误杀）。
+   - Get-LanAddresses（.NET NetworkInterface 非回环 IPv4）。
+   - Write-CheckJson（单行 JSON 到 stdout）。
+2) scripts/start-lan.ps1
+   - 参数 -Port/-DataDir/-Build/-TimeoutSec 40/-CheckOnly。
+   - CheckOnly：node>=22、webDist、端口、数据目录可写、alreadyRunning；
+     输出最后一行 JSON；ok 决定退出码。
+   - 正常：已在运行则幂等 exit 0；端口被占 exit 1；缺 dist 提示 build（-Build 时真构建）；
+     单进程 `node --import tsx --no-warnings apps/server/src/http.ts`（PID 即 node），
+     设置 PORT/RICHMAN_DATA_DIR，stdout/stderr 分开重定向；健康失败杀进程并打印
+     err 末尾 20 行；成功写 run/server.json 并打印本机/LAN/数据目录/日志/停止命令/
+     防火墙/防睡眠提示。
+3) scripts/start-tunnel.ps1
+   - 参数 -Port/-Cloudflared/-TimeoutSec 90/-CheckOnly。
+   - 先要求本地 /health；已有存活 tunnel.json 则打印旧 URL 幂等退出；
+     CheckOnly 输出 localServer/cloudflared/port/alreadyRunning JSON；
+     启动 cloudflared.exe tunnel --url http://127.0.0.1:<port> --no-autoupdate，
+     每 500ms 从 stdout/stderr 日志匹配 https://*.trycloudflare.com；
+     超时杀进程并打印日志末尾；成功写 tunnel.json 并做 30s URL /health，
+     未通过只 WARN、仍 exit 0。
+4) scripts/stop.ps1
+   - 参数 -DataDir/-CheckOnly。
+   - 先 tunnel 后 server；只按状态文件 pid + 进程名白名单 Stop-Process；
+     不匹配/已退出只清理状态并 WARN，绝不按端口杀陌生进程；CheckOnly 不动进程与文件。
+   - server 停止后轮询端口 10s；仍占用 WARN 并 exit 2（不强行杀）。
+   - 无状态文件打印“未在运行” exit 0（幂等）。
+5) scripts/status.ps1
+   - 本地 /health 打印 ok/rooms/connections；隧道状态 + pid 存活 + URL /health（5s）；
+     -Json 输出单行 {ok,server:{ok,port,rooms,connections},tunnel:{url,ok}}；
+     server 不健康 exit 1；-CheckOnly 接受但不改变状态。
+6) apps/server/tests/scripts.test.ts（仅 win32，5 条）：
+   - 六个文件存在 + 五个 ps1 UTF-8 BOM + 入口脚本 param( 开头；
+   - start-lan CheckOnly 空闲端口 ok=true；
+   - 端口被占 ok=false/PORT_IN_USE/exit 1；
+   - stop CheckOnly 空目录 ok=true/exit 0/不创建 run；
+   - status CheckOnly -Json 无服务 ok=false/exit 1 不挂起。
+7) README「## 一键启动 / 停止（Windows）」：命令、参数、日志、隧道域名变化、
+   防火墙/防睡眠提示、非 Windows 用 corepack pnpm -s start。
+
+二、改动文件（本轮）
+新增：scripts/richman-common.ps1、scripts/start-lan.ps1、scripts/start-tunnel.ps1、
+      scripts/stop.ps1、scripts/status.ps1、apps/server/tests/scripts.test.ts
+修改：README.md（新增一节）
+新增：handoff/单元09B-成果报告.txt、运行与验收.txt、下一阶段交接.txt、注意事项.txt
+更新：handoff/项目当前状态.txt
+未改：apps/server/src/**、packages/**、apps/web/src/**、协议、既有测试、package.json/依赖。
+所有 .ps1 均为 UTF-8 with BOM（字节 EF BB BF），入口脚本首行 param(。
+
+三、验收命令与真实结果（2026-11-07 19:24）
+1) corepack pnpm -s test
+   65 文件 / 786 条全部通过（旧 781 未删改/跳过/放宽 + scripts.test 5）。
+   TEST_EXIT=0；Duration 9.04s。日志：artifacts/test-logs/09B-test.log
+2) corepack pnpm -s typecheck
+   TSC_EXIT=0；日志：artifacts/test-logs/09B-typecheck.log
+3) corepack pnpm -s build
+   BUILD_EXIT=0；141 modules；index--JyM_5JG.css 18.07 kB、index-CrCvzBNf.js 425.13 kB；
+   built in 196ms。日志：artifacts/test-logs/09B-build.log
+4) 单文件 scripts.test.ts：5/5 passed，EXIT=0；日志：artifacts/test-logs/09B-scripts-test.log
+
+四、真实验收链（完整输出见 artifacts/test-logs/09B-acceptance.log）
+1) start-lan（8000）：EXIT 0；http://127.0.0.1:8000/health → 200，rooms=0。
+2) start-tunnel（8000）：EXIT 0；隧道 URL
+   https://catalogs-organize-listings-garage.trycloudflare.com
+   脚本内 30s 健康检查因 DNS 延迟打印 WARN；外部重试后 https://.../health → 200。
+3) status -Json：EXIT 0；server.ok=true、rooms=0、connections=0；
+   tunnel.processRunning=true（当次 5s 检查 ok=false，属上述 DNS 延迟，重试后 200）。
+4) 停止前：server.pid=35920、tunnel.pid=37652；
+   NETSTAT_8000_BEFORE=LISTENING pid=35920。
+5) stop：EXIT 0；tunnel/server 均 stopped；NETSTAT_8000_AFTER=NOT_LISTENING；
+   SERVER_PID_ALIVE_AFTER=False、TUNNEL_PID_ALIVE_AFTER=False；
+   run/server.json 与 run/tunnel.json 均已删除。
+6) 幂等：再次 start-lan → “已在运行…” EXIT 0；/health 仍 200；stop EXIT 0。
+7) -Port 8001：start EXIT 0、/health 8001 → 200、stop EXIT 0；
+   NETSTAT_8001_AFTER=NOT_LISTENING。
+8) 结束后无 cloudflared 进程、8000/8001 均无监听。
+
+五、未完成 / 未验证
+- 真机（手机）经 LAN/隧道访问未测（09D 矩阵）；防火墙规则未实际添加（需管理员）。
+- Windows 计划任务 RichManServer/RichManTunnel 未迁移到新脚本。
+- 非 Windows（Linux/macOS）未测；文档仍指向 corepack pnpm -s start。
+- 隧道域名与本次 URL 仅供当次参考，重启会变。
+- 脚本被上层管道捕获输出时，node/cloudflared 子进程可能继承管道句柄，
+  导致调用方等待到服务退出；这是 PowerShell 5.1 的句柄继承行为，直连/双击
+  或文件重定向不受影响。验收用文件重定向完成。
+- 未做日志轮转/清理（logs 会累积）。
+
+六、已知问题 / 风险
+1) stop 依赖白名单（node/cloudflared）与状态文件 pid；若用户在启动后手工改换进程，
+   状态文件过期只会 WARN 并清理，不会按端口误杀。
+2) 端口仍被非本服务占用时 stop exit 2，需人工处理。
+3) cloudflared 启动后 trycloudflare DNS 可能延迟数秒；status 可能短暂 WARN。
+4) start-lan 的 CheckOnly 会在数据目录写删一个临时探针文件（规格要求），
+   stop/status 的 CheckOnly 不写任何文件。
+5) logs 无轮转；长期运行需 09C 增加清理策略。
+6) `-Build` 依赖 corepack pnpm 可用；纯 node 环境只能手工 build。
+
+七、被验证的提交号
+基线 793bb83（09B 规格）；本轮无新提交（按用户要求不 commit）。

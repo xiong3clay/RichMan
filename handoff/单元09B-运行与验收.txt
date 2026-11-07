@@ -1,0 +1,127 @@
+单元 09B 运行与验收说明（一键启动 / 隧道 / 停止 / 状态脚本）
+================================================================
+日期：2026-11-07
+环境：Windows（Windows PowerShell 5.1.26100.9711；另有 pwsh 7 兼容写法）；
+      Node v24.18.0；corepack pnpm 11.7.0；cloudflared
+      D:\Lianjunjie\tools\cloudflared.exe；工作目录 D:\Lianjunjie\biancheng\RichMan。
+
+一、脚本与编码
+- scripts/richman-common.ps1、start-lan.ps1、start-tunnel.ps1、stop.ps1、status.ps1
+  均为 UTF-8 with BOM（首字节 EF BB BF），入口脚本首行 param(。
+- 不使用 ?? / ?: / 三元 / -Parallel 等 PowerShell 7 专有语法；PS 5.1 实测全部可运行。
+
+二、自动化验收命令（真实执行）
+1) corepack pnpm -s test
+   输出：Test Files 65 passed (65)；Tests 786 passed (786)；Duration 9.04s；
+   退出码 0。日志：artifacts/test-logs/09B-test.log
+2) corepack pnpm -s typecheck
+   输出：无诊断；退出码 0。日志：artifacts/test-logs/09B-typecheck.log
+3) corepack pnpm -s build
+   输出：✓ 141 modules transformed；index-CrCvzBNf.js 425.13 kB、
+   index--JyM_5JG.css 18.07 kB；built in 196ms；退出码 0。
+   日志：artifacts/test-logs/09B-build.log
+4) corepack pnpm -s vitest run apps/server/tests/scripts.test.ts
+   输出：5 passed (5)；退出码 0。日志：artifacts/test-logs/09B-scripts-test.log
+
+三、真实验收链（命令与关键输出）
+完整输出：artifacts/test-logs/09B-acceptance.log
+
+1) 启动本地服务
+   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-lan.ps1
+   输出：
+     服务已启动：http://127.0.0.1:8000/
+     局域网：http://10.25.226.102:8000/
+     数据目录：D:\Lianjunjie\biancheng\RichMan\apps\server\data
+     日志：...\logs\server-20261107-195534.log
+     __SCRIPT_EXIT__=0
+   curl /health：
+     HEALTH http://127.0.0.1:8000/health => 200
+     {"ok":true,...,"rooms":0,"connections":0,...}
+   状态文件：
+     run/server.json = {"pid":35920,...,"port":8000,...}
+
+2) 启动临时隧道
+   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-tunnel.ps1
+   输出：
+     隧道已开启：https://catalogs-organize-listings-garage.trycloudflare.com
+     本机端口：http://127.0.0.1:8000/
+     提醒：每重启隧道域名都会变；换域名后用房间码+恢复码恢复。
+     WARN：隧道已开，但健康检查暂未通过，校园 DNS 可能延迟，稍后可用 status 复查。
+     __SCRIPT_EXIT__=0
+   外部重试 curl <url>/health：
+     HEALTH https://catalogs-organize-listings-garage.trycloudflare.com/health => 200
+     脚本内 30s 健康检查遇到 DNS 延迟只 WARN 并 exit 0，符合规格。
+   状态文件：
+     run/tunnel.json = {"pid":37652,"port":8000,"url":"https://catalogs-organize-
+     listings-garage.trycloudflare.com","log":...}
+
+3) 状态
+   powershell ... scripts/status.ps1 -Port 8000 -Json
+   输出：
+     {"ok":true,...,"server":{"ok":true,"port":8000,"rooms":0,"connections":0},
+      "tunnel":{"ok":false,"url":"https://catalogs-organize-listings-garage.
+      trycloudflare.com","processRunning":true}}
+     __SCRIPT_EXIT__=0
+   说明：当次隧道 5s 健康检查未通过（DNS 延迟），进程与 URL 均正确；外部重试后 200。
+
+4) 停止
+   powershell ... scripts/stop.ps1
+   输出：
+     已停止 tunnel（pid 37652）。
+     已停止 server（pid 35920）。
+     已全部停止。
+     {"ok":true,"stopped":[{"kind":"tunnel","pid":37652,...},
+      {"kind":"server","pid":35920,...}],"warnings":[]}
+     __SCRIPT_EXIT__=0
+
+   停止后的证据：
+     NETSTAT_8000_AFTER=NOT_LISTENING
+     SERVER_PID_ALIVE_AFTER=False
+     TUNNEL_PID_ALIVE_AFTER=False
+     RUN_STATE_AFTER_SERVER_EXISTS=False
+     RUN_STATE_AFTER_TUNNEL_EXISTS=False
+   netstat 精确复查（artifacts/test-logs/09B-netstat-after-stop.log）：
+     LISTENING_8000_COUNT=0
+     LISTENING_8001_COUNT=0
+     Get-Process cloudflared 计数=0
+   注：普通 `netstat -ano | findstr :8000` 可能仍看到客户端 TIME_WAIT 或远端地址
+   含 :8000 的无关 IPv6 连接；判据是 LISTENING 行计数为 0。
+
+5) 幂等
+   再次 start-lan：
+     已在运行 http://127.0.0.1:8000/ ，数据目录：...
+     __SCRIPT_EXIT__=0
+   /health 仍 200；stop 后 exit 0。
+   无状态文件时 stop：
+     未在运行（没有找到 server.json / tunnel.json）。 exit 0。
+
+6) -Port 8001
+   start-lan -Port 8001 → 服务已启动 http://127.0.0.1:8001/，exit 0；
+   curl 8001/health → 200；stop → exit 0；
+   NETSTAT_8001_AFTER=NOT_LISTENING。
+
+四、日常使用
+启动本地：powershell -ExecutionPolicy Bypass -File scripts/start-lan.ps1
+启动隧道：powershell -ExecutionPolicy Bypass -File scripts/start-tunnel.ps1
+查看状态：powershell -ExecutionPolicy Bypass -File scripts/status.ps1
+停止全部：powershell -ExecutionPolicy Bypass -File scripts/stop.ps1
+换端口/数据目录：加 -Port 8001、-DataDir D:\richman-data。
+只检查不执行：任意脚本加 -CheckOnly（最后一行单行 JSON，供 CI/测试解析）。
+日志：<dataDir>/logs/server-*.log、server-*-err.log、tunnel-*.log、tunnel-*-err.log。
+状态：<dataDir>/run/server.json、tunnel.json（stop 后删除）。
+
+五、防火墙与防睡眠（需人工）
+- 手机访问需管理员执行：
+  New-NetFirewallRule -DisplayName "RichMan 8000" -Direction Inbound -Protocol TCP
+    -LocalPort 8000 -Action Allow
+- 笔记本电池策略可能让服务睡眠/退出，建议接电源或设置“接通电源时永不睡眠”。
+- 隧道域名每次重启都会变；手机换域名后用房间码 + 恢复码恢复。
+
+六、未验证项
+- 真机手机经 LAN 与隧道访问未测（转 09D）。
+- 防火墙规则未实际添加（需管理员）。
+- Windows 计划任务未迁移到新脚本。
+- 非 Windows 未测。
+- 日志无轮转，长期运行需 09C。
+- 上层以管道捕获脚本输出时，子进程句柄继承可能让调用方等待到服务退出；
+  直连控制台、双击或文件重定向不受影响（本轮验收用文件重定向）。

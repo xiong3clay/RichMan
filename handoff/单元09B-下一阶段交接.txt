@@ -1,0 +1,62 @@
+单元 09B 下一阶段交接（一键启动 / 隧道 / 停止 / 状态脚本）
+================================================================
+日期：2026-11-07
+基线：793bb83；本轮实现未提交。下一单元：09C（备份恢复、安全补强、文档/许可证/版本记录）。
+
+一、脚本架构与入口
+- scripts/richman-common.ps1：公共函数（dot-source）
+  Get-RichManRoot / Resolve-DataDir / Read-RunState / Write-RunState / Remove-RunState /
+  Test-PortFree / Wait-HttpHealth / Get-CloudflaredPath / Get-ProcessInfo /
+  Get-LanAddresses / Write-CheckJson。
+- scripts/start-lan.ps1：
+  CheckOnly 五项检查 → JSON；正常模式单进程 node（--import tsx）→ 健康检查 →
+  run/server.json。已在运行幂等退出；端口占用/缺 dist/健康超时 exit 1。
+- scripts/start-tunnel.ps1：
+  本地 /health 前置 → cloudflared → 日志匹配 trycloudflare URL → run/tunnel.json →
+  URL /health（30s，失败仅 WARN）。
+- scripts/stop.ps1：
+  先 tunnel 后 server；只按状态文件 pid + 进程名白名单停止；CheckOnly 只报计划；
+  停 server 后轮询端口 10s，仍占用 exit 2。
+- scripts/status.ps1：
+  只读；本地 /health + 隧道进程/URL/健康；-Json 单行；server 不健康 exit 1。
+
+二、状态与日志格式（09C 必须保持兼容）
+- <dataDir>/run/server.json：{pid, startedAtUtc, port, logOut, logErr}
+- <dataDir>/run/tunnel.json：{pid, startedAtUtc, port, url, log}
+- <dataDir>/logs/server-<yyyyMMdd-HHmmss>.log / -err.log
+- <dataDir>/logs/tunnel-<yyyyMMdd-HHmmss>.log / -err.log
+- 写入：UTF-8（JSON 无 BOM）单行 ConvertTo-Json -Compress；先 .tmp 再 Move-Item。
+- dataDir 默认 apps/server/data，可被 -DataDir / RICHMAN_DATA_DIR 覆盖。
+- 所有 -CheckOnly 结果最后一行是单行 JSON，供 apps/server/tests/scripts.test.ts
+  与未来 CI 解析。
+
+三、协议 / 存档 / 服务端
+- 未改 apps/server/src/**、packages/**、apps/web/src/**、协议、PROTOCOL_VERSION、
+  存档 schema、依赖；服务端行为与 09A 完全一致。
+- 脚本走 http.ts 既有入口：PORT、RICHMAN_DATA_DIR、0.0.0.0:8000、LAN 地址打印。
+
+四、下一阶段入口
+09C（备份恢复/安全补强/文档）：
+- logs 无轮转：需要按大小/天数清理（server/tunnel 都可能持续写）。
+- 计划任务 RichManServer/RichManTunnel 可迁移到 start-lan/start-tunnel（注意
+  -WindowStyle Hidden 与计划任务会话差异）。
+- 代理层 429/503 与多段 X-Forwarded-For 仍未验证。
+- 满房 fullJoinBucket 与普通 joinBucket 的额度合并评估。
+- README 顶部“当前状态/测试数”仍停留在早期单元，需要随发布版本统一更新。
+09D（真机矩阵）：LAN + 隧道 + 2/10 人；本脚本打印的 LAN 地址与隧道 URL 可直接用。
+
+五、不可破坏的不变量（09C/09D 及以后）
+1) .ps1 必须 UTF-8 with BOM；入口脚本首行 param(；不使用 PowerShell 7 专有语法。
+2) 起服必须是单进程 node（PID 即 node 本体），stdout/stderr 分开重定向，
+   禁止回到 pnpm 父进程 + 子进程模式（stop 会留下孤儿）。
+3) stop 只按状态文件 pid + 进程名白名单（server:node、tunnel:cloudflared）停止；
+   绝不按端口杀陌生进程；无状态文件幂等 exit 0；端口仍被占用只 WARN + exit 2。
+4) start-lan 必须先健康检查再写 server.json；健康失败不写状态并清理进程。
+5) start-tunnel 必须先本地 /health 通过；已有存活 tunnel.json 幂等打印旧 URL；
+   URL 30s 健康失败只 WARN、仍 exit 0。
+6) 状态文件写入必须原子（.tmp + Move-Item）；JSON 单行；UTF-8。
+7) 所有脚本支持 -CheckOnly，且 CheckOnly 不改动状态（start-lan 的写删探针除外，规格要求）；
+   最后一行必须是单行 JSON。
+8) 停止顺序固定：先 tunnel 后 server。
+9) 数据目录默认不得写进仓库根或静态目录；日志/状态只在 dataDir 下。
+10) 旧 781 条测试不得删改；scripts.test.ts 只能追加。

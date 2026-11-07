@@ -1,0 +1,69 @@
+单元 09B 注意事项（一键启动 / 隧道 / 停止 / 状态脚本）
+================================================================
+日期：2026-11-07
+
+1. 编码与语法（最容易踩）
+   - 五个 .ps1 必须保存为 UTF-8 with BOM；Windows PowerShell 5.1 对无 BOM 的 UTF-8
+     会按 ANSI 解析，中文注释里的字节可能变成反引号/引号，导致 Unexpected token。
+   - 入口脚本首行必须是 param(（BOM 之后），公共脚本可除外。
+   - 禁止使用 ??、?:、三元表达式、-Parallel 等 PowerShell 7 专有语法；
+     同时兼容 PS 5.1 与 pwsh 7 是硬要求。
+   - 用编辑器改脚本后要重新确认 BOM（可用
+     [System.IO.File]::ReadAllBytes 检查 EF BB BF）。
+
+2. 起服方式
+   - 必须单进程：node --import tsx --no-warnings apps/server/src/http.ts；
+     PID 就是 node 本体，stop 才能准确停止。
+   - 不要改回 `corepack pnpm start`/pnpm 父进程模式：杀父进程会留下 node 孤儿。
+   - stdout / stderr 必须分开重定向到不同文件；PowerShell 不允许同一文件。
+   - 环境变量 PORT 与 RICHMAN_DATA_DIR 在 Start-Process 前设置，子进程继承。
+
+3. 状态文件与日志
+   - run/server.json / run/tunnel.json 是 stop 的唯一依据；写入必须 .tmp + Move-Item，
+     JSON 单行、UTF-8（无 BOM），避免半截文件。
+   - stop 只白名单（server: node；tunnel: cloudflared）。PID 被系统复用时进程名不匹配
+     就只 WARN 并清理状态，绝不按端口杀陌生进程。
+   - 无状态文件时 stop 是幂等操作（打印未在运行，exit 0）。
+   - 端口仍被非本服务占用时 exit 2，不强行杀；需人工换端口或排查。
+   - logs 目录没有轮转；长期运行会累积，09C 处理。
+
+4. 健康检查
+   - start-lan 必须先 Wait-HttpHealth 成功再写 server.json；失败要 Stop-Process 并
+     打印 err 末尾 20 行，不能留半启动进程。
+   - start-tunnel 必须先确认本地 /health，再起 cloudflared；URL 的 /health 30s
+     不通过只 WARN，仍 exit 0（校园 DNS 常有延迟）。
+   - status 的隧道 5s 检查也可能短暂 WARN；URL 与进程仍在，可稍后重试。
+   - tunnel 域名每次重启都会变；换域名后用房间码 + 恢复码恢复。
+
+5. 管道捕获的已知行为
+   - PowerShell 5.1 的 Start-Process 在重定向子进程 stdout/stderr 时，子进程仍可能
+     继承调用方的管道句柄；若上层用 `| Out-String`/CI 管道捕获脚本输出，调用方
+     可能一直等到 node/cloudflared 退出。直连控制台、双击、文件重定向不受影响。
+   - 自动化里请把脚本输出重定向到文件，或用 Start-Process 包装后再读文件；
+     scripts.test.ts 只跑 -CheckOnly，不会启动常驻进程。
+
+6. -CheckOnly 契约
+   - 所有脚本支持 -CheckOnly，最后一行必须是单行 JSON，供测试/CI 解析。
+   - start-lan 的 CheckOnly 会创建数据目录并写删一个探针文件（规格要求）；
+     stop/status 的 CheckOnly 不写任何文件；stop 的 CheckOnly 不创建 run 目录
+     （scripts.test.ts 第 4 条会断言）。
+
+7. 防火墙与防睡眠
+   - 手机访问需管理员添加入站规则（默认 TCP 8000）；脚本只打印提示，不自动提权。
+   - 笔记本电池策略可能导致睡眠/退出；建议接电源或设置“接通电源时永不睡眠”。
+   - 校园网/客户端隔离下手机走隧道；隧道 URL 每次重启会变。
+
+8. 绝不重复的错误
+   - 不要按端口杀进程；不要相信端口占用就是本服务。
+   - 不要在健康检查成功前写 server.json / tunnel.json。
+   - 不要把 stdout 和 stderr 重定向到同一个文件。
+   - 不要把日志或状态写到仓库根/静态目录；只能写 dataDir。
+   - 不要用无 BOM 的 UTF-8 保存 .ps1。
+   - 不要用 `Start-Process -Wait` 等待 start-lan/start-tunnel（-Wait 会等整棵进程树，
+     即等到服务退出）；需要退出码时用 `& script; $LASTEXITCODE` 的包装方式。
+   - 不要把 -CheckOnly 的输出混入多行非 JSON；最后一行必须可解析。
+   - 非 Windows 不要执行 .ps1；继续用 corepack pnpm -s start。
+
+9. 本轮未验证
+   - 真机手机 LAN/隧道访问、防火墙实际规则、计划任务迁移、非 Windows。
+   - 日志轮转、多实例、代理层 429/503、多段 X-Forwarded-For（转 09C/09D）。

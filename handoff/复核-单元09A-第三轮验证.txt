@@ -1,0 +1,230 @@
+============================================================
+RichMan 单元 09A 第三轮复核验证（F13–F15）
+============================================================
+复核员：Qoder（独立复核，只读）
+复核时间：2026-11-07
+工作区：D:\Lianjunjie\biancheng\RichMan
+基线说明：用户指定 eeec8ca；实际 HEAD 793bb83（09A 实现提交 eeec8ca，
+          其后有 09A 交接 6f38ab7 与 09B 规格 793bb83）；复核开始时工作区
+          clean，09A 代码已提交。复核结束时出现未跟踪的 scripts/*.ps1
+          （09B 脚本，复核期间并行产生），不是本轮复核创建/修改，
+          也不是 09A 源码改动。
+复核方式：真实 test/typecheck/build；仓库外复制 server 做 49/50 变异探针；
+          只读源码，未改源码、未 commit；仅新增本报告。
+
+结论：需修复。
+  F13/F14 的生产实现代码看起来正确，正常测试全绿；但按用户指定的三项
+  回归探针，其中两项没有让测试变红：
+  - 49 在“releaseIfUnclaimed 无条件释放两次”下仍全绿（测试不能证明“只一次”）；
+  - 50 在“autoPong: true”下仍全绿（测试的连续 tick 抢在 pong 之前，
+    并没有真正依赖 non-autoPong）。
+  因此测试 49/50 不能证明对应修复，必须补强；代码本身未发现新的生产泄漏。
+  F15 文档有一处 48 vs 50 的旧摘要和一处基线/未提交描述陈旧；见 should-fix。
+
+------------------------------------------------------------
+一、真实命令与结果
+------------------------------------------------------------
+$ corepack pnpm -s test
+  Test Files  64 passed (64)
+       Tests  781 passed (781)
+    Duration  9.09s
+TEST_EXIT=0
+
+$ corepack pnpm typecheck
+  $ tsc --noEmit -p tsconfig.json
+TSC_EXIT=0
+
+$ corepack pnpm -s build
+  ✓ 141 modules transformed.
+  apps/web/dist/index.html                   0.49 kB │ gzip:   0.31 kB
+  apps/web/dist/assets/index--JyM_5JG.css   18.07 kB │ gzip:   4.10 kB
+  apps/web/dist/assets/index-CrCvzBNf.js   425.13 kB │ gzip: 124.92 kB
+BUILD_EXIT=0
+
+说明：复核开始时工作区 clean；09A 实现已提交 eeec8ca，其上 6f38ab7
+只改 09A 交接、793bb83 只加 09B 规格。复核结束时出现并行产生的未跟踪
+scripts/*.ps1（09B 脚本），不是本轮复核创建，也不改变 09A 代码。
+用户给的 eeec8ca 可作为 09A 实现基线，但实际 HEAD 是 793bb83。
+
+------------------------------------------------------------
+二、F13：onUpgrade 的配额归属
+------------------------------------------------------------
+代码检查（ws.ts:508-533）：
+- 403：onUpgrade 在 admit 前 return，不 release；正确。
+- 503：admission 失败后直接 reject，不 release；没有 admit，正确。
+- 握手失败 400：admit 后安装 `socket.once("close", releaseIfUnclaimed)`；
+  ws abortHandshake 不抛错/不回调时，socket close 回调 release；正确。
+- 握手成功：callback 中 `released = true`，removeListener，init 接管；
+  init 成功后由 disconnected 按 conn.authenticated 释放；正确。
+- handleUpgrade 同步抛错：catch 调 releaseIfUnclaimed 并 destroy；正确。
+- init 抛错：init 自己 catch 释放（F7/测试 39）；callback 已认领，
+  外层 catch 不会重复 release；正确。
+- 403/503 不释放、成功/失败各一次；正常路径语义符合 F13。
+测试证据：
+- 测试 49（security.test.ts:661-675）用 raw TCP 发缺
+  Sec-WebSocket-Key 的 upgrade，断言 400；60 次后 guard.total=0/
+  unauthenticated=0，随后正常 Peer join 成功。全量 781 与 security
+  单独运行均通过。
+- 测试 50（:678-703）用 autoPong:false + 注入 heartbeatClock，断言心跳
+  超时后 guard.total=0 且 offline 座位保留；正常运行通过。
+- 测试 22 403 total=0；测试 24 per-IP 503；测试 39 init 抛错；
+  测试 41 replaced；测试 42 terminate；均通过。
+
+但测试真实性与用户指定变异不符：
+- 删除 `socket.once("close", releaseIfUnclaimed)`（ws.ts:522）后，
+  49 变红（正确，说明握手失败回收被 49 抓住）。
+- 把 releaseIfUnclaimed 改成无 released 保护、连续 `release(ip,false)`
+  两次后，整个 security.test **50/50 仍绿**，49 没有变红。
+  原因：ConnectionGuard.release 在 total>0 时第一次减到 0，第二次因
+  `total <= 0` 直接 return；测试只观察最终 total=0，且没有并发连接或
+  release 调用计数，因此“双释放”与“恰好一次”不可区分。
+  当前实现确实有 `released` 保护（ws.ts:516-521），但测试不能证明它；
+  按用户“若某修复无对应测试能变红，判 must-fix”的规则，这是 must-fix
+  测试缺口，不是当前代码泄漏。
+- handleUpgrade 同步抛错路径没有专门测试；代码 catch 有
+  releaseIfUnclaimed（ws.ts:529-532），但没有用例触发。当前是
+  should-fix 测试缺口。
+
+------------------------------------------------------------
+三、F14：心跳超时路径
+------------------------------------------------------------
+代码 ws.ts:466-473：heartbeat 连续 missedPongs>=2 时
+disconnected(conn) 后 terminate；disconnected 在 :404-412 释放一次。
+正常测试 50 通过：autoPong:false、连续 tick、close、total=0、座位
+online=false、players 仍 1。
+
+但用户指定变异：
+- 把 test 50 的 `autoPong:false` 改成 `autoPong:true` 后，
+  security.test 仍然 **50/50 全绿**，50 没有变红。
+原因：测试在 `await peer.ws.once("ping")` 后立即 tick 下一次，没有等
+客户端自动 pong 被服务端处理；连续 tick 会把 missedPongs 推到 2，即使
+客户端 autoPong=true 也在服务端观察前被关闭。测试因此没有真正验证
+“客户端不自动 pong”这一条件，不能证明 F14 的 non-autoPong 行为。
+当前实现代码正确，但 50 不是能抓回归的测试；按同一规则为 must-fix 测试
+缺口。建议在每次 tick 后等待 pong 被服务端处理（或等待一个可观察的
+pong 计数/短稳定窗口），使 autoPong:true 时连接保持、autoPong:false
+时才超时；或者用不发送 pong 的裸 WebSocket 并断言对应路径。
+
+------------------------------------------------------------
+四、F15：文档与范围
+------------------------------------------------------------
+F15 要求已大部分完成：
+- 运行与验收:117 的历史描述已改为“修复前返回 200 text/html
+  （index.html SPA 回退）”，正确；此前误写 {"rooms":[]}。
+- 成果报告 F10 已从“全路径”改为“主要路径（替换/terminate/init/
+  握手失败/心跳超时）”；49/50 已记录。
+- 注意事项新增 admit 归属唯一/任何终止路径 guard 归零不变量；
+  “瞬时 1025”标为推演、测试 38 未直接断言；正确。
+- 下一阶段交接补了 M3/F13 说明与代理层/XFF 未验证项。
+- 项目当前状态写 781 条、security 50；与实测一致。
+
+仍有文档瑕疵：
+1) 成果报告:48 仍写“security.test.ts（48 条）”，而同一文档 :71 与
+   实测是 50 条（38–50）；summary 未随第三轮更新。属 should-fix 文档
+   一致性，不是功能问题。
+2) 成果报告:4 写“基线 HEAD 0f2838e；实现位于工作区，未 commit”，
+   实际 09A 实现已提交 eeec8ca，复核开始时工作区 clean，HEAD 793bb83；该项
+   陈旧，应改为“实现 eeec8ca + 后续文档 HEAD”。属 nit/should。
+3) `运行与验收` 的手工日志路径是 09Afix2/09Afix3 等历史日志；当前
+   可复跑命令真实，但本轮没有重新生成所有历史手工日志；这属于已知
+   验证证据边界，不是代码错误。
+
+范围/回归：
+- git diff 0f2838e..eeec8ca 的旧测试只有 5 个授权文件：
+  crash-recovery/persistence/review06/review06-crash 仅补 content-type
+  头，session 仅 server(limits)+显式白名单；断言正文未改；
+  security.test.ts 为新增。没有删除/跳过/放宽。
+- 781 = 731 旧 + security 50；无依赖/lockfile 变化；无
+  packages/game-core、apps/web、net、steps.ts、协议形状、
+  PROTOCOL_VERSION、默认阈值改动；build 141 modules。
+- 复核开始时工作区 clean；没有未提交源码改动。复核结束时仅有并行产生的
+  未跟踪 scripts/*.ps1（09B 脚本），不属于本轮 09A 修改。
+
+------------------------------------------------------------
+五、变异探针结果（仓库外副本）
+------------------------------------------------------------
+副本：apps/server/{src,tests}+apps/web/dist，基线 security 50/50 PASS。
+| 变异 | 实际结果 | 判定 |
+|---|---|---|
+| 删除 ws.ts:522 socket.once("close", releaseIfUnclaimed) | 49 变红，其余绿 | PASS（49 能抓 400 泄漏） |
+| releaseIfUnclaimed 无条件 release 两次 | security 50/50 全绿，49 绿 | **FAIL：49 不能抓双释放（M1）** |
+| test50 autoPong:false → true | security 50/50 全绿，50 绿 | **FAIL：50 不能抓 autoPong（M2）** |
+| 只读代码检查 handleUpgrade 同步抛错 | ws.ts:529-532 catch release；无测试触发 | 测试缺口（S1） |
+| 403/503 | 22/24 通过；代码在 admit 前 return | PASS |
+
+------------------------------------------------------------
+六、must-fix
+------------------------------------------------------------
+M1. 测试 49 没有验证“只释放一次”
+文件/行：apps/server/tests/security.test.ts:661-675；
+         ws.ts:516-521（released 保护）。
+复现：
+1) 在仓库外副本把 releaseIfUnclaimed 改为：
+   `released=true; guard.release(ip,false); guard.release(ip,false);`
+   （删除 `if (released) return;`）；
+2) 运行 `security.test.ts`；
+3) 实际 50/50 全绿，49 仍绿。
+为什么 must-fix：测试名/规格要求“只一次”，但当前测试只观察最终
+total=0；ConnectionGuard.release 对 total<=0 幂等，导致双释放和
+单次释放不可区分。建议用注入的 guard/release spy 计数，或先建立另一条
+有效连接使 total=2，再断言只减少 1；不要只观察最终 total=0。
+
+M2. 测试 50 没有验证 autoPong:false
+文件/行：apps/server/tests/security.test.ts:678-703；
+         security-harness.ts:51-58（Peer.open options）。
+复现：
+1) 仓库外副本把 `{ autoPong:false }` 改成 `{ autoPong:true }`；
+2) 运行 security.test.ts；
+3) 实际 50/50 全绿，50 仍绿。
+为什么 must-fix：测试在收到 ping 后立即 tick，不等服务端处理 pong；
+即使客户端自动 pong，服务端也先看到两次 missedPongs 而关闭，测试没有
+真正验证 non-autoPong。建议每次 tick 后等待 pong/一个可观察稳定窗口，
+再断言 autoPong:true 不关闭、false 才关闭；或使用不发送 pong 的裸
+WebSocket 并单独测试服务端超时。
+
+------------------------------------------------------------
+七、should-fix
+------------------------------------------------------------
+S1. 补 handleUpgrade 同步抛错测试。
+    代码路径：ws.ts:529-532（catch releaseIfUnclaimed + destroy）；
+    目前没有用例触发；建议用可控的 wss/handleUpgrade 注入或可控
+    socket，断言 guard.total 归零且只一次。
+S2. 修正成果报告:48 的“48 条” summary，改为 50；基线/未提交描述
+    更新为 eeec8ca/HEAD 793bb83 的事实。
+S3. 测试 49 建议增加并发/另一条有效连接或注入 release 计数；
+    测试 50 建议在 tick 间等待 pong，避免仅靠 tick 顺序。
+S4. 测试50的 autoPong:true 分支应该明确断言“连接保持”，而不只是
+    依赖 false 分支的 close；这是 M2 的配套。
+
+------------------------------------------------------------
+八、nit
+------------------------------------------------------------
+N1. 成果报告:4 的基线 0f2838e/“工作区未 commit”已陈旧；当前实现
+    eeec8ca、复核开始时工作区 clean、HEAD 793bb83。
+N2. 注意事项目前的“瞬时 1025”已标为推演，测试 38 只断言清理后 size；
+    可保持为已知边界。
+N3. 49 的 60 次无效握手没有并发正常连接；即使不 double-release，
+    也没有覆盖“另一个连接存在时误释放别人配额”的场景。
+N4. 50 的 tick 顺序依赖 ping 事件而未确认 pong 处理；测试可观察性弱。
+N5. 403/503 未显式断言 guard 不变（22 有 total=0；24 没有 stats 断言），
+    但代码在 admit 前 return，属 nit。
+N6. `onUpgrade` 在 socket 已经 destroyed、close 已发生之后注册 close
+    回调的极窄竞态未覆盖；代码未按 `socket.destroyed` 立即回收，
+    可能理论泄漏；当前未验证，列 nit 而非 must。
+N7. 旧 731 的授权测试 diff 为 5 文件/头/白名单；无新增依赖、无
+    game-core/web 越界；781 实跑通过；build 141 modules。
+
+------------------------------------------------------------
+九、结论
+------------------------------------------------------------
+需修复。
+F13/F14 的正常实现代码和正常测试通过；但用户指定的两项回归探针
+（49 双释放、50 autoPong:true）都未变红，按本轮“若某修复无对应测试
+能变红即 must-fix”的规则，49/50 测试不成立，必须先补强。
+F15 文档大体正确，但有 48 vs 50 的旧 summary 和 0f2838e/未提交的
+陈旧描述，作为 should-fix/nit。
+回归：旧 731 授权改动未变、781 全绿、typecheck/build 0；无越界。
+
+复核基线：实际 HEAD 793bb83（09A 实现 eeec8ca）；复核开始时工作区 clean；
+本轮未改源码、未 commit；仅新增本报告；结束时未跟踪 scripts/*.ps1
+为并行产生的 09B 脚本，不是本轮改动。

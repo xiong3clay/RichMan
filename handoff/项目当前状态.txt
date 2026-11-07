@@ -1,6 +1,6 @@
 RichMan 项目当前状态
 更新日期：2026-11-07
-更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复；07A/07B/07C 由 Trae 实现，Qoder 三轮复核，Lead 验收；08A/08B/08C 由 Trae 实现并完成复核修复；09A 由 Trae 实现并完成 F1–F15 三轮复核修复，代码验证通过、未提交，待 Qoder 第三轮复核）
+更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复；07A/07B/07C 由 Trae 实现，Qoder 三轮复核，Lead 验收；08A/08B/08C 由 Trae 实现并完成复核修复；09A 已提交 6f38ab7（F1–F15 三轮复核修复；Qoder 第三轮复核判测试 49/50 强度不足，待补强）；09B 由 Trae 实现，Lead 真实验收通过、待提交）
 
 【版本】
 方案版本：V1.3.3（V1.3.2 + 引导式界面 + 连接实测）
@@ -9,14 +9,18 @@ RichMan 项目当前状态
 游戏版本：未发布，目标 V1.0
 
 【进度与范围】
-已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（代码验证通过，工作区未提交，待独立复核）。
-当前子任务：09B 启动/隧道/停止一键脚本（尚未开始）。09A 基线 0f2838e（Qoder 修复验证
-handoff/复核-单元09A-修复验证.txt + 第三轮修复单 handoff/单元09A-复核修复3.txt），按用户要求本轮不 commit。
+已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（已提交 6f38ab7）、09B（代码验证通过，工作区未提交）。
+当前子任务：09C 备份恢复、安全测试补强与文档/许可证/版本记录（尚未开始）。09B 基线 793bb83，
+按用户要求本轮不 commit。
 08C 已提交 d7b67f8 并通过 Qoder 二次验证（63 文件/731 条、typecheck/build 0、6 个 WAV + 播放器/事件音效），真机音频未测。
-09A 后实测 64 文件/781 条（旧 731 未削弱 + security.test 50），typecheck/build 0。
+09A 完成 64 文件/781 条；09B 后实测 65 文件/786 条（旧 781 未削弱 + scripts.test 5），typecheck/build 0。
+一键脚本：scripts/start-lan.ps1、start-tunnel.ps1、stop.ps1、status.ps1 + richman-common.ps1；
+所有 .ps1 为 UTF-8 BOM、兼容 PS 5.1/pwsh 7；真实验收：start-lan→/health 200→
+start-tunnel 打印 https://catalogs-organize-listings-garage.trycloudflare.com→
+外部重试 /health 200→status→stop→8000/8001 无 LISTENING、node/cloudflared 无残留。
 05B 真人试玩：2026-11-06 用户在 07C 后完整玩过一局并确认“不错”，判为真人试玩通过；清单中的等待时长与 360px 截图未逐项记录，并入 08 记录。
-09 拆分：09A 服务加固与限流（已完成，待复核）→ 09B 启动/隧道/停止一键脚本（当前）→ 09C 备份恢复、
-  安全测试补强与文档/许可证/版本记录 → 09D 真机发布验收矩阵（局域网 + 隧道 + 2/10 人）。
+09 拆分：09A 服务加固与限流（已提交）→ 09B 启动/隧道/停止一键脚本（已完成，待提交）→ 09C 备份恢复、
+  安全测试补强与文档/许可证/版本记录（当前）→ 09D 真机发布验收矩阵（局域网 + 隧道 + 2/10 人）。
 08C 音频：全部素材由 make-audio.mjs 合成（无第三方采样），6 个 sha256 见 08C 交接；
       首次手势才 unlock，不自动播放；失败降级不影响游戏。
 05D：BETTING 猜点步可直接“放弃本轮下注”（SUBMIT_BET 0 注）+ GAME_OVER 后房主再来一局（rematch）。
@@ -37,17 +41,16 @@ handoff/复核-单元09A-修复验证.txt + 第三轮修复单 handoff/单元09A
      终局名单与本人破产说明；只改 apps/web，BET_SETTLED 只取本人条目。
 06 起会话与命令去重已落盘（apps/server/data，RICHMAN_DATA_DIR 可覆盖），服务重启后房间恢复为暂停态，房主 resume_game 继续。
 
-【测试与构建（2026-11-07 单元09A 后实测，工作区未提交）】
-pnpm -s test    64 文件 / 781 条（旧 731 未删改 + security.test 50），TEST_EXIT=0，8.40s
+【测试与构建（2026-11-07 单元09B 后实测，工作区未提交）】
+pnpm -s test    65 文件 / 786 条（旧 781 未删改 + scripts.test 5），TEST_EXIT=0，9.04s
 pnpm typecheck  TSC_EXIT=0
 pnpm -s build   BUILD_EXIT=0（index--JyM_5JG.css 18.07kB、index-CrCvzBNf.js 425.13kB，
-                141 modules，239ms；dist/audio 6 文件不变）
-手工验收：/health 三安全头、evil Origin 403、/api/unknown 404、同源 201、
-          text/plain 415、text/plain+"{}" 415、json+"{}" 201、ws evil Origin 升级 403、
-          /api%2Funknown、/api%2Frooms、/api%2funknown、/api 均 404 JSON、
-          init now 抛错 total=0、满房 10×ROOM_FULL+RATE_LIMITED、
-          缺 Sec-WebSocket-Key→400 且 60 次后 guard 归零、随后正常 join 全 PASS
-          （日志 artifacts/test-logs/09Afix3-*）
+                141 modules，196ms；dist/audio 6 文件不变）
+09B 真实验收：start-lan EXIT 0、/health 200；start-tunnel EXIT 0（URL 见上，脚本内
+          30s 健康检查 DNS 延迟 WARN，外部重试 200）；status EXIT 0；stop EXIT 0，
+          NETSTAT 8000/8001 LISTENING=0、两个 pid 不存活、状态文件已删；
+          再次 start-lan 幂等“已在运行” EXIT 0；-Port 8001 起停 PASS。
+          （日志 artifacts/test-logs/09B-*）
 pnpm smoke:lan PASS（05D 验收时）
 旧 481 条中只有两条断言按 Lead 明确授权改正（都在 persistence.test.ts）：
   after_rename_identity_write：旧 token 连接必须 NOT_JOINED，只有恢复码换的新 token 能继续；
@@ -84,6 +87,19 @@ pnpm smoke:lan PASS（05D 验收时）
 - NicknameSchema 禁止 C0 与 DEL，文案固定"昵称不能包含控制字符"，码点 1～20；其余 schema/协议不变。
 - Content-Type 只接受 application/json（空 body 按 {}）；NODE_ENV 不影响 allowedOrigins。
 - 限流是单进程内存态、重启清零；trustProxy 默认关，直连公网开启会被伪造 XFF 绕过。
+
+【09B 不得回退的点】
+- 五个 .ps1 必须 UTF-8 with BOM；入口首行 param(；禁止 PowerShell 7 专有语法。
+- 起服必须单进程 node（--import tsx），stdout/stderr 分文件；不得回到 pnpm 父进程模式。
+- stop 只按 run/server.json、run/tunnel.json 的 pid + 进程名白名单停止；
+  绝不按端口杀陌生进程；无状态文件幂等 exit 0；端口仍占用只 WARN + exit 2。
+- start-lan 健康成功后才写 server.json；失败必须停进程且不写状态。
+- start-tunnel 先本地 /health；已有存活 tunnel.json 幂等打印旧 URL；URL /health
+  30s 失败只 WARN 仍 exit 0；域名每次重启会变。
+- 状态 JSON 单行 UTF-8、.tmp + Move-Item 原子写；dataDir 默认 apps/server/data，
+  可被 -DataDir / RICHMAN_DATA_DIR 覆盖；日志/状态只写 dataDir。
+- 所有脚本支持 -CheckOnly，最后一行单行 JSON；stop/status 的 CheckOnly 不写文件。
+- 停止顺序固定先 tunnel 后 server。
 
 【06 不得回退的点】
 - 提交顺序：tmp + fsync → 备份旧 snapshot 到 snapshot.bak.json → rename 才算出账；rename 成功后才发布内存/广播/回成功。
@@ -189,9 +205,22 @@ https://diego-rotary-inclusive-hughes.trycloudflare.com（2026-11-06 21:5x 重�
    text/plain+"{}" 415、json+"{}" 201、编码 API 路径 404）与 tsx 探针
    （init now 抛错 total=0、满房 10×ROOM_FULL+RATE_LIMITED、缺 Sec-WebSocket-Key→400
     且 60 次后 guard 归零、随后正常 join）全 PASS；四份 handoff 已写。
-   遗留：Qoder 第三轮复核未做；429/503/WS 配额未手工复测（自动化 18/19/24 覆盖）；
+   Qoder 第三轮复核 handoff/复核-单元09A-第三轮验证.txt 结论「需修复」：F13/F14 生产代码
+   已逐路径核实正确，但测试 49/50 在变异下不变红（M1 未先造 total=2 证明只减 1；
+   M2 未等 pong 处理证明 autoPong:false），另 S1 handleUpgrade 同步抛错路径无测试、
+   S2 成果报告条数 48→50 未改；补强单 handoff/单元09A-复核修复4.txt（待 Trae 执行）。
+   遗留：429/503/WS 配额未手工复测（自动化 18/19/24 覆盖）；
    代理层 429/503 未验证；trustProxy 多段 XFF 未独立验证；手机端 Origin 与错误文案转 09D；
    限流为单进程内存态。验收房间 1232、8737、7375 已从 apps/server/data/rooms 清理。
+0e) 09B 一键启动/隧道/停止/状态脚本已完成代码验证（工作区未提交，基线 793bb83）：
+   新增 scripts/richman-common.ps1、start-lan.ps1、start-tunnel.ps1、stop.ps1、
+   status.ps1、apps/server/tests/scripts.test.ts（5 条），README 增加一节。
+   65 文件/786 条、typecheck/build 0；真实验收 start-lan→health 200→
+   start-tunnel（https://catalogs-organize-listings-garage.trycloudflare.com，
+   外部重试 health 200）→status→stop（8000/8001 LISTENING=0、pids 不存活、
+   状态文件删除）→幂等→-Port 8001 起停全 PASS。
+   遗留：真机手机 LAN/隧道、防火墙规则、计划任务迁移、非 Windows、日志轮转未做；
+   上层管道捕获输出时 PS5.1 子进程句柄继承可能等待服务退出（用文件重定向规避）。
 1) 05B 真机复测：按 handoff/单元05B-试玩清单.txt 记录等待/卡点，重点看 05E 提示可见性与 05F 额度数字/禁用态。
 2) 05F 复核已处理（handoff/复核-单元05F.txt）：1 must-fix + 4 should-fix 已修复并全量验证；
    未重拍 360px 截图、“借到贷款后额度 0”只做了单测，并入 05B。
