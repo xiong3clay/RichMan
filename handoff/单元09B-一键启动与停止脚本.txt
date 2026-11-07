@@ -1,0 +1,167 @@
+单元 09B：一键启动 / 隧道 / 停止 / 状态脚本
+================================================
+目标：把现在散落在 D:\Lianjunjie\richman-dev\scripts\ 与计划任务里的启动方式收进仓库，
+做到“双击/一条命令起服、一条命令开隧道、一条命令全停”，不要求管理员权限，
+失败时给人话而不是堆栈。只写脚本与文档，不改服务端逻辑。
+
+现状（已核实）：
+- 服务入口 apps/server/src/http.ts:300-313 已支持 env：PORT（缺省 8000）、RICHMAN_DATA_DIR。
+- 起服命令：corepack pnpm start（tsx 跑源码）；静态文件取 apps/web/dist。
+- 隧道：D:\Lianjunjie\tools\cloudflared.exe tunnel --url http://127.0.0.1:8000 --no-autoupdate，
+  输出里会打印 https://<随机>.trycloudflare.com。
+- 现有 run-richman-server.cmd / run-richman-tunnel.cmd 只是在仓库外 cd + 重定向日志，
+  没有 PID、没有健康检查、停止只能杀进程。
+
+目录与状态文件（全部落在数据目录里，数据目录可被 -DataDir / RICHMAN_DATA_DIR 覆盖）：
+  <dataDir>/run/server.json   { pid, startedAtUtc, port, logOut, logErr }
+  <dataDir>/run/tunnel.json   { pid, startedAtUtc, port, url, log }
+  <dataDir>/logs/server-<yyyyMMdd-HHmmss>.log / -err.log
+  <dataDir>/logs/tunnel-<yyyyMMdd-HHmmss>.log
+写文件用 UTF-8；JSON 用 ConvertTo-Json -Compress 单行，方便测试解析。
+
+新增文件（只允许新增这些 + README 一节 + 测试）：
+1) scripts/richman-common.ps1 —— 被其余脚本 dot-source 的公共函数。
+2) scripts/start-lan.ps1
+3) scripts/start-tunnel.ps1
+4) scripts/stop.ps1
+5) scripts/status.ps1
+6) apps/server/tests/scripts.test.ts
+7) README.md 增加「## 一键启动 / 停止」一节
+
+编码硬要求：所有 .ps1 保存为 **UTF-8 with BOM**（Windows PowerShell 5.1 无 BOM 会把中文
+按 ANSI 解析而报语法错）；也可以选择脚本内输出全用英文规避，但二选一，必须在交接里写明。
+脚本必须同时兼容 Windows PowerShell 5.1 与 pwsh 7：不用 ?? / ?: / -Parallel / 三元等 7 专有语法。
+
+----------------------------------------------------------------
+scripts/richman-common.ps1
+----------------------------------------------------------------
+提供（名字可微调，但语义与返回结构必须一致）：
+- Get-RichManRoot：脚本所在目录的上级（仓库根）。
+- Resolve-DataDir($value)：显式参数 > $env:RICHMAN_DATA_DIR > <root>/apps/server/data。
+- Read-RunState($path)：文件不存在返回 $null；JSON 解析失败返回 $null（不抛）。
+- Write-RunState($path,$object)：先写 $path.tmp 再 Move-Item -Force，父目录不存在则创建。
+- Remove-RunState($path)：存在才删，不抛。
+- Test-PortFree($port)：用 [System.Net.Sockets.TcpClient]::Connect 探 127.0.0.1:$port，
+  连上=占用(false)，连接被拒=空闲(true)；异常也按空闲处理，但捕获异常类型写清楚。
+- Wait-HttpHealth($url,$timeoutSec)：每 500ms Invoke-WebRequest -UseBasicParsing -TimeoutSec 2，
+  任一 2xx/3xx 返回 $true；超时 $false；期间失败不打印堆栈。
+- Get-CloudflaredPath($explicit)：$explicit > $env:RICHMAN_CLOUDFLARED > Get-Command cloudflared >
+  'D:\Lianjunjie\tools\cloudflared.exe'；都不存在返回 $null。
+- Get-ProcessInfo($state)：pid 存活且进程名属于白名单（server: node；tunnel: cloudflared）才返回
+  进程对象，否则 $null（防 PID 复用误杀）。用 Get-Process -Id -ErrorAction SilentlyContinue。
+- Write-CheckJson($object)：把结果对象压成单行 JSON 打印到 stdout（测试用最后一行）。
+
+----------------------------------------------------------------
+scripts/start-lan.ps1
+----------------------------------------------------------------
+参数：-Port 8000、-DataDir ''、-Build（缺省不自动构建）、-TimeoutSec 40、-CheckOnly。
+流程：
+1) 解析 root/dataDir/dist；dist = <root>/apps/web/dist/index.html。
+2) 已有存活 server.json（Get-ProcessInfo + Wait-HttpHealth 本机 /health 通过）：
+   - 正常模式：打印“已在运行 http://127.0.0.1:<port>/ 与数据目录”，exit 0（幂等，不重复起）。
+   - -CheckOnly：ok=false，reason=ALREADY_RUNNING。
+3) -CheckOnly 输出 JSON 后退出；检查项：
+   node（node --version 成功且主版本 >= 22）、webDist、port（Test-PortFree）、dataDir（可写：
+   创建目录并写删一个临时文件）、alreadyRunning。ok = 全部通过；退出码 ok?0:1。
+4) 正常模式：port 被占用且不是本服务 → 打印“端口 <p> 已被占用，请换 -Port 或先 stop”，exit 1。
+5) webDist 缺失：默认报错“请先 corepack pnpm -s build（或加 -Build）”，exit 1；
+   带 -Build 时先执行 corepack pnpm -s build，失败 exit 1。
+6) 启动（单进程，PID 就是 node 本体，避免 pnpm 父进程被杀而子进程残留）：
+     $env:PORT = <port>; $env:RICHMAN_DATA_DIR = <dataDir>
+     Start-Process -FilePath node -ArgumentList @('--import','tsx','--no-warnings',
+       'apps/server/src/http.ts') -WorkingDirectory <root> -WindowStyle Hidden
+       -RedirectStandardOutput <logOut> -RedirectStandardError <logErr> -PassThru
+   注意 PowerShell 要求 stdout/stderr 不能重定向到同一个文件。
+7) Wait-HttpHealth http://127.0.0.1:$Port/health -TimeoutSec；失败：若进程仍在则 Stop-Process，
+   打印日志路径与 err 文件末尾 20 行，exit 1（不写 server.json）。
+8) 成功：写 server.json；打印：
+   - 本机 http://127.0.0.1:<port>/
+   - 所有非回环 IPv4（.NET NetworkInterface，参考 http.ts:288-298）的 http://<ip>:<port>/
+   - 数据目录、日志路径、停止命令 corepack pnpm scripts:stop（或 powershell -File scripts/stop.ps1）
+   - 防火墙提示一行（New-NetFirewallRule -DisplayName "RichMan <port>" ...，需管理员）
+   - 防睡眠提示：笔记本电池策略可能让服务睡眠/退出，建议接电源或设置“接通电源时永不睡眠”
+9) 退出码：0 成功/已运行；1 任何失败。
+
+----------------------------------------------------------------
+scripts/start-tunnel.ps1
+----------------------------------------------------------------
+参数：-Port 8000、-Cloudflared ''、-TimeoutSec 90、-CheckOnly。
+流程：
+1) 先要求本机 health 通过；否则打印“请先启动本地服务：start-lan.ps1”，exit 1。
+2) 解析 cloudflared（Get-CloudflaredPath）；找不到 → 打印放置路径与下载地址
+   https://github.com/cloudflare/cloudflared/releases（或 winget install Cloudflare.cloudflared），exit 1。
+3) 已有存活 tunnel.json 且 pid 是 cloudflared → 打印旧 URL，exit 0（幂等）。
+4) -CheckOnly：输出 JSON（localServer、cloudflared、port、alreadyRunning）后退出。
+5) 启动：
+     Start-Process -FilePath <cloudflared> -ArgumentList @('tunnel','--url',"http://127.0.0.1:<port>",
+       '--no-autoupdate') -WindowStyle Hidden -RedirectStandardOutput <log> -RedirectStandardError <logErr> -PassThru
+6) 每 500ms 读日志（两个文件都读），最长 -TimeoutSec，匹配
+   https://[a-z0-9-]+\.trycloudflare\.com；超时则 Stop-Process 并打印日志末尾，exit 1。
+7) 拿到 URL 后写 tunnel.json，再 Wait-HttpHealth "$url/health" 30s；未通过只打印 WARN
+   （“隧道已开，但健康检查暂未通过，校园 DNS 可能延迟，稍后可用 status 复查”），仍 exit 0。
+8) 打印：隧道 URL（醒目）、本机端口、提醒“每重启隧道域名都会变；换域名后用房间码+恢复码恢复”。
+
+----------------------------------------------------------------
+scripts/stop.ps1
+----------------------------------------------------------------
+参数：-DataDir ''、-CheckOnly。
+流程：
+1) 读两个状态文件。每个：pid 存在且进程名匹配白名单 → 正常模式 Stop-Process；
+   不匹配/已退出 → 只清理状态文件并打印 WARN（绝不按端口杀陌生进程）。
+2) 顺序：先 tunnel 后 server。
+3) 停 server 后轮询 Test-PortFree 最长 10s；仍占用则打印 WARN（“端口仍被占用，可能有非本服务进程”），
+   不强行杀，exit 2。
+4) 正常模式删状态文件；打印每一步结果。
+5) -CheckOnly：只打印将停止的 pid/端口，不动任何进程与文件。
+6) 无任何状态文件 → 打印“未在运行”，exit 0（幂等）。
+
+----------------------------------------------------------------
+scripts/status.ps1
+----------------------------------------------------------------
+参数：-Port 8000、-DataDir ''、-Json、-CheckOnly。
+- 本地 health：GET /health，打印 ok/rooms/connections（body 是 JSON 就直接读，失败显示原因）。
+- 隧道：状态文件 + pid 存活；打印 URL；再 GET <url>/health（5s 超时），失败标 WARN。
+- server 不健康：ok=false，exit 1；健康：exit 0。
+- -Json：打印单行 JSON（server:{ok,port,rooms,connections},tunnel:{url,ok}），测试用。
+- -CheckOnly：不改变状态（本脚本本来只读，仍需接受该参数以统一调用）。
+
+----------------------------------------------------------------
+apps/server/tests/scripts.test.ts
+----------------------------------------------------------------
+仅 Windows 生效：`describe.skipIf(process.platform !== 'win32')`；用 spawnSync 调
+powershell -NoProfile -ExecutionPolicy Bypass -File <script> ...，timeout 30000，
+stdout 取最后一行 JSON 解析；失败时把 stdout/stderr 拼进断言消息。至少 5 条：
+1) 六个脚本文件存在，且都用 param( 开头（common 可除外）。
+2) start-lan -CheckOnly -Port <随机空闲端口> -DataDir <临时目录>：ok=true，
+   checks.node.ok=true、checks.webDist.ok=true、checks.port.available=true。
+3) 先用 net.createServer 占住端口，再 start-lan -CheckOnly：ok=false、
+   reason=PORT_IN_USE、退出码 1；结束关掉占用。
+4) stop -CheckOnly -DataDir <空临时目录>：ok=true、退出码 0，且不创建 run 目录。
+5) status -CheckOnly -Json -Port <空闲端口> -DataDir <空目录>：ok=false、server.ok=false，
+   退出码 1，进程不挂起。
+测试必须自己清理临时目录，不依赖仓库里的 data 目录。
+
+----------------------------------------------------------------
+README.md
+----------------------------------------------------------------
+在“快速开始”附近加一节「一键启动 / 停止」（Windows）：
+  powershell -ExecutionPolicy Bypass -File scripts/start-lan.ps1
+  powershell -ExecutionPolicy Bypass -File scripts/start-tunnel.ps1
+  powershell -ExecutionPolicy Bypass -File scripts/stop.ps1
+  powershell -ExecutionPolicy Bypass -File scripts/status.ps1
+写明：端口/数据目录参数、日志位置、隧道域名每次会变、防火墙与防睡眠提示、
+非 Windows 仍用 corepack pnpm start。
+
+----------------------------------------------------------------
+约束与验收
+----------------------------------------------------------------
+- 不新增依赖；不改 apps/server/src/**、packages/**、apps/web/src/**；不改协议；
+  不动 game-core 与既有测试；旧 781 条不得删除/跳过/放宽。
+- 可选：根 package.json 加 "scripts:lan"/"scripts:stop" 等别名（只加不改），若加必须写进文档。
+- 真实跑：
+  * start-lan → curl http://127.0.0.1:8000/health 200 → start-tunnel 打印 URL →
+    curl <url>/health 200（DNS 延迟可重试）→ status → stop → 端口释放、无 node/cloudflared 残留；
+  * 再跑 start-lan 验证幂等；再用 -Port 8001 起一个验证端口参数，stop 掉。
+- corepack pnpm -s test（781 + 5 = 786 起）、typecheck 0、build 0。
+- 四份 handoff/单元09B-*.txt 写真实输出（含隧道 URL、日志片段、stop 后 netstat 证据），
+  项目当前状态更新测试数与“一键脚本”状态；不 commit。
