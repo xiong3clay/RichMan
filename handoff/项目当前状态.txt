@@ -1,6 +1,6 @@
 RichMan 项目当前状态
 更新日期：2026-11-08
-更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复；07A/07B/07C 由 Trae 实现，Qoder 三轮复核，Lead 验收；08A/08B/08C 由 Trae 实现并完成复核修复；09A 已提交 eeec8ca，第四轮测试补强已提交 bb7c2f2（交接 1ebdbe0，Qoder 复核 PASS）；09B 已提交 6491fe9（文档 39dc1b9），Qoder 复核 FAIL(M1/M2)；第五/六轮修复 bcb9aae、文档 71e099a，Qoder 第六轮验证 code PASS、文档硬伤已改并提交 59c00f0；09C-B 规格已写（handoff/单元09C-B-备份恢复清理脚本.txt，含 Qoder S1–S6 补强）；09C-A 由 Trae 实现、Lead 验收并提交 2bd84cd，Qoder 复核判可提交（66 文件/813 条）；09C-B 已提交 70b18a0（Qoder 两轮复核：M1/M2 修复后 code PASS，文档 M-DOC 已改）；09C-C 已提交 7c8fd7d，Qoder 复核可提交（无 must-fix，S1 文档计数已改）；09C-D 已提交 839c3c6（0.9.0 LICENSE/CHANGELOG/README，typecheck/build 0））
+更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复；07A/07B/07C 由 Trae 实现，Qoder 三轮复核，Lead 验收；08A/08B/08C 由 Trae 实现并完成复核修复；09A 已提交 eeec8ca，第四轮测试补强已提交 bb7c2f2（交接 1ebdbe0，Qoder 复核 PASS）；09B 已提交 6491fe9（文档 39dc1b9），Qoder 复核 FAIL(M1/M2)；第五/六轮修复 bcb9aae、文档 71e099a，Qoder 第六轮验证 code PASS、文档硬伤已改并提交 59c00f0；09C-B 规格已写（handoff/单元09C-B-备份恢复清理脚本.txt，含 Qoder S1–S6 补强）；09C-A 由 Trae 实现、Lead 验收并提交 2bd84cd，Qoder 复核判可提交（66 文件/813 条）；09C-B 已提交 70b18a0（Qoder 两轮复核：M1/M2 修复后 code PASS，文档 M-DOC 已改）；09C-C 已提交 7c8fd7d，Qoder 复核可提交（无 must-fix，S1 文档计数已改）；09C-D 已提交 839c3c6（0.9.0 LICENSE/CHANGELOG/README，typecheck/build 0）；09D 起服时发现 /health 仍硬编码 0.0.0，已改为 0.9.0 并加测试（66 文件/835 条），待提交）
 
 【版本】
 方案版本：V1.3.3（V1.3.2 + 引导式界面 + 连接实测）
@@ -9,8 +9,8 @@ RichMan 项目当前状态
 游戏版本：开发版 0.9.0（未发布，目标 V1.0；1.0.0 门槛：09D 真机矩阵 + 单元 10 D6 + 发布包）
 
 【进度与范围】
-已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（已提交 eeec8ca，第四轮补强 bb7c2f2，交接 1ebdbe0）、09B（首版 6491fe9/39dc1b9；第五、六轮复核修复已提交 bcb9aae，文档 71e099a）、09C-A（实现 2bd84cd，规格 c522bb4，Qoder 复核可提交）、09C-B（实现 70b18a0，Qoder 复核 M1/M2 修复后 code PASS）、09C-C（实现 7c8fd7d，Qoder 复核可提交）、09C-D（发布文档 0.9.0，839c3c6）。
-当前子任务：09D 真机发布验收矩阵（用户按清单操作、Lead 记录；清单见 handoff/单元09D-真机发布矩阵.txt，待写）。09C-D 已完成：仓库进入开发版 0.9.0，MIT LICENSE、CHANGELOG、README 总览与五处 package.json 版本号已提交 839c3c6。
+已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（已提交 eeec8ca，第四轮补强 bb7c2f2，交接 1ebdbe0）、09B（首版 6491fe9/39dc1b9；第五、六轮复核修复已提交 bcb9aae，文档 71e099a）、09C-A（实现 2bd84cd，规格 c522bb4，Qoder 复核可提交）、09C-B（实现 70b18a0，Qoder 复核 M1/M2 修复后 code PASS）、09C-C（实现 7c8fd7d，Qoder 复核可提交）、09C-D（发布文档 0.9.0，839c3c6；/health 版本号修复待提交）。
+当前子任务：09D 真机发布验收矩阵（用户按清单操作、Lead 记录；清单已写 handoff/单元09D-真机发布矩阵.txt，D01–D20，2885 字符，待用户执行）。09C-D 已完成：仓库进入开发版 0.9.0，MIT LICENSE、CHANGELOG、README 总览与五处 package.json 版本号已提交 839c3c6。
 09C-B 完成（70b18a0）：backup.ps1/restore.ps1/cleanup.ps1 + README 备份节 + 09C-A S1/S2 补强；
 Qoder 首轮 M1（父路径 junction 写穿）/M2（显式已存在空 Out）已修复，复验 code PASS，M-DOC（pwsh7 未复现声明）由 Lead 改文档。
 09C 拆分：A 核心库与 CLI（已提交 2bd84cd）→ B PowerShell 包装与备份节（已提交 70b18a0）→
@@ -53,13 +53,14 @@ start-tunnel 打印 https://catalogs-organize-listings-garage.trycloudflare.com�
      终局名单与本人破产说明；只改 apps/web，BET_SETTLED 只取本人条目。
 06 起会话与命令去重已落盘（apps/server/data，RICHMAN_DATA_DIR 可覆盖），服务重启后房间恢复为暂停态，房主 resume_game 继续。
 
-【测试与构建（2026-11-08 单元09C-C 后实测，已提交 7c8fd7d）】
-pnpm -s test    66 文件 / 834 条（原 832 + 2：T1/T2），TEST_EXIT=0（Lead 138s；Qoder 126.45s）
+【测试与构建（2026-11-08 /health 版本号修复后实测）】
+pnpm -s test    66 文件 / 835 条（834 + 1：security.test.ts 21b /health.version == 根 package.json.version），TEST_EXIT=0（126.32s）
 pnpm typecheck  TSC_EXIT=0（1.97s）
 pnpm -s build   BUILD_EXIT=0（index--JyM_5JG.css 18.07kB、index-CrCvzBNf.js 425.13kB，
                 141 modules，1.71s；dist/audio 6 文件不变）
 backup.test.ts 23/23、scripts.test.ts 28/28（真实 Windows PowerShell 5.1）
 pwsh7：本机 where.exe/Test-Path 均找不到 pwsh，09cb-pwsh7.txt 与 09cbfix-pwsh7-current.txt 仅作历史，不作为验收。
+09D 起服：/health 实测 version=0.9.0、protocolVersion=1（计划任务 RichManServer/RichManTunnel 托管）。
 09B 真实验收：start-lan EXIT 0、/health 200；start-tunnel EXIT 0（URL 见上，脚本内
           30s 健康检查 DNS 延迟 WARN，外部重试 200）；status EXIT 0；stop EXIT 0，
           NETSTAT 8000/8001 LISTENING=0、两个 pid 不存活、状态文件已删；
@@ -322,7 +323,22 @@ https://diego-rotary-inclusive-hughes.trycloudflare.com（2026-11-06 21:5x 重�
 - 提交 839c3c6（9 文件 +151/−44）：新增 LICENSE（MIT，Copyright (c) 2026 xiong3clay (连俊杰)）与 CHANGELOG.md（0.9.0，按规则引擎/服务端/网页/安全隐私/文档分组，含已知限制与版本约定）；
   README 重写头部与目录/文档节（157 行：开发版 0.9.0、00～09C-C、66 文件/834 条、发布前剩余四项、玩法与界面、V1.3.3 文档表），保留 09B/09C-B 的启停与备份两节原文；
   根与 apps/web、apps/server、packages/shared、packages/game-core 的 version 全部 0.0.0 → 0.9.0；docs/INDEX.md 同步。
-- 决策：版本 0.9.0（09D+D6+发布包后才 1.0.0）；音频随仓库脚本生成，用 MIT 覆盖并禁止未登记外部素材；未把版本注入 /health（文档/版本记录范围，避免扩大测试面）。
-- 验证：corepack pnpm -s typecheck = 0；build = 0（141 modules，index--JyM_5JG.css 18.07kB、index-CrCvzBNf.js 425.13kB）；五个 package.json 均 0.9.0；README 无旧「443 条」残留。无源码/测试改动，未重跑全量（最近 834 条全绿于 7c8fd7d）。
+- 决策：版本 0.9.0（09D+D6+发布包后才 1.0.0）；音频随仓库脚本生成，用 MIT 覆盖并禁止未登记外部素材；
+  原计划不注入 /health，09D 起服发现 /health 仍硬编码 0.0.0，改为注入 0.9.0（见下节），避免发布时误判版本。
+- 验证：corepack pnpm -s typecheck = 0；build = 0（141 modules，index--JyM_5JG.css 18.07kB、index-CrCvzBNf.js 425.13kB）；五个 package.json 均 0.9.0；README 无旧「443 条」残留。无源码/测试改动，未重跑全量（最近 834 条全绿于 7c8fd7d，health 修复后已重跑 835 条）。
 - 交接：handoff/单元09C-D-{成果报告,运行与验收,下一阶段交接,注意事项}.txt。
-- 下一单元：09D 真机发布验收矩阵（用户操作）→ 单元 10 D6（发布阻断，Codex）→ 单元 11 稳定性演练 → 单元 12 发布包。
+【09D 起服、/health 版本修复与清单（2026-11-08）】
+- 起服方式：DSH run_code 里直接跑 start-lan/start-tunnel 会在命令结束后被 job object 杀掉；WMI Win32_Process Create 报拒绝访问。
+  改用计划任务 RichManServer / RichManTunnel（cmd.exe /c D:/Lianjunjie/richman-dev/scripts/run-richman-server.cmd 与 run-richman-tunnel.cmd；
+  日志 D:/Lianjunjie/richman-dev/logs/richman-server.log、tunnel.log）。任务不写 run/*.json，Lead 已手工补齐 server.json/tunnel.json，
+  scripts/status.ps1 -Json 实测 ok=true、server.ok=true、tunnel.ok=true。
+- 当前入口：局域网 http://10.25.243.87:8000/ ；隧道 https://excel-metallic-reported-walnut.trycloudflare.com
+  （隧道域名重启即变，换域名后用房间码+恢复码）。
+- /health 版本：apps/server/src/http.ts:22 原硬编码 "0.0.0"，改为 "0.9.0"（注释要求与根 package.json、CHANGELOG 同步）；
+  security.test.ts 新增 21b：/health.version 必须等于根 package.json.version（import readFileSync + new URL("../../../package.json", import.meta.url)）。
+  修复后全量 66 文件/835 条、TSC/BUILD 0（141 modules，index--JyM_5JG.css 18.07kB、index-CrCvzBNf.js 425.13kB）。
+- 文档：README 快速开始补 /health 字段说明；CHANGELOG 记版本号测试；09C-D 成果报告把“未注入 /health”改为已注入并补 835 条。
+  以上与 http.ts/security.test.ts 尚未提交（本次一并提交）。
+- 09D 清单：handoff/单元09D-真机发布矩阵.txt（D01–D20，P0/P1，含第二台电脑、10 人、Android/iPhone、蜂窝隧道、断网 30s、锁屏 1min、
+  服务重启+继续游戏、恢复码换 token 旧连接拒绝、销毁房间、多局资源释放、备份恢复；含记录表/失败模板/通过判据/D6 关系）。
+- 下一单元：09D 真机矩阵（用户执行、Lead 记录）→ 单元 10 D6（发布阻断，Codex）→ 单元 11 稳定性演练 → 单元 12 发布包。

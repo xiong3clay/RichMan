@@ -11,7 +11,7 @@
 - 已实现单元：00～09C-C。规则引擎、同源服务端、引导式网页 UI、教程/规则页、
   手机适配、8-bit 音频、债务中心、存档与重启恢复、备份/恢复/清理、服务加固与限流、
   下注结算传输层隐私均已完成
-- 测试：66 文件 / 834 条（core、server、web）；`pnpm typecheck`、`pnpm build` 均通过
+- 测试：66 文件 / 835 条（core、server、web）；`pnpm typecheck`、`pnpm build` 均通过
 - 双客户端冒烟：`pnpm smoke:lan`
 - 发布前剩余：09D 真机发布矩阵、单元 10 D6 多请求规则补全、单元 11 稳定性演练、单元 12 发布包
 - 已知限制见 [CHANGELOG.md](CHANGELOG.md) 与 `handoff/项目当前状态.txt`
@@ -19,11 +19,11 @@
 ## 快速开始
 
     pnpm install
-    pnpm test          # 66 文件 / 834 条测试
+    pnpm test          # 66 文件 / 835 条测试
     pnpm smoke:lan     # 双客户端冒烟（真实服务 + 两个 WS）
     pnpm typecheck
     pnpm build
-    pnpm start         # http://localhost:8000/ ，/health
+    pnpm start         # http://localhost:8000/ ，/health 返回版本、协议版本与在线计数
 
 手机同一局域网访问启动日志里打印的 LAN 地址（默认 8000 端口）。
 界面按阶段一次只问一个问题：行动阶段依次问私人借款 → 银行借款 → 还款/催收 → 结束行动；
