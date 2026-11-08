@@ -1,0 +1,43 @@
+单元 09C-C 注意事项
+================================================================
+日期：2026-11-08
+对象：09C-D 实现者、以后改事件投影/回放的人、发布验收者。
+
+一、09C-D 不要回放 lastEvents 给客户端
+- 本轮只裁剪“发给客户端”的 BET_SETTLED 副本。
+- 服务端内存与磁盘 lastEvents 仍是 engine 原始全量：
+  每名玩家含 betCents/guess/leverage/won/deltaCents/nextCents/overdraftCents。
+- 崩溃恢复、backup、审计、复盘都必须保留全量；但任何对客户端的“历史事件回放”
+  必须重新走 visibleEvents，或为回放单独定义可见投影，绝不能把 lastEvents 直接下发。
+- 快照 schema/file-store/backup manifest 均不得因本需求而改。
+
+二、观战者需要另定可见字段
+- 当前 visibleEvents 只接受 viewerId（连接身份）；players 为 0 或 1 条。
+- 未来若增加观战者，不要复用“玩家本人”过滤：先明确观战者能看到什么
+  （至少 round/drawResult；是否看任何玩家条目需要单独决策与测试）。
+- 不要把观战者当作某个 playerId 塞进 filter，也不要给 BET_SETTLED 加 audience
+  来隐藏整条事件——audience 会让公共开奖结果也消失。
+
+三、事件字段的边界
+- 必须保留：seq/type/at、payload.round、payload.drawResult。
+  客户端事件去重、结算卡与开奖点依赖它们；MUT3 已证明删掉会红。
+- 必须保留本人条目全部字段（betCents/guess/leverage/won/deltaCents/
+  nextCents/overdraftCents），只删除他人的整个条目。
+- 不要新增协议字段；不要改 wireCopy；不要改 eventsForPlayer 的 audience 逻辑。
+- 金额字符串化仍由 wireCopy 完成（*Cents → 十进制字符串）；不要在前端重新计算。
+
+四、测试与防回归
+- T3 改名 settlement_amounts_private；旧 settlement_balance_private 中
+  “他人 betCents/他人 deltaCents 可见”的断言是有意删除的，不要恢复。
+- T1/T2 用真实 WebSocket 与真实 startServer(port 0)；不要为了跑得快改成 mock 网络层。
+- 三组变异是防回归门槛：去 filter（MUT1）、保留条目删金额字段（MUT2）、
+  删 round/drawResult（MUT3）都必须导致 T1/T2/T3 相应变红。
+- 全量基线：本轮 66 文件/834 条；旧 832 条一条未少，只改 T3 一条。
+- 不要碰 apps/server/data 或 8000 端口；测试用随机端口/内存 manager。
+
+五、隐私边界
+- 本轮后，房间内玩家仍知道“有开奖、开奖点、轮次”，但不知道别人押多少、猜几、
+  输赢多少、结算后余额。
+- 公共信息与私人信息的分界由传输层函数集中管理；不要散落到 React/Socket 回调里。
+- lastEvents、备份、审计仍等同私有账务：不要公网/上传/贴聊天。
+- 未验证真实手机观战、历史回放或跨版本回放；这些不属于本轮自动化证据。

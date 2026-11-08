@@ -1,0 +1,51 @@
+单元 09C-C 下一阶段交接（给 09C-D）
+================================================================
+日期：2026-11-08
+代码基线：713855a（09C-C 规格）+ 本轮未提交的 ws.ts/session.test.ts 改动。
+下一单元：09C-D（发布验收矩阵、文档/版本/许可证；若拆分，含观战者可见字段决策）。
+
+一、本轮交付的传输契约
+- BET_SETTLED 仍是房间广播事件，无 audience 字段。
+- 但每个连接收到的是独立裁剪副本：
+  * seq/type/at 保留；
+  * payload.round、payload.drawResult 保留；
+  * payload.players 只含 viewing player 本人条目（字段完整）；
+  * 未下注玩家收到 players=[]。
+- 实现位置：apps/server/src/ws.ts:145-149，visibleEvents 内。
+- 排序：先 eventsForPlayer（处理已有 audience），再对 BET_SETTLED 做 viewer filter，
+  最后由 wireCopy 把 *Cents 数字转十进制字符串。不要调换到 wireCopy 之后再 filter，
+  否则会丢掉字符串化收益；也不要在 filter 结果上再删字段。
+- 测试：apps/server/tests/session.test.ts 的 T3 settlement_amounts_private、
+  T1 bet_amounts_private、T2 draw_result_public_third_player。
+- 防回归：MUT1（恢复全量）、MUT2（保留条目删字段）、MUT3（删 round/drawResult）
+  均已在仓库外副本验证会红；三组失败文本见成果报告与 09C-C-mut-*.log。
+
+二、09C-D 绝不能做
+- 不要把服务端内存/磁盘 lastEvents 原样回放给客户端。
+  lastEvents 现在仍是 engine 生成的全量 BET_SETTLED（含所有玩家 betCents/guess/
+  leverage/won/deltaCents/nextCents/overdraftCents），用于崩溃恢复与审计；
+  任何“重放/复盘/历史事件”接口必须复用 visibleEvents 或另行投影，不能直接下发。
+- 不要给 BET_SETTLED 加 audience 当隐私开关：audience 会整条事件隐藏，
+  连公共 drawResult 也看不到；公共开奖点必须保留给全房间。
+- 不要改 wireCopy 的 cents 字符串化，也不要新增协议字段（如“myPlayerId”）
+  来替代现有 playerId 匹配；前端 settlement.ts/audio.ts 仍按 playerId 找本人。
+- 不要把本轮“他人条目整体移除”退回“保留条目只删金额字段”。
+
+三、观战者（未来）
+- 当前 visibleEvents 只有 viewerId=连接身份；未下注玩家 players=[]。
+- 若 09C-D/后续增加观战者，必须先定义观战者可见字段：
+  建议只给 round/drawResult，不给任何玩家条目；
+  不要复用玩家 viewerId 的过滤逻辑，也不要把观战者伪装成某个 playerId。
+- 观战者的快照/事件投影应单独测试，不能把“玩家自己可见”当作观战者可见。
+
+四、相关不变量
+- lastEvents 落盘、快照 schema、file-store、恢复流程均未改；backup 的 manifest/审计格式不变。
+- 快照消息(game view)不含他人锁注金额，现有 ten_bets_same_version 测试仍通过。
+- 前端不改也能正确渲染：只按 playerId 找本人条目；他人条目消失不影响结算卡/音效。
+- 旧 832 条未削弱；本轮后 66 文件/834 条全绿，typecheck/build 退出 0。
+- 测试不许 mock 网络层；T1/T2/T3 使用真实 startServer + 真实 WebSocket。
+
+五、下一入口
+- 09C-D 若只做发布验收/文档：直接使用本轮的 834 条与真实命令输出，不重跑历史日志冒充。
+- 若扩展事件隐私（观战者/历史回放）：先新增独立投影函数与测试，再改传输路径；
+  不要把 lastEvents 全量暴露，也不要改 engine 事件结构。

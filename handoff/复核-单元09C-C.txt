@@ -1,0 +1,132 @@
+RichMan 单元 09C-C BET_SETTLED 传输层隐私拆分 独立复核
+================================================
+复核员：Qoder（只读复核；未改实现/测试/交接，未 commit）
+日期：2026-11-08
+代码基线：14f5cda（09C-B 已提交）；当前 HEAD 713855a（09C-C 规格文档）
+工作区改动面：M apps/server/src/ws.ts、M apps/server/tests/session.test.ts；
+               4 份 09C-C 交接未跟踪；无其它源码/协议/前端/依赖/快照改动。
+
+结论：可提交（代码/测试/隐私裁剪 PASS；无 must-fix）
+  唯一文档问题：运行与验收第 31 行“其余 23 条原文未动”与实际不符，
+  旧 session.test 共 22 条，T3 改写后应写“其余 21 条原文未动”，列为 should-fix。
+
+一、独立执行结果（自己跑，不引用交接数字）
+1) corepack pnpm -s vitest run apps/server/tests/session.test.ts
+   Test Files 1 passed (1)；Tests 24 passed (24)；Duration 1.13s；EXIT 0
+2) corepack pnpm -s test
+   Test Files 66 passed (66)；Tests 834 passed (834)；Duration 126.45s；EXIT 0
+3) corepack pnpm -s typecheck → TSC_EXIT=0
+4) corepack pnpm -s build → BUILD_EXIT=0；141 modules；built in 291ms
+5) git diff --stat：
+   apps/server/src/ws.ts 9 行（+2/-7）；
+   apps/server/tests/session.test.ts 77 行（+71/-6）；
+   2 files changed, 73 insertions(+), 13 deletions(-)。
+   git status 只有上述 2 个 M + 4 份 09C-C 交接；无 protocol/web/snapshot/deps。
+6) 旧 session.test 数量：git show 14f5cda 为 22 条；本轮 24 条
+   （T1/T2 新增，T3 一条授权改写），因此旧测试实际只有 21 条原样未动。
+
+二、实现逐项（读代码 + 实跑）
+A. 他人条目整体移除：PASS
+- ws.ts:145-149：`payload.players.filter(player => player.playerId === viewerId)`；
+  不是删除字段，而是过滤整个条目；返回 `{...event,payload:{...payload,players}}`。
+- players 长度只会 0/1：filter 结果；viewer 不在列表中时 []（代码逻辑）。
+- seq/type/at：`{...event}` 保留；round/drawResult：`payload` 展开保留。
+- 本人条目：直接复用原对象，字段完整；wireCopy 仍负责 *Cents → 字符串。
+- 未改 wireCopy、eventsForPlayer、TAX/DANGER/银行私有分支、协议、快照。
+
+B. 测试 T1/T2/T3：PASS
+- T3 settlement_amounts_private：p1 players.length=1、playerId p1、
+  betCents "100"、guess 0、leverage 1、won boolean、deltaCents/nextCents string、
+  round number、drawResult 0/1；旧他人 betCents/deltaCents 断言删除。
+- T1 bet_amounts_private：p1 111/guess0，p2 222/guess1；p1 事件 players 仅 p1，
+  JSON 不含 "222"/"p2"；p2 对称不含 "111"/"p1"。
+- T2 draw_result_public_third_player：A/B/C 111/222/0；C drawResult 与 A 相同，
+  players 仅 p3、betCents "0"，事件全文不含 111/222/p1/p2。
+- 全部使用真实 startServer(port 0) + 真实 WebSocket（game()/command()/clients.next），
+  未 mock 网络层；24/24 实跑通过。
+
+C. 变异（仓库外副本，逐组还原 sha256；副本已删除）
+| 变异 | 实际红/绿 | 失败文本摘要 | 还原 |
+|---|---|---|---|
+| MUT1 去掉 filter，恢复全量 players | T1/T2/T3 全红 | T1/T2 expected length 1 but got 2；T2 got 3 | ws.ts aa739eee... 前后一致 |
+| MUT2 保留全量条目，只删 betCents/deltaCents | T1/T2/T3 全红 | T1/T2 length 1 but got 2；T2 got 3 | ws.ts aa739eee... 前后一致 |
+| MUT3 连 round/drawResult 一起删 | T3/T2 红，T1 绿 | T3 expected 'undefined' to be 'number'；T2 expected [0,1] to include undefined | ws.ts aa739eee... 前后一致 |
+与交接一致；MUT1/MUT2 的 players.length 分别为 2/2/3；MUT3 T1 不检查 round/draw，
+因此保持绿，符合规格预期。
+
+D. lastEvents/持久化：PASS（读代码确认）
+- manager.commitTransition:222/229 将 `candidate.lastEvents = result.events` 并
+  `r.lastEvents = structuredClone(result.events)`；exportRoom:144 原样包含 lastEvents。
+- file-store.validateSnapshot:94-98 只校验 lastEvents 结构，不裁剪 payload；
+  commitRoom 写入快照原样。
+- ws.visibleEvents 只 map 出传输副本，BET_SETTLED filter 返回新数组，不修改原 event；
+  lastEvents 未被裁剪。
+- snapshot 走 getPlayerView（views.ts:100+），不包含 lastEvents；
+  客户端拿不到全量历史。backup/审计保留全量，符合交接。
+- 这同时说明：lastEvents 全量仅服务端内存/磁盘，不能直接回放给客户端（注意事项）。
+
+E. 信息泄漏残余：BET_SETTLED 事件本身 PASS
+- 事件 payload 只有 `round/drawResult/players`；players 只有 viewer 本人；
+  event 外层没有 gameId/phaseInstanceId（GameEvent 只有 seq/type/at/payload/audience）。
+- events 消息外层有 gameId/gameVersion，但不是个人金额/playerId；
+  phaseInstanceId 不在事件对象里；公共开奖点 drawResult 与 round 保留。
+- 另一类公开事件 BET_SUBMITTED 仍含其他玩家的 playerId/seatId，但本来只公布
+  “谁已提交”，不含金额/猜测/杠杆；这是既有公共信息，不是 BET_SETTLED 残留。
+  若未来要求连“谁已提交”也隐藏，是另一个事件/另一个规格。
+- 未发现 BET_SETTLED 事件全文带出他人金额或 playerId；未发现公共开奖点被删。
+
+F. 旧测试与范围：PASS
+- git diff 只有 ws.ts 和 session.test.ts；旧 session.test 只有 T3 改名/断言替换，
+  T1/T2 为追加；其它 21 条原文未动（文档“23 条”见 should-fix）。
+- 无协议/前端/快照/file-store/依赖改动；git status 无夹带。
+- 全量 834 = 原 832 + 2；旧测试没有减少。
+
+三、Must-fix
+无。
+未发现隐私绕过、他人条目残余、公共 drawResult/round 丢失、lastEvents 被裁剪、
+旧测试被削弱或协议/前端越界。
+
+四、Should-fix / 测试缺口
+S1 文档计数：handoff/单元09C-C-运行与验收.txt:31 写“其余 23 条原文未动”。
+   实际 git show 14f5cda:apps/server/tests/session.test.ts 共 22 条；T3 改写，
+   其余 21 条未动，T1/T2 新增。应改为 21（或“旧 22 条中 T3 改写，21 条原样；
+   新增 T1/T2”）。
+S2 未下注 viewer 的 players=[] 没有自动化测试。规格明确“观看者未下注时 players=[]”；
+   filter 逻辑正确，但 T1/T2/T3 都下注（T2 C 下注 0 仍有条目）。建议补一条真实 WS
+   （一人不 SUBMIT_BET，等到结算/超时）或独立投影测试。
+S3 seq/at 保留没有直接断言。T3 只断言 payload.round/drawResult 和 type 通过
+   `next("events", type==='BET_SETTLED')`；没有断言 event.seq/at。建议补断言防回归。
+S4 lastEvents 仍全量没有自动化测试。代码已确认（manager/file-store/getPlayerView），
+   但建议加一条测试：结算后读 manager.getGame(room).lastEvents 或 exportRoom，
+   断言全量 players 仍存在，同时客户端事件只有本人。
+S5 T3 没有断言本人 `overdraftCents`；规格要求本人条目字段完整，当前代码透传，
+   建议补该字段（以及可选 nextCents 的数值/字符串边界）。
+S6 若把“events 消息整体不得出现其他 playerId”作为目标，BET_SUBMITTED 仍需另行处理；
+   当前规格只要求 BET_SETTLED 事件，不建议把 S6 当成本轮缺陷。
+
+五、Nits / 边界
+- T1/T2 用 JSON 字符串子串检查 "111"/"222"/"p1"/"p2"，与当前 playerId/金额格式一致；
+  若未来 playerId 格式变化，建议改为对象级断言。
+- `visibleEvents` 先 eventsForPlayer 后 filter，顺序正确；不要改到 wireCopy 之后。
+- 当前觀战者复用玩家 viewerId 不适用；未来需单独定义可见字段（交接已写）。
+- `BET_SUBMITTED` 的 playerId/seatId 是公开“已提交”信息，不是金额泄漏。
+- 真实手机/历史回放/跨版本回放未验证（交接已列）。
+- 文档耗时与本机实跑不同（本机 1.13s/126.45s/291ms），属不同运行，不判不实；
+  834/24/73 插入/13 删除与实跑一致。
+
+六、文档核对
+- 834、24、T1/T2/T3、MUT1/2/3、lastEvents 全量、无协议/前端改动：与实际一致。
+- diff 实际为 73 insertions + 13 deletions（ws 9、session 77），与成果报告第 83 行一致；
+  用户口中的“74 行”不是本仓库实际 git diff 数字（以 git diff 为准）。
+- 唯一不实：运行与验收第 31 行“其余 23 条”应为 21 条（旧 22 条中 T3 改写）。
+- 未发现把未复现的 MUT 结果写成实测：三组我都独立复现，结果与交接一致。
+
+七、结论
+可提交。实现、T1/T2/T3、旧 T3 授权改写、lastEvents 全量、隐私边界与三组变异
+均 PASS；无代码 must-fix。S1 文档计数为 should-fix（建议提交前改 23→21），
+S2–S5 为建议补强测试，不影响本轮结论。
+
+八、清理声明
+- 只读复核，未改实现/测试/交接；未 commit；
+- 变异只在仓库外副本 richman-09cc-mut 进行，三组后已删除；
+- 未碰 apps/server/data、8000；无残留服务/端口/临时目录。

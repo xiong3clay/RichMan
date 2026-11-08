@@ -1,0 +1,65 @@
+单元 09C-C 运行与验收说明
+================================================================
+日期：2026-11-08
+适用：BET_SETTLED 传输层裁剪；只改 ws.ts 与 session.test.ts，不 commit。
+
+一、环境
+Windows；Node v24.18.0；pnpm 11.7.0；Vitest 5.0.5。
+测试使用 startServer(host 127.0.0.1, port 0) 的真实 HTTP/WS，不碰 apps/server/data、不用 8000。
+
+二、红测（改实现前，证明测试能抓住问题）
+corepack pnpm -s vitest run apps/server/tests/session.test.ts
+  24 tests | 3 failed（T3/T1/T2）
+  T3: AssertionError: expected players length 1 but got 2（:406）
+  T1: AssertionError: expected players length 1 but got 2（:433）
+  T2: AssertionError: expected players length 1 but got 3（:467）
+  EXIT 1
+日志：artifacts/test-logs/09C-C-session-red.log
+
+三、绿测（改实现后）
+corepack pnpm -s vitest run apps/server/tests/session.test.ts
+  1 Test File passed；24 Tests passed；Duration 964ms；SESSION_EXIT=0
+日志：artifacts/test-logs/09C-C-session-final.log
+（中间一次 24/24 绿测见 09C-C-session-green.log。）
+
+四、全量
+corepack pnpm -s test
+  Test Files  66 passed (66)
+       Tests  834 passed (834)
+    Duration  113.88s
+    TEST_EXIT=0
+说明：基线 832 条未少；新增 T1/T2 两条；旧 session.test 共 22 条，仅 T3 被授权改写，其余 21 条原文未动。
+日志：artifacts/test-logs/09C-C-full-test.log
+
+五、类型与构建
+corepack pnpm -s typecheck
+  TSC_EXIT=0（无诊断；0 字节日志）
+corepack pnpm -s build
+  ✓ 141 modules transformed
+  ✓ built in 292ms
+  BUILD_EXIT=0
+日志：09C-C-typecheck.log、09C-C-build.log
+
+六、diff 范围
+git status --short：
+  M apps/server/src/ws.ts
+  M apps/server/tests/session.test.ts
+git diff --stat：
+  apps/server/src/ws.ts             | 9 +----
+  apps/server/tests/session.test.ts | 77 ++++++++++++++++++++++++++++++++++++---
+  2 files changed, 73 insertions(+), 13 deletions(-)
+session.test.ts 的 diff 只有：T3 改名/断言替换 + 文件末尾新增 T1/T2；
+其余旧测试（join_secrets_private、ten_bets_same_version、bank_events_private 等）零改动。
+无依赖/协议/前端/脚本/快照改动。
+
+七、变异自检（仓库外临时 clone，已删除）
+基线 24/24 绿。
+MUT1 去 filter → T1/T2/T3 红（players.length 2/2/3）。
+MUT2 只删他人 betCents/deltaCents → T1/T2/T3 红（players.length 仍 2/3）。
+MUT3 删 round/drawResult → T3/T2 红（round undefined；drawResult not in [0,1]），T1 绿。
+每组真实失败断言文本见成果报告第三节与 09C-C-mut-*.log。
+
+八、可选手工探针
+未额外起文件存储服务：T1/T2/T3 已经用真实 startServer + 真实 WebSocket 双/三客户端
+完成“不同金额下注→收 events→检查 BET_SETTLED”的全链路，且断言了整条事件的 JSON
+不含对方金额与 playerId；网络层未 mock。若 09C-D 需要，可再用临时 dataDir 起真实进程复验。

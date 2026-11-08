@@ -1,0 +1,94 @@
+单元 09C-C 成果报告（BET_SETTLED 传输层隐私拆分）
+================================================================
+日期：2026-11-08
+代码基线：713855a（09C-C 规格；代码基线 14f5cda，09C-B 已提交，66 文件/832 条）
+本轮范围：只改 apps/server/src/ws.ts 与 apps/server/tests/session.test.ts。
+提交状态：未 commit（按要求）。
+
+一、改动位置
+apps/server/src/ws.ts:145-149（visibleEvents 的 BET_SETTLED 分支）：
+  旧：map 保留全部 players，仅对他人删除 nextCents/overdraftCents；
+      他人 betCents/guess/leverage/won/deltaCents 仍下发。
+  新：
+      const players = (payload.players as Array<Record<string, unknown>>)
+        .filter(player => player.playerId === viewerId);
+      return { ...event, payload: { ...payload, players } };
+  行为：
+  - event.seq/type/at 原样保留；
+  - payload.round、payload.drawResult 原样保留；
+  - players 只含 viewer 本人（字段完整，仍由 wireCopy 把 *Cents 转字符串）；
+  - 未下注时 players=[]；数组长度只可能 0 或 1。
+  - 未改 wireCopy、未改 eventsForPlayer、未改 TAX/DANGER/银行私有事件分支、
+    未新增协议字段、未改快照 schema/file-store/lastEvents。
+
+二、T1–T3 断言
+T3（旧 settlement_balance_private 改写为 settlement_amounts_private）
+- 场景：两人 END_ACTION 后各 SUBMIT_BET 100/guess0/leverage1。
+- p1 的 BET_SETTLED：players.length===1、players[0].playerId==="p1"；
+- 本人条目 betCents "100"、guess 0、leverage 1、won boolean、
+  deltaCents string、nextCents string；
+- payload.round number、payload.drawResult 0/1；
+- 原“他人 betCents=100 / 他人 deltaCents 为 string”两条弱隐私断言已删除。
+T1（bet_amounts_private）
+- p1 押 111/猜0、p2 押 222/猜1（均一倍）。
+- p1 事件 players.length===1 且 playerId p1；JSON.stringify(该事件) 不含 "222"、不含 "p2"。
+- p2 对称：players.length===1 且 playerId p2；不含 "111"、不含 "p1"。
+T2（draw_result_public_third_player）
+- 三人 A/B/C：111/222/0（均一倍）。
+- C 的 drawResult ∈ {0,1} 且与 A 相同；
+- C 的 players.length===1、players[0].playerId==="p3"、betCents "0"；
+- C 事件全文不含 "111"/"222"/"p1"/"p2"。
+以上 T1/T2/T3 均使用本文件既有 command()/game()/clients[i].next，真实 WS + startServer(port 0)，
+未 mock 网络层、未引入新依赖。
+
+三、变异自检（仓库外 git clone 临时副本，已删除）
+基线（未变异）：session.test.ts 24/24 通过，EXIT 0。
+MUT1 去掉 filter（恢复全量 players）：
+  EXIT 1；T1/T2/T3 红。
+  T1 实际失败：AssertionError: expected [ { playerId: 'p1', …(7) }, …(1) ]
+                to have a length of 1 but got 2（session.test.ts:433）
+  T3 同样 length 2（:406）；T2 length 3（:467）。
+MUT2 保留全量条目但只删 betCents/deltaCents：
+  EXIT 1；T1/T2/T3 红。
+  T1 实际失败：same length 1 but got 2（:433）；
+  T3 length 2（:406）；T2 length 3（:467）。
+MUT3 连 round/drawResult 一起删：
+  EXIT 1；T3 与 T2 红，T1 绿（players 结构仍正确）。
+  T3 实际失败：AssertionError: expected 'undefined' to be 'number'
+                （:414，event.payload.round）
+  T2 实际失败：AssertionError: expected [ +0, 1 ] to include undefined
+                （:465，payload.drawResult）
+日志：artifacts/test-logs/09C-C-mut-{baseline,1,2,3}.log。
+临时克隆位于 %TEMP%\richman-09cc-mut-*，三组跑完后已删除（CLONE_REMOVED=True）。
+
+四、真实命令结果
+corepack pnpm -s vitest run apps/server/tests/session.test.ts
+  1 文件通过；24 tests passed；Duration 964ms；SESSION_EXIT=0
+  artifacts/test-logs/09C-C-session-final.log
+corepack pnpm -s test
+  66 Test Files passed；834 Tests passed；Duration 113.88s；TEST_EXIT=0
+  说明：基线 832 条未减少；新增 T1/T2 两条；旧测试仅授权改写 T3 一条。
+  artifacts/test-logs/09C-C-full-test.log
+corepack pnpm -s typecheck
+  TSC_EXIT=0（无诊断；日志 0 字节）
+  artifacts/test-logs/09C-C-typecheck.log
+corepack pnpm -s build
+  ✓ 141 modules transformed；✓ built in 292ms；BUILD_EXIT=0
+  artifacts/test-logs/09C-C-build.log
+
+五、diff 范围
+git status：仅
+  M apps/server/src/ws.ts
+  M apps/server/tests/session.test.ts
+git diff --stat：2 files changed, 73 insertions(+), 13 deletions(-)
+  ws.ts 9 行改（+2/-7），session.test.ts 77 行（+71/-6）。
+无 package.json/pnpm-lock/协议/前端/仓库其它文件改动。
+
+六、隐私边界
+- 服务端内存与磁盘 lastEvents 仍是 engine 生成的原始全量 BET_SETTLED
+  （含所有 players 的 betCents/guess/leverage/won/deltaCents/nextCents/overdraftCents），
+  用于复盘/审计/崩溃恢复；本单元只裁剪“发给客户端”的副本。
+- 传输副本每名玩家只拿到本人条目；公共开奖点 drawResult 与轮次 round 保留。
+- 未新增 audience 字段：BET_SETTLED 仍是房间广播事件，但每个连接收到的副本不同。
+- 前端 settlement.ts/audio.ts 按 playerId 找本人条目，不需要改；本轮未改 apps/web。
+- 未验证真实手机/观战者；观战者当前没有独立可见字段定义（见注意事项）。
