@@ -699,7 +699,7 @@ function bankruptPlayer(
   player.alive = false;
   player.status = PLAYER_STATUS.BANKRUPT;
   player.cents = 0;
-  player.credit = CREDIT.DEFAULTED;
+  s.actedSeats = s.actedSeats.filter(seat => seat !== player.seatId);
 
   s.privateLoans = settleBankruptcy(s.privateLoans, player.playerId);
   s.requests = closeRequestsForBankrupt(s.requests, player.playerId);
@@ -707,6 +707,9 @@ function bankruptPlayer(
 
   const before = new Map(s.bankLoans.map((loan) => [loan.loanId, loan.status]));
   s.bankLoans = defaultOutstandingBankLoans(s.bankLoans, player.playerId);
+  if (s.bankLoans.some(loan => loan.borrowerId === player.playerId && loan.status === "DEFAULTED")) {
+    player.credit = CREDIT.DEFAULTED;
+  }
   for (const loan of s.bankLoans) {
     if (loan.borrowerId !== player.playerId || loan.status !== "DEFAULTED") continue;
     if (before.get(loan.loanId) === "DEFAULTED") continue;
