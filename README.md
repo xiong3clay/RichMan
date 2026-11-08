@@ -9,9 +9,9 @@
 
 - 方案版本：V1.3.3（施工版）；协议版本：1
 - 已实现单元：00～09C-C。规则引擎、同源服务端、引导式网页 UI、教程/规则页、
-  手机适配、8-bit 音频、债务中心、存档与重启恢复、备份/恢复/清理、服务加固与限流、
+  手机适配、三首轮播背景音乐与 8-bit 音效、债务中心、存档与重启恢复、备份/恢复/清理、服务加固与限流、
   下注结算传输层隐私均已完成
-- 测试：66 文件 / 835 条（core、server、web）；`pnpm typecheck`、`pnpm build` 均通过
+- 测试：67 文件 / 840 条（core、server、web）；`pnpm typecheck`、`pnpm build` 均通过
 - 双客户端冒烟：`pnpm smoke:lan`
 - 发布前剩余：09D 真机发布矩阵、单元 10 D6 多请求规则补全、单元 11 稳定性演练、单元 12 发布包
 - 已知限制见 [CHANGELOG.md](CHANGELOG.md) 与 `handoff/项目当前状态.txt`
@@ -19,7 +19,7 @@
 ## 快速开始
 
     pnpm install
-    pnpm test          # 66 文件 / 835 条测试
+    pnpm test          # 67 文件 / 840 条测试
     pnpm smoke:lan     # 双客户端冒烟（真实服务 + 两个 WS）
     pnpm typecheck
     pnpm build
@@ -151,6 +151,9 @@ richman-backup-<时间戳>/
 
 ## 许可证
 
-代码与自制 8-bit 音频以 MIT 许可证发布，见 [LICENSE](LICENSE)。
-音频由 `apps/web/scripts/make-audio.mjs` 现场合成，不含任何第三方采样或音乐素材；
-若替换为外部素材，必须在此登记来源与许可证。备份文件含身份摘要与私有账务，不得公开、上传或贴到聊天。
+代码与自制 8-bit 音效以 MIT 许可证发布，见 [LICENSE](LICENSE)。
+音效由 `apps/web/scripts/make-audio.mjs` 现场合成，不含第三方采样。
+背景音乐为 3 首 Kevin MacLeod（incompetech.com）曲目，按 CC BY 4.0 使用并轮播：
+*Fluffing a Duck*、*Monkeys Spinning Monkeys*、*Silly Fun*；完整署名、来源链接与替换要求见
+[`apps/web/public/audio/CREDITS.txt`](apps/web/public/audio/CREDITS.txt)。替换 BGM 必须同步更新
+`apps/web/src/audio/manifest.ts`、CREDITS 与本段。备份文件含身份摘要与私有账务，不得公开、上传或贴到聊天。

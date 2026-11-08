@@ -10,14 +10,15 @@ RichMan 项目当前状态
 
 【进度与范围】
 已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（已提交 eeec8ca，第四轮补强 bb7c2f2，交接 1ebdbe0）、09B（首版 6491fe9/39dc1b9；第五、六轮复核修复已提交 bcb9aae，文档 71e099a）、09C-A（实现 2bd84cd，规格 c522bb4，Qoder 复核可提交）、09C-B（实现 70b18a0，Qoder 复核 M1/M2 修复后 code PASS）、09C-C（实现 7c8fd7d，Qoder 复核可提交）、09C-D（发布文档 0.9.0，839c3c6；/health 版本号修复待提交）。
-当前子任务：09D 真机发布验收矩阵（用户按清单操作、Lead 记录；清单已写 handoff/单元09D-真机发布矩阵.txt，D01–D20，2885 字符，待用户执行）。09C-D 已完成：仓库进入开发版 0.9.0，MIT LICENSE、CHANGELOG、README 总览与五处 package.json 版本号已提交 839c3c6。
+当前子任务：09D 真机发布验收矩阵（用户按清单操作、Lead 记录；清单已写 handoff/单元09D-真机发布矩阵.txt，D01–D20，2885 字符，待用户执行）；08C 背景音乐已按用户要求换成三首外部曲目轮播（Lead 实现并验收，handoff/单元08C-背景音乐替换.txt）。09C-D 已完成：仓库进入开发版 0.9.0，MIT LICENSE、CHANGELOG、README 总览与五处 package.json 版本号已提交 839c3c6。
 09C-B 完成（70b18a0）：backup.ps1/restore.ps1/cleanup.ps1 + README 备份节 + 09C-A S1/S2 补强；
 Qoder 首轮 M1（父路径 junction 写穿）/M2（显式已存在空 Out）已修复，复验 code PASS，M-DOC（pwsh7 未复现声明）由 Lead 改文档。
 09C 拆分：A 核心库与 CLI（已提交 2bd84cd）→ B PowerShell 包装与备份节（已提交 70b18a0）→
 C BET_SETTLED 传输层隐私（已提交 7c8fd7d）→ D LICENSE/CHANGELOG/版本记录（已提交 839c3c6）→
 之后 09D 真机发布验收矩阵（当前，局域网 + 隧道 + 2/10 人）。
 计划外但发布前必须：单元 10 D6 多请求（引擎/协议/UI，交 Codex）；单元 11 稳定性与故障演练；单元 12 发布包。
-08C 已提交 d7b67f8 并通过 Qoder 二次验证（63 文件/731 条、typecheck/build 0、6 个 WAV + 播放器/事件音效），真机音频未测。
+08C 已提交 d7b67f8 并通过 Qoder 二次验证（63 文件/731 条、typecheck/build 0、6 个 WAV + 播放器/事件音效），真机音频未测；
+2026-11-08 用户嫌自制 BGM 难听，改为三首 Kevin MacLeod（CC BY 4.0）曲目轮播，音效仍为自制 8-bit（handoff/单元08C-背景音乐替换.txt）。
 09A 完成 64 文件/781 条；09B 第六轮修复后 65 文件/796 条（731 旧 + security 50 + scripts 15，
 即 781 + 15），typecheck/build 0；Qoder 复核 code PASS、Lead 复验 PASS。
 一键脚本：scripts/start-lan.ps1、start-tunnel.ps1、stop.ps1、status.ps1 + richman-common.ps1；
@@ -33,7 +34,7 @@ start-tunnel 打印 https://catalogs-organize-listings-garage.trycloudflare.com�
   RESTORE_TARGET_EXISTS(exit 2)，force 先 rename 原档到 rooms/restore-keep-<ts>-<code>；
   恢复不改 snapshot 字段（paused 由 loadAll 置 true），不伪造审计；cli stdout 恰好一行 JSON；
   cleanupData 处理 logs/backups/corrupt/.tmp 保留策略。必测 T1–T17（T17 用 diskHarness 真实恢复一局）。
-08C 音频：全部素材由 make-audio.mjs 合成（无第三方采样），6 个 sha256 见 08C 交接；
+08C 音频：5 个音效由 make-audio.mjs 合成；BGM 为三首 Kevin MacLeod 曲目（CC BY 4.0，见 public/audio/CREDITS.txt）；
       首次手势才 unlock，不自动播放；失败降级不影响游戏。
 05D：BETTING 猜点步可直接“放弃本轮下注”（SUBMIT_BET 0 注）+ GAME_OVER 后房主再来一局（rematch）。
 05E：顶部 .game-sticky = header + 单条反馈横幅 + 事件通知架，.stage 只放当前步骤卡；
@@ -53,11 +54,11 @@ start-tunnel 打印 https://catalogs-organize-listings-garage.trycloudflare.com�
      终局名单与本人破产说明；只改 apps/web，BET_SETTLED 只取本人条目。
 06 起会话与命令去重已落盘（apps/server/data，RICHMAN_DATA_DIR 可覆盖），服务重启后房间恢复为暂停态，房主 resume_game 继续。
 
-【测试与构建（2026-11-08 /health 版本号修复后实测）】
-pnpm -s test    66 文件 / 835 条（834 + 1：security.test.ts 21b /health.version == 根 package.json.version），TEST_EXIT=0（126.32s）
-pnpm typecheck  TSC_EXIT=0（1.97s）
-pnpm -s build   BUILD_EXIT=0（index--JyM_5JG.css 18.07kB、index-CrCvzBNf.js 425.13kB，
-                141 modules，1.71s；dist/audio 6 文件不变）
+【测试与构建（2026-11-08 BGM 替换与 Range 支持后实测）】
+pnpm -s test    67 文件 / 840 条（835 + 音频/静态新增 5 条：audio 31、static 2），TEST_EXIT=0
+pnpm typecheck  TSC_EXIT=0
+pnpm -s build   BUILD_EXIT=0（index--JyM_5JG.css 18.07kB、index-CoBDshf7.js 426.08kB，
+                141 modules；dist/audio 为 3 mp3 + CREDITS.txt + 5 wav，无 bgm-loop.wav）
 backup.test.ts 23/23、scripts.test.ts 28/28（真实 Windows PowerShell 5.1）
 pwsh7：本机 where.exe/Test-Path 均找不到 pwsh，09cb-pwsh7.txt 与 09cbfix-pwsh7-current.txt 仅作历史，不作为验收。
 09D 起服：/health 实测 version=0.9.0、protocolVersion=1（计划任务 RichManServer/RichManTunnel 托管）。
@@ -338,7 +339,17 @@ https://diego-rotary-inclusive-hughes.trycloudflare.com（2026-11-06 21:5x 重�
   security.test.ts 新增 21b：/health.version 必须等于根 package.json.version（import readFileSync + new URL("../../../package.json", import.meta.url)）。
   修复后全量 66 文件/835 条、TSC/BUILD 0（141 modules，index--JyM_5JG.css 18.07kB、index-CrCvzBNf.js 425.13kB）。
 - 文档：README 快速开始补 /health 字段说明；CHANGELOG 记版本号测试；09C-D 成果报告把“未注入 /health”改为已注入并补 835 条。
-  以上与 http.ts/security.test.ts 尚未提交（本次一并提交）。
+  以上已提交 d07e13d（http.ts + security.test.ts）。
 - 09D 清单：handoff/单元09D-真机发布矩阵.txt（D01–D20，P0/P1，含第二台电脑、10 人、Android/iPhone、蜂窝隧道、断网 30s、锁屏 1min、
   服务重启+继续游戏、恢复码换 token 旧连接拒绝、销毁房间、多局资源释放、备份恢复；含记录表/失败模板/通过判据/D6 关系）。
-- 下一单元：09D 真机矩阵（用户执行、Lead 记录）→ 单元 10 D6（发布阻断，Codex）→ 单元 11 稳定性演练 → 单元 12 发布包。
+- 下一单元：09D 真机矩阵（用户执行、Lead 记录）→ 单元 10 D6 语义 A（发布阻断，Codex）→ 单元 11 稳定性演练 → 单元 12 发布包。
+【08C 背景音乐替换（2026-11-08）】
+- 用户 m04863：「A，另外你写的音乐太难听了，你还是去网上找三个轻松有趣的音乐轮流循环播放吧。我们不做商业化盈利，不用担心侵权问题」。
+  A 同时确认单元 10 D6 采用语义 A（提交请求即消耗行动、牌桌继续、出借人可同时收多个、阶段末统一收口）。
+- 素材：Fluffing a Duck / Monkeys Spinning Monkeys / Silly Fun，均 Kevin MacLeod (incompetech.com)，CC BY 4.0；
+  apps/web/public/audio/bgm-funny-{1,2,3}.mp3（约 67s/125s/75s，320kbps），CREDITS.txt 记录曲名、作者、许可、来源与替换要求。
+- manifest.ts 的 BGM_TRACKS 固定轮播顺序；audio.ts 的 playBgmAt 复用同一个 HTMLAudioElement（iOS 手势授权），
+  onended 切下一首并循环，单首失败顺延，三首全失败才降级不阻塞；make-audio.mjs 只生成 5 个音效，bgm-loop.wav 已删除。
+- http.ts 增加 .mp3/.wav/.txt MIME 与单区间 Range（206/416、accept-ranges、content-range），新增 static.test.ts 2 条。
+- 验证：67 文件/840 条、TSC/BUILD 0；音频 31 条、静态 2 条；构建产物 426.08kB。
+- 待用户真机听感（尤其 iPhone 切歌后能否继续播放）。

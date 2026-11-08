@@ -1,0 +1,45 @@
+RichMan 单元 08C 补充：背景音乐替换为三首外部曲目
+日期：2026-11-08
+执行：Lead（素材选择、服务端 Range、验收）；用户提出需求
+
+一、用户需求（原文）
+“A，另外你写的音乐太难听了，你还是去网上找三个轻松有趣的音乐轮流循环播放吧。我们不做商业化盈利，不用担心侵权问题”
+其中 A 是单元 10 D6 的语义选择：提交借款请求即消耗行动、牌桌继续、出借人可同时收到多个请求、阶段末统一收口。
+
+二、素材与许可
+1. Fluffing a Duck — Kevin MacLeod (incompetech.com)，CC BY 4.0
+2. Monkeys Spinning Monkeys — Kevin MacLeod (incompetech.com)，CC BY 4.0
+3. Silly Fun — Kevin MacLeod (incompetech.com)，CC BY 4.0
+本地文件：apps/web/public/audio/bgm-funny-1.mp3 / -2.mp3 / -3.mp3。
+均为 MP3 320kbps、ID3v2 标签，约 67s / 125s / 75s。
+署名、来源链接、轮播顺序与替换要求写在 apps/web/public/audio/CREDITS.txt。
+虽然用户表示不考虑侵权，仍选择明确 CC BY 4.0 的曲目并在仓库内署名，保留出处，降低再分发风险。
+原自制 bgm-loop.wav 已删除；5 个 8-bit 音效保留，仍由 make-audio.mjs 确定性生成。
+
+三、实现
+1. apps/web/src/audio/manifest.ts
+   - 新增 BgmTrack { file, title, author, license, sourceUrl } 与 BGM_TRACKS（固定顺序：Fluffing a Duck → Monkeys Spinning Monkeys → Silly Fun）。
+   - AUDIO_MANIFEST.bgmTracks 为三首完整 URL；sfx 仍为 tap/submit/win/lose/alert。
+2. apps/web/src/audio/audio.ts
+   - bgm 只创建一个 HTMLAudioElement；playBgmAt(index, attempts) 切歌时改同一个元素的 src，loop=false，onended 自动切下一首并循环。
+   - 复用单元素是刻意的：iOS Safari 只对已获用户手势授权的元素放行后续 play()，每首 new Audio 可能在 iPhone 上切歌即停。
+   - 单首 play() 拒绝/抛错时顺延下一首；连续三首都失败才置 unavailable，界面提示且不阻塞游戏。
+   - 静音时不调用 play；音量改动沿用既有 update，作用在当前元素。
+3. apps/web/scripts/make-audio.mjs 只生成 5 个音效 WAV，删除 BGM 合成逻辑。
+4. apps/server/src/http.ts
+   - MIME 增加 .mp3（audio/mpeg）、.wav（audio/wav）、.txt（text/plain; charset=utf-8）。
+   - 静态文件支持单区间 Range：206 + accept-ranges + content-range + content-length；越界返回 416（bytes */total）；无 Range 返回 200 全量。调用处传 req.headers.range。
+   - 原因：iOS Safari 播放音频常先发 Range 请求；此前会被当作 200 全量返回，兼容性差。
+
+四、测试与验收（Lead 实跑）
+- apps/web/tests/audio.test.ts 31 条、apps/server/tests/static.test.ts 2 条全过。
+- 全量 pnpm test：67 文件 / 840 条全绿；pnpm typecheck exit 0；pnpm build exit 0（141 modules，index--JyM_5JG.css 18.07kB、index-CoBDshf7.js 426.08kB）。
+- dist/audio：三首 mp3 + CREDITS.txt + 5 个 wav，无 bgm-loop.wav。
+- static.test.ts 覆盖：bytes=10-19 → 206/audio/mpeg/bytes 10-19/1000/字节正确；无 Range → 200 全量；bytes=2000-3000 → 416 bytes */1000。
+
+五、替换与维护
+替换曲目时同时改三处：manifest.ts 的 BGM_TRACKS、public/audio/CREDITS.txt、README 许可证段；文件名建议沿用 bgm-funny-N.mp3 并保持顺序。新增曲目数不等于 3 时，轮播仍按数组循环，失败顺延上限为曲目数。
+
+六、遗留
+- 真机音质/轮播切换尚未由用户实测（iPhone 尤其需要确认切歌后能继续播放）；开发环境 React.StrictMode 下 dispose 后音效失效是既有已知项，生产构建不受影响。
+- 运行中的服务需重启才会加载新的 MIME/Range 代码。
