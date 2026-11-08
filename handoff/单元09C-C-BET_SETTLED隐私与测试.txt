@@ -1,0 +1,75 @@
+单元09C-C BET_SETTLED 传输层隐私拆分（唯一规格）
+====================================================
+日期：2026-11-08    基线：14f5cda（09C-B 已提交，66 文件 / 832 条全绿）
+范围：只改 apps/server/src/ws.ts 的 visibleEvents 与 apps/server/tests/session.test.ts；
+      不改 packages/**、apps/web/**、协议、脚本、依赖；不 commit；不碰 apps/server/data 与 8000。
+
+一、问题（现状，已核实）
+1. engine.ts:584-588 的 BET_SETTLED 含全量 players：每人 betCents/guess/leverage/won/deltaCents/
+   nextCents/overdraftCents，事件本身没有 audience，向房间内所有连接广播。
+2. apps/server/src/ws.ts:145-154 只删除他人的 nextCents 与 overdraftCents，仍然下发他人的
+   betCents、guess、leverage、won、deltaCents —— 改过的客户端能准确还原别人押了多少、猜的几、赢输多少。
+3. apps/server/tests/session.test.ts:394-410（settlement_balance_private）把这个弱隐私写成了断言：
+   players[1].betCents === "100"、typeof players[1].deltaCents === "string"。这是本轮唯一授权修改的旧断言。
+4. 前端 apps/web/src/game/settlement.ts:130-134、apps/web/src/audio/audio.ts:323-324 只按 playerId 找本人条目，
+   不依赖他人条目，因此本改动不需要改前端。
+
+二、目标
+每名玩家收到的 BET_SETTLED 只包含：
+- 公共字段：seq/type/at、payload.round、payload.drawResult；
+- players 数组：仅 viewer 自己的条目（字段完整），他人条目整体移除。
+他人条目不得以任何形式出现（不保留 betCents/guess/leverage/won/deltaCents 等任何字段），
+数组长度因此为 0 或 1。观看者未下注时 players 为 []。
+
+三、实现（唯一改法）
+apps/server/src/ws.ts 的 visibleEvents 中 BET_SETTLED 分支：
+  const players = (payload.players as Array<Record<string, unknown>>)
+    .filter(player => player.playerId === viewerId);
+  return { ...event, payload: { ...payload, players } };
+其余分支（TAX_CHARGED/DANGER_RESCUED、银行私有事件、eventsForPlayer）不变。
+约束：
+- 保留 event.seq/type/at 与 round/drawResult，客户端事件去重和结算卡依赖它们；
+- 不要新增协议字段、不要把 filter 结果再删字段、不要改 wireCopy（cents→字符串仍由它完成）；
+- 服务端内存与磁盘的 lastEvents 保留原始全量条目（用于复盘/审计），只裁剪“发给客户端”的副本；
+  这一点写进注意事项，不要顺手改快照 schema 或 file-store。
+
+四、测试（只改 session.test.ts；T1/T2 新增，T3 为授权的旧测试改写）
+T3（改写 settlement_balance_private → settlement_amounts_private）
+- 场景沿用：两玩家都 END_ACTION，然后各 SUBMIT_BET 100/guess 0/leverage 1。
+- 断言客户端 p1 收到的 BET_SETTLED：
+  * payload.players.length === 1，players[0].playerId === p1；
+  * 本人条目仍有 betCents "100"、guess、leverage、won、deltaCents、nextCents（字符串）；
+  * 不再断言他人条目存在（删除 players[1].betCents / deltaCents 两条旧断言）。
+T1（bet_amounts_private，两玩家不同金额）
+- p1 下注 111 猜 0，p2 下注 222 猜 1（一倍杠杆）。
+- p1 的 BET_SETTLED：players.length === 1 且 playerId 为 p1；JSON.stringify(该事件) 不含 "222"；
+  不含 p2 的 playerId。
+- p2 对称：players.length === 1 且 playerId 为 p2；JSON.stringify(该事件) 不含 "111" 与 p1 的 playerId。
+- 允许 drawResult 任取 0/1；只断言结构，不断言输赢结果。
+T2（draw_result_public_third_player，三人）
+- 三玩家 A/B/C：A 下注 111、B 下注 222、C 下注 0（均 leverage 1）。
+- C 的 BET_SETTLED：drawResult 为 0 或 1 且与 A 收到的 drawResult 相同；
+  players.length === 1、players[0].playerId === C、betCents "0"；不含 A/B 金额与 playerId。
+测试写法沿用本文件现有 helper（command()、game()、clients[i].next(...)），不要引入新依赖或 mock 网络层。
+
+五、变异自检（在仓库外副本做，仓库文件一个字节都不要改，做完删除副本）
+MUT1 把 filter 去掉（恢复全量 players）→ T1 必须红（players.length 期望 1，实际 2）。
+MUT2 保留全量条目但只删 betCents/deltaCents 字段 → T1 必须红（players.length 仍为 2）。
+MUT3 把 round/drawResult 也删掉 → T3 或 T2 必须红（结算卡/开奖点断言失败）。
+报告每组变异的实际失败断言文本。
+
+六、验收（必须真实执行并贴原始输出）
+- corepack pnpm -s vitest run apps/server/tests/session.test.ts → 全过（原 20+ 条 + 新增 2 条；条数以实跑为准）
+- corepack pnpm -s test → 66 文件 / 834 条（832 + T1/T2 两条；如实际不同以实跑为准并说明）
+- corepack pnpm -s typecheck、corepack pnpm -s build → 0
+- git diff 只含 ws.ts 与 session.test.ts；旧测试除 T3 外一条未改；无新增依赖、无协议改动。
+- 手工探针（可选但建议）：临时数据目录 + 随机端口起服务，两客户端真实下注不同金额，抓 p1 的 events 消息，
+  确认 BET_SETTLED 的 players 只有 p1 且全文搜不到 p2 的金额；结束后 stop 并清理临时目录。
+
+七、交付
+实现 + 测试 + 四份交接：
+  handoff/单元09C-C-成果报告.txt、运行与验收.txt、下一阶段交接.txt、注意事项.txt
+成果报告写：改动位置（ws.ts 行号）、T1–T3 断言、变异结果、旧 832 条未削弱、隐私边界
+（lastEvents 落盘仍是原始条目；本单元只裁剪传输副本）。
+注意事项写：09C-D 不要把 lastEvents 直接回放给客户端；未来若增加观战者，需要另定其可见字段。
+不 commit。
