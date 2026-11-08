@@ -1,0 +1,169 @@
+单元 12 发布包与内置便携 Node（唯一施工规格）
+日期：2026-11-08
+执行：Codex（实现）→ Lead（验收/提交）→ Qoder（只读复核）
+基线：HEAD 696d7a6，工作区干净；893 测试；版本 0.9.0；协议 1
+目标：在仓库内新增一条可重复的打包流水线，产出一个解压即玩的 Windows 发布包：
+      RichMan-v0.9.0-win-x64.zip（内置便携 Node，不要求玩家安装 Node/pnpm/Git）。
+
+一、硬约束
+1. 不新增任何 npm 依赖；只用现有 node_modules（vite 8）与 Node 24 内置模块、Windows PowerShell 5.1。
+2. 不改引擎规则、不改编排/协议/前端界面；唯一允许的生产代码改动是
+   apps/server/src/http.ts 的 main 分支把 RICHMAN_STATIC_DIR 传给 startServer（见 3.1）。
+3. 现有测试只能追加，不得修改 T1–T28 等旧断言；旧 893 条必须全绿。
+4. 不改 scripts/*.ps1 的开发模式行为（仓库里 corepack pnpm start / tsx 仍照旧）；
+   发布模式必须由“目录形态”自动识别，不能要求玩家设置 RICHMAN_MODE。
+5. 不提交 git，不推送；产出四份 handoff/单元12-*.txt 和 artifacts/test-logs/release-*.txt 证据。
+6. release/ 与 artifacts/node-cache/ 必须写进 .gitignore；发布包不得包含 node_modules、源码、测试、handoff、docs、
+   任何 data/rooms、token、恢复码、备份或日志。
+
+二、发布包目录（解压后顶层只有一个文件夹）
+RichMan-v0.9.0-win-x64/
+  app/server/server.mjs            # Vite SSR 打平后的服务端（含 ws，无外部依赖）
+  app/server/backup-cli.mjs        # Vite SSR 打平后的 backup-cli（create/cleanup 可用）
+  app/web/                         # 即 apps/web/dist 的全部内容（index.html、assets、audio）
+  node/node.exe                    # 官方 node-v24.21.0-win-x64.zip 里的 node.exe
+  node/LICENSE.txt                 # 该 zip 内的 LICENSE
+  node/VERSION                     # 单行 v24.21.0
+  scripts/richman-common.ps1
+  scripts/start-lan.ps1
+  scripts/start-tunnel.ps1
+  scripts/stop.ps1
+  scripts/status.ps1
+  scripts/backup.ps1
+  scripts/restore.ps1
+  scripts/cleanup.ps1
+  start-lan.bat  start-tunnel.bat  stop.bat  status.bat
+  backup.bat     restore.bat       cleanup.bat
+  data/README.txt                  # 仅占位，不含任何存档
+  tools/README.txt                 # cloudflared 放置说明，不捆绑 cloudflared
+  VERSION                          # 与 package.json 同步，如 0.9.0
+  build-info.json                  # 见 3.4
+  LICENSE                          # 项目 MIT
+  CHANGELOG.md
+  使用说明.txt
+  故障排查.txt
+  第三方素材许可.txt               # 音频 CC BY 4.0 署名 + 运行时依赖许可摘要
+  licenses/                        # node/LICENSE.txt、ws/LICENSE、react/LICENSE、react-dom/LICENSE、zod/LICENSE
+  SHA256SUMS.txt                   # 包内所有文件（不含自身）的相对路径与 SHA256
+
+三、实现分层
+
+3.1 服务端静态目录覆盖（apps/server/src/http.ts）
+main 分支改为：
+  startServer({
+    dataDir: process.env['RICHMAN_DATA_DIR'] ?? path.resolve(HERE, '../data'),
+    staticDir: process.env['RICHMAN_STATIC_DIR'],
+  })
+不改 DEFAULT_STATIC_DIR、startServer 签名、/health 字段。补一条测试（可加在 apps/server/tests/http.test.ts）：
+startServer({ staticDir: <临时目录含 index.html> }) 的 GET / 返回该 index，GET /missing 走 SPA 回退；
+若已有等价测试则不必重复，但要在交接里写明复用哪条。
+
+3.2 服务端与 backup-cli 打平（新增 scripts/bundle-server.mjs，Node ESM）
+- 用仓库内 vite 的 JS API：build({ configFile:false, root, logLevel:'warn', resolve:{ alias }, ssr:{ noExternal:true },
+  build:{ ssr:<入口>, outDir:<staging>/app/server, emptyOutDir:false, rollupOptions:{ output:{ entryFileNames } } } })
+  alias 与 vite.config.ts 相同：@richman/shared → packages/shared/src/index.ts，@richman/game-core → packages/game-core/src/index.ts。
+- 两个入口分别产出 server.mjs（apps/server/src/http.ts）与 backup-cli.mjs（apps/server/src/storage/backup-cli.ts）；
+  第一次构建前清空 app/server，第二次 emptyOutDir:false。
+- 校验产物：两个文件均存在且 >50KB；server.mjs 含 "Sec-WebSocket-Key" 或 "WebSocketServer" 证明 ws 已内联；
+  不得出现 "tsx" 运行时依赖；用便携 node 直接 node app/server/server.mjs 能启动。
+- 参考实测：单入口 server.mjs 约 475KB、backup-cli.mjs 约 228KB，均可在无 node_modules 目录运行。
+
+3.3 便携 Node 获取（新增 scripts/fetch-portable-node.ps1）
+参数：-Version（默认 v24.21.0）、-CacheDir（默认 <repo>/artifacts/node-cache）、-ZipPath、-Sha256、-Dest。
+- 默认从 https://nodejs.org/dist/<Version>/ 下载 node-<Version>-win-x64.zip 与 SHASUMS256.txt，
+  必须校验 zip 的 SHA256 与 SHASUMS 中对应行一致；缓存 zip 与 SHASUMS，重复构建不再下载。
+- 允许 -ZipPath 使用本地 zip，但仍必须与同目录/缓存的 SHASUMS256.txt 或显式 -Sha256 匹配；
+  不提供“跳过校验”开关。
+- 解压后只复制 node.exe 与 LICENSE 到 <Dest>，写 node/VERSION；临时解压目录必须清理。
+- 网络失败时输出明确指引：手动把 node-v24.21.0-win-x64.zip 和 SHASUMS256.txt 放进缓存目录后重跑。
+- 当前官方 v24.21.0 win-x64 zip 的 SHA256（供离线对照）：
+  158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541
+
+3.4 打包脚本（新增 scripts/build-release.ps1）
+流程：
+1) $root=Get-RichManRoot；读 package.json 的 version；读 apps/server/src/http.ts 的 VERSION 常量，不一致立即失败。
+2) corepack pnpm -s build；要求 apps/web/dist/index.html 存在且 dist/audio 至少 1 个 mp3 与 4 个 sfx wav。
+3) 清空 release/<name>/ 与 release/<name>.zip（只删这两个确定路径，不递归删 release 根）。
+4) node scripts/bundle-server.mjs -Out release/<name>/app/server（或等价参数）。
+5) fetch-portable-node.ps1 -Dest release/<name>/node（缓存命中则不联网）。
+6) 复制 app/web/dist → app/web、scripts/*.ps1 → scripts/、LICENSE/CHANGELOG/README 片段等；
+   生成 VERSION、build-info.json、使用说明.txt、故障排查.txt、第三方素材许可.txt、licenses/、data/README.txt、tools/README.txt、7 个 .bat。
+   build-info.json 至少含：version、protocolVersion（从 packages/shared 读或写 1）、nodeVersion、builtAtUtc、gitCommit、gitDirty。
+7) 生成包内 SHA256SUMS.txt：相对路径用 /，按路径排序，格式 "<64位大写hash>  <相对路径>"。
+8) Compress-Archive -Path release/<name> -DestinationPath release/<name>.zip -CompressionLevel Optimal -Force；
+   计算 zip 的 SHA256，写 release/SHA256SUMS.txt（一行 zip 名+hash）。
+9) 调 node scripts/verify-release.mjs --dir release/<name> --zip release/<name>.zip；失败则保留现场并 exit 1。
+10) 输出 JSON 摘要到 stdout：ok、version、staging、zip、zipSha256、files、bytes；同时写 artifacts/test-logs/release-build.txt。
+脚本必须可重复：同一输入两次构建允许 builtAtUtc 不同，但文件集合与 server.mjs 大小稳定；zip 内含顶层目录名。
+
+3.5 发布模式识别（改 scripts/richman-common.ps1，追加不改旧函数）
+新增 Get-RichManLayout：若 <root>/app/server/server.mjs 存在则 Portable=true，返回
+  nodeExe=<root>/node/node.exe（不存在时回退 'node'，由 start-lan 报错）、serverEntry、backupCli、
+  webDir=<root>/app/web、webIndex、dataDir=<root>/data；否则 Portable=false，返回现有开发路径。
+Resolve-DataDir 改为优先显式 -DataDir > RICHMAN_DATA_DIR > layout.dataDir。
+Get-CloudflaredPath 在开发模式原有查找顺序前追加发布包查找：<root>/tools/cloudflared.exe、<root>/cloudflared.exe。
+其它函数不动。
+
+3.6 脚本发布分支（只改下列脚本，开发分支必须保持不变）
+- start-lan.ps1：用 layout；node 检查执行 layout.nodeExe --version（要求 >=22）；webDistIndex=layout.webIndex；
+  发布模式启动命令 = & nodeExe app/server/server.mjs，环境 RICHMAN_STATIC_DIR=layout.webDir、RICHMAN_DATA_DIR=dataPath、
+  WorkingDirectory=root；开发模式仍 node --import tsx --no-warnings apps/server/src/http.ts。
+  发布模式收到 -Build 时直接报错“发布包不含源码，不能构建前端”并 exit 1。
+- backup.ps1 / restore.ps1 / cleanup.ps1：发布模式调用 node backup-cli.mjs，开发模式仍 node --import tsx .../backup-cli.ts；
+  参数、JSON 输出、退出码语义完全不变。
+- start-tunnel.ps1：只依赖上面的 cloudflared 查找变化；发布模式提示把 cloudflared.exe 放到 tools/ 或用 RICHMAN_CLOUDFLARED。
+- stop.ps1 / status.ps1：路径来自 Resolve-DataDir，逻辑不变。
+- .bat 统一：@echo off、chcp 65001>nul、cd /d "%~dp0"、powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\<name>.ps1" %*、
+  末尾 pause（便于双击看输出；服务已 detach，不会被 pause 关掉）。.bat 使用 ASCII 文件名与 CRLF。
+
+3.7 校验脚本（新增 scripts/verify-release.mjs）
+输入 --dir、--zip。必须做真实检查，不是只看文件存在：
+- 目录结构、版本一致、SHA256SUMS 覆盖所有文件且 hash 正确；
+- 禁止项：node_modules、apps/server/src、packages、handoff、docs、*.ts（licenses 除外）、data/rooms、data/run、data/logs、*.log、token/recovery 明文；
+- 启动 app/server/server.mjs（用包内 node.exe，端口取空闲端口，RICHMAN_STATIC_DIR/RICHMAN_DATA_DIR 指向临时目录）：
+  /health version 与 VERSION 一致、GET / 200 且含 <div id="root"、GET app/web/audio 下第一个 mp3 200、
+  POST /api/rooms 返回 201 与 4–8 位房间码；结束后杀子进程并确认端口释放；
+- 用包内 node.exe 跑 app/server/backup-cli.mjs create --data <空临时 data> --out <临时>，期望 exit 1 且 JSON code=BACKUP_EMPTY；
+  再跑 cleanup --dry-run，期望 exit 0；
+- 在包目录跑 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-lan.ps1 -CheckOnly -Port <空闲端口> -DataDir <临时 data>，
+  期望 exit 0、JSON ok=true、checks.node.version 以 v24 开头、checks.webDist.ok=true（证明便携模式识别成功）；
+- 用 PowerShell Expand-Archive 把 zip 解压到临时目录，核对顶层文件夹名、VERSION、server.mjs hash 与 SHA256SUMS 一致。
+- 全部通过 exit 0 并写 artifacts/test-logs/release-verify.txt；任一失败 exit 1，打印可直接定位的断言名与实际值。
+
+3.8 测试（新增，不得削弱旧测试）
+- scripts 目录下放纯函数模块 scripts/release-lib.mjs：导出 REQUIRED、FORBIDDEN、parseVersionInfo(packageJsonText, httpTsText)、
+  validateStaging(dir,{version,nodeVersion})；新增 scripts/release-lib.test.mjs 覆盖：版本不一致、缺文件、含 node_modules、
+  含 data/rooms、SHA256SUMS 缺项/坏 hash、合法 fixture；把 "scripts/**/*.test.mjs" 追加进 vitest.config.ts 的 include。
+- apps/server/tests/scripts.test.ts 追加 T29：临时目录构造 <root>/app/server/server.mjs、<root>/app/web/index.html、<root>/scripts/richman-common.ps1，
+  dot-source 后断言 Get-RichManLayout.Portable=true、DataDir=<root>/data、WebDir=<root>/app/web、NodeExe 以 node.exe 结尾；
+  再加 T30：同一临时目录下 Resolve-DataDir '' 返回 <root>/data，显式 -DataDir 优先。
+- 预计新增 10～14 条；最终 pnpm test 应为 903～907 条，typecheck 0、build 0。
+
+四、文档（发布包内与仓库各一份）
+1. 使用说明.txt：双击 start-lan.bat；本机/局域网地址；防火墙放行；手机同 Wi-Fi 用局域网 IP；
+   公网临时隧道（把 cloudflared.exe 放 tools/，双击 start-tunnel.bat，域名每次变，用房间码+恢复码回座）；
+   停止/状态/备份/恢复/清理；数据在 data/，备份含身份摘要不得外传；版本与已知限制（无账号系统、无自动更新、隧道非固定域名）。
+2. 故障排查.txt：端口占用、Node 缺失（正常不应发生）、杀软拦截、防火墙、隧道未找到、恢复时服务在跑（SERVICE_RUNNING）、
+   状态文件损坏（stop exit 2 的人工处理）、日志位置 data/logs。
+3. 第三方素材许可.txt：三首 Kevin MacLeod BGM 的 CC BY 4.0 署名与链接（照抄 apps/web/dist/audio/CREDITS.txt），
+   自制 sfx；Node/ws/react/react-dom/zod 的 MIT 许可与 licenses/ 路径。
+4. README.md 追加“发布包构建（Windows）”一节：命令 corepack pnpm -s release:build、首次需联网下载 Node 或手动缓存、
+   产物路径、SHA256、验证脚本、正式发布前必须过 09D 矩阵；版本 1.0.0 在 09D 通过后再改，单元 12 仍产出 0.9.0。
+5. package.json 增加 scripts：release:build、release:verify（调 PowerShell/verify）。
+6. 四份 handoff/单元12-*.txt：成果、运行与验收（含真实命令输出/包大小/SHA256/手工步骤）、下一阶段交接、注意事项。
+
+五、完成定义（Codex 交付时必须逐条自证）
+1. 旧 893 条测试未改且全绿；新增测试全绿；typecheck/build 0。
+2. scripts/bundle-server.mjs 单独运行成功；两个 mjs 能在无 node_modules 的临时目录启动。
+3. build-release.ps1 真实产出 zip；verify-release.mjs 全 PASS；包内不含任何禁止项。
+4. 包内 start-lan.ps1 -CheckOnly 在“只有发布包、没有仓库”的目录返回 ok=true（用包内 Node）。
+5. 手工证据：把 zip 解压到含空格/中文的临时目录，启动、GET /health、建房、备份/恢复至少各一次；日志路径写进交接。
+6. 没有 git commit；变更文件清单用 git status 列出（应只有 scripts/、apps/server/src/http.ts、apps/server/tests、vitest.config.ts、package.json、.gitignore、README、handoff）。
+7. 若任何一步无法完成，停在该步并报告实际错误，不要用“未验证/应该可以”代替证据。
+
+六、风险与边界
+- Vite SSR 打平可能把动态 import 或 __dirname 类代码打坏：必须真实启动两个 mjs 验证；不得只凭构建 exit 0。
+- 便携 node.exe 约 90MB，zip 约 40–60MB；压缩使用 Optimal，不用分卷。
+- 杀软可能对未签名 node.exe 报警：这是已知风险，写入故障排查，不绕过。
+- cloudflared 不捆绑（体积/许可/更新），只检测；公网玩法仍受临时域名限制。
+- 09D 真机矩阵未执行前，版本保持 0.9.0，不得在文档/包名写 1.0.0。
