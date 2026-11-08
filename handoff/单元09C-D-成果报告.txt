@@ -1,0 +1,42 @@
+单元 09C-D 成果报告（发布文档与版本记录）
+日期：2026-11-08
+执行者：Lead
+提交：839c3c6 docs(release): 0.9.0 版本记录、LICENSE 与 README 总览
+
+一、交付文件
+1. LICENSE（新增，21 行）：MIT 许可证，Copyright (c) 2026 xiong3clay (连俊杰)。
+   覆盖仓库内代码、文档与自制音频；README「许可证」节补充：音频由
+   apps/web/scripts/make-audio.mjs 现场合成，不含第三方采样；若替换外部素材必须登记来源与许可证。
+2. CHANGELOG.md（新增）：0.9.0 条目按「规则引擎 / 联机服务端 / 网页界面 / 安全与隐私 / 文档与工程」
+   分组，记录 00～09C-C 的可见能力；单列「已知限制」（D6 未实现、09D 未完成、真机边界、
+   无观战者、BET_SUBMITTED 公开提交状态）；末尾写版本号约定（0.9.x 开发版，1.0.0 在 09D+D6+发布包后）。
+3. README.md（重写头部与目录/文档节，157 行）：当前状态改为「开发版 0.9.0，尚未正式发布」、
+   已实现 00～09C-C、66 文件/834 条、发布前剩余四项；新增「玩法与界面」概览（阶段顺序、
+   银行/私人借贷/失信、危险自救、隐私、教程与查账不消耗行动）；目录树补 CHANGELOG/LICENSE、
+   game-core/server/web/scripts 的真实职责；文档表升 V1.3.3；AI 开工话术改为读项目当前状态与决策表。
+   原有「一键启动/停止」与「备份、恢复与清理」两节逐字保留。
+4. 版本号：根 package.json 与 apps/web、apps/server、packages/shared、packages/game-core
+   全部由 0.0.0 升为 0.9.0；未改依赖、未改协议版本（仍为 1）。
+5. docs/INDEX.md：方案表补 V1.3.3；reference 的「单元 00～03」改为「追溯规则时」；
+   「交付物在哪里」补版本记录、许可证、Qoder 复核、mobile-metrics、默认数据目录。
+
+二、决策与理由
+- 版本定为 0.9.0 而非 1.0.0：09D 真机矩阵与 D6 尚未完成，CHANGELOG 明确 1.0.0 的发布门槛。
+- 音频不单独发 CC0：素材由仓库内脚本生成、随代码分发，直接用 MIT 覆盖可避免双许可证；
+  同时在 README 留「外部素材必须登记」的约束。
+- 未把版本号注入 /health：本轮是文档与版本记录，改服务端响应会扩大测试面；
+  运行版本以 package.json/README/CHANGELOG 为准，若 09D 需要可在单元 12 统一加。
+- README 保留两段运维原文，避免 09B/09C-B 已验收的退出码、备份结构说明被改写走样。
+
+三、验证
+- corepack pnpm -s typecheck → 退出码 0。
+- corepack pnpm -s build → 退出码 0，141 modules，apps/web/dist/assets/index--JyM_5JG.css 18.07kB、
+  index-CrCvzBNf.js 425.13kB（与 09C-C 验收一致，文档改动不影响产物）。
+- 五个 package.json 解析后 version 均为 0.9.0；README 中旧「443 条」已无残留，
+  「一键启动」「备份恢复」两节标题与关键句仍在。
+- 未跑全量测试：本轮只改文档、LICENSE 与 version 字段，无源码/测试改动；最近一次全量为 834 条全绿（7c8fd7d）。
+
+四、未做
+- 09D 真机发布矩阵（需用户在局域网/手机/隧道上执行，Lead 记录）。
+- 单元 10 D6 多请求（发布阻断项）。
+- /health 版本字段、发布包 zip、安装向导。

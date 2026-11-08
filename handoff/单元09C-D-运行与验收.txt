@@ -1,0 +1,27 @@
+单元 09C-D 运行与验收
+日期：2026-11-08
+
+一、复现命令（仓库根目录）
+  corepack pnpm -s typecheck
+  corepack pnpm -s build
+  git show --stat 839c3c6
+  git log --oneline -3
+
+二、预期结果
+- typecheck 退出码 0，无输出。
+- build 退出码 0；141 modules；CSS 18.07kB、JS 425.13kB（文件名以当次构建为准）。
+- 839c3c6 含 9 个文件：README.md、CHANGELOG.md、LICENSE、docs/INDEX.md、5 个 package.json；
+  +151/−44。
+- git log 顶部为 839c3c6，其次 dc41059（09C-C 文档）、7c8fd7d（09C-C 实现）。
+
+三、人工检查清单
+[ ] README 首屏写明「开发版 0.9.0，尚未正式发布」，不再出现「单元 00～04」「443 条」等旧状态。
+[ ] README 的「一键启动/停止」与「备份、恢复与清理」两节与 09B/09C-B 验收文本一致。
+[ ] CHANGELOG 的「已知限制」包含 D6、09D、真机边界、无观战者。
+[ ] LICENSE 为 MIT 原文，版权行含 xiong3clay (连俊杰)。
+[ ] 五个 package.json 的 version 均为 0.9.0；pnpm-lock.yaml 未被改动。
+[ ] docs/INDEX.md 指向 V1.3.3，交付物节含 CHANGELOG/LICENSE。
+
+四、边界
+- 本轮无源码改动，不需要重启服务或迁移数据。
+- 若之后改 package.json 版本，必须同步 README 当前状态与 CHANGELOG，不能只改一处。
