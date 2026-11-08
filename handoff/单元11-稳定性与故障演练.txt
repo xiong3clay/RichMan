@@ -18,7 +18,7 @@
 2.1 固定脚本 driver（测试内 helper，不导出到 src）
 - 10 名玩家 p1..p10，config { timerMode:"fast", privateDebtAffectsBankLoan:false }。
 - 每次 applyCommand 前构造 { protocolVersion:1, gameId, commandId:"c"+n, type, payload }，ctx={ actorId, nowMs, drawResult }。
-- 失败命令（outcome.ok===false）必须断言 state 与调用前 structuredClone 完全相等（失败原子性），然后继续下一步；不得把失败当崩溃。
+- 失败命令（outcome.ok===false 且本次调用前 nowMs < 旧 deadlineAt，即没有到期系统追赶）必须断言 state 与调用前 structuredClone 完全相等（失败原子性），然后继续下一步；不得把失败当崩溃。若 nowMs 已过 deadline，允许 system 先推进，此时只断言 outcome.ok===false 且 state 不出现 I1–I13 违规。
 - advanceSystem 时 nowMs 取 max(now+1, Date.parse(state.deadlineAt ?? 0))，actorId:"SYSTEM"。
 - 步骤上限 3000；超过即 fail 并打印 phase/round/version/lastEvent。
 
@@ -37,7 +37,7 @@ I2 每名玩家 credit ∈ {GOOD,DEFAULTED}；status ∈ {ALIVE,DANGER,BANKRUPT}
 I3 credit==="DEFAULTED" ⇒ 至少存在一条该玩家的 DEFAULTED 银行贷款记录（用 bankLoans 判断，不要只看 credit）。
 I4 cents、betCents、remainingCents、principalCents、paidCents 均为安全整数；|cents| ≤ MAX_MONEY_CENTS。
 I5 round 单调不减，且 ≥1；phase ∈ PHASES；GAME_OVER 之后不再变化。
-I6 本次调用若 version 前进：新 version > 旧 version；eventSeq 单调不减；本次 events 的 seq 从旧 eventSeq+1 起严格连续，且新 eventSeq === 旧 eventSeq + events.length（仅限本测试的无旧指针迁移新局）。
+I6 本次调用若 version 前进：新 version > 旧 version；eventSeq 单调不减；本次 events 的 seq 从旧 eventSeq+1 起严格连续，且新 eventSeq === 旧 eventSeq + events.length（仅限 outcome.ok===true 或 advanceSystem 成功、且无旧指针迁移的新局）。失败且无系统追赶时 version 不得变。
 I7 deadlineAt 为 null 或可 Date.parse 的 ISO；windowDeadlineMs 为 null 或有限整数；二者同为 null 或同为非 null。
 I8 currentSeatId 为 null 或属于 alive 玩家；actedSeats 无重复且都属于 alive 玩家。
 I9 bankLoans：loanId 唯一；borrowerId 存在；remainingCents/paidCents ≥0；status ∈ {ACTIVE,REPAID,DEFAULTED}；status==="REPAID" ⇒ remainingCents===0；DEFAULTED ⇒ remainingCents>0。
