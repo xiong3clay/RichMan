@@ -43,7 +43,11 @@
 7. 视图
    - getPlayerView 现有 pendingRequest（本人 PENDING）与 incomingRequests（本人为出借人的 PENDING 数组）已满足多请求；不要新增他人可见字段，不要暴露请求金额给第三人。
    - 若请求数组顺序影响 UI，按 createdAtMs 升序、requestId 次序稳定输出。
-8. 不变量
+8. 同意时余额不足
+   - 严格按方案 V1.3.3 第 199 行：已过格式校验的同意若因余额等业务条件失败，请求设 FAILED 并结束行动。
+   - ACTION 阶段行动已在提交请求时消耗，因此这里只把请求置 FAILED、发 LOAN_REQUEST_CLOSED(status=FAILED)、不转账、不建合同，返回 ok:true；不要抛 INSUFFICIENT_FUNDS，也不要让请求保持 PENDING。
+   - 多请求下只影响被同意的这一条，其他 PENDING 不变。
+9. 不变量
    - 任一时刻同一 borrowerId 最多一个 PENDING。
    - ACTION 阶段除当前座位外，任何人的 actedSeats 不因“同意/拒绝/取消”改变。
    - 阶段结束（BETTING/TAX/下一轮）时不得残留 PENDING。
@@ -60,7 +64,7 @@ T7 阶段末统一收口：所有座位行动完成后进入 BETTING，所有剩
 T8 同一借款人第二个请求被 DUPLICATE_PENDING_REQUEST 拒绝，且不消耗其行动（若其仍当前座位）。
 T9 TAX 自救借款回归：危险玩家请求→出借人同意→负余额转正→自救结束，流程与旧测试一致。
 T10 旧快照迁移：ACTION + pendingRequestId 的 state 经 normalize/加载后，借款人座位在 actedSeats、pendingRequestId 为 null，牌桌可继续（可直接调用 applyCommand/advanceSystem 验证）。
-T11 金额守恒与上限：出借人余额不足时 accept 返回 INSUFFICIENT_FUNDS，两个请求都不变，不产生负出借人。
+T11 出借人余额不足（沿用计划 199 行，不得改成 INSUFFICIENT_FUNDS）：同意仍返回 ok:true，但请求置 FAILED、发 LOAN_REQUEST_CLOSED(status=FAILED)、不转账、不建合同；ACTION 下借款人行动已在提交时消耗，其他 PENDING 请求不受影响，不得出现负出借人。
 
 五、验收
 - pnpm -s exec vitest run packages/game-core 全绿；pnpm -s test 全量不得低于 840 且无旧测试被削弱（语义变更需逐条说明）。
