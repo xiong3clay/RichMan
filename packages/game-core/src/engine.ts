@@ -65,7 +65,7 @@ interface EngineExtras {
   currentSeatId: SeatId | null;
   /** BANK_DUE 正在等待决策的贷款。 */
   pendingDueLoanId: string | null;
-  /** 已发起但仍在等待出借人答复的请求（此时该玩家行动已用掉但阶段不推进）。 */
+  /** 仅TAX自救等待窗口使用；ACTION请求由requests独立管理，不阻塞牌桌。 */
   pendingRequestId: string | null;
   /** 当前窗口截止的数值毫秒，与 deadlineAt 同步。 */
   windowDeadlineMs: number | null;
@@ -149,13 +149,13 @@ export function createInitialState(gameId: string, config: RoomConfig, seeds: Pl
 
 /**
  * 规则引擎入口。纯函数：只使用 ctx 注入的时间与开奖结果，不读系统时钟、不取随机源。
- * 阶段推进（含超时兜底）在命令前后各执行一次，保证“最后一人行动完立即进 BETTING”。
+ * 阶段推进（含超时兜底）在命令前后各执行一次，行动与待答复请求全部收口后进入 BETTING。
  */
 export function applyCommand(state: GameState, command: GameCommand, ctx: CommandContext): TransitionResult {
   const s = normalizeState(state);
   const events: GameEvent[] = [];
   const baseVersion = state.version;
-  let systemChanged = false;
+  let systemChanged = hasLegacyActionPointer(state);
   let handled = false;
   let outcome: CommandOutcome;
 
@@ -194,7 +194,7 @@ export function advanceSystem(state: GameState, ctx: CommandContext): Transition
   const events: GameEvent[] = [];
   const baseVersion = state.version;
   let outcome: CommandOutcome = { ok: true };
-  let changed = false;
+  let changed = hasLegacyActionPointer(state);
   try {
     changed = runSystem(s, ctx, events) || changed;
     changed = runSystem(s, ctx, events) || changed;
@@ -217,10 +217,14 @@ export function advanceSystem(state: GameState, ctx: CommandContext): Transition
 export function resumeFromPause(state: EngineState, ctx: { nowMs: number }): EngineState {
   if (state.phase === "GAME_OVER") return state;
 
-  const s = structuredClone(state);
+  const s = normalizeState(state);
   const timers = TIMERS[s.config.timerMode];
   let deadlineMs: number | null = null;
-  if (s.phase === "ACTION") deadlineMs = ctx.nowMs + timers.actionSec * 1000;
+  if (s.phase === "ACTION") {
+    // 旧等待快照迁移后借款人已行动；只选下一席，不执行系统结算。
+    if (s.currentSeatId === null) s.currentSeatId = nextSeat(s);
+    if (s.currentSeatId !== null) deadlineMs = ctx.nowMs + timers.actionSec * 1000;
+  }
   if (s.phase === "BANK_DUE") deadlineMs = ctx.nowMs + timers.bankDueSec * 1000;
   if (s.phase === "BETTING") deadlineMs = ctx.nowMs + timers.bettingSec * 1000;
   if (s.phase === "TAX" && s.dangerDeadlineMs !== null) {
@@ -228,8 +232,14 @@ export function resumeFromPause(state: EngineState, ctx: { nowMs: number }): Eng
     deadlineMs = s.dangerDeadlineMs;
   }
 
-  // 请求等待窗口比行动/自救总窗口短，必须同步更新请求本身，避免旧 deadline 使其立即过期。
-  if (s.pendingRequestId !== null && deadlineMs !== null) {
+  // ACTION请求续期独立于当前座位行动窗口，不因45秒请求时限压短60秒行动。
+  if (s.phase === "ACTION") {
+    s.requests = s.requests.map(request => request.status === "PENDING"
+      ? { ...request, deadlineMs: ctx.nowMs + timers.requestSec * 1000 } : request);
+    if (s.currentSeatId === null) deadlineMs = earliestPendingRequestDeadline(s);
+  }
+  // TAX保留原有等待窗口与自救总截止关系。
+  if (s.phase === "TAX" && s.pendingRequestId !== null && deadlineMs !== null) {
     const request = s.requests.find(
       (item) => item.requestId === s.pendingRequestId && item.status === "PENDING",
     );
@@ -249,6 +259,10 @@ export function resumeFromPause(state: EngineState, ctx: { nowMs: number }): Eng
 /* 状态归一化、事件、截止时间                                          */
 /* ------------------------------------------------------------------ */
 
+function hasLegacyActionPointer(state: GameState): boolean {
+  return state.phase === "ACTION" && (state as RawEngineState).pendingRequestId != null;
+}
+
 function normalizeState(state: GameState): EngineState {
   const s = structuredClone(state) as RawEngineState;
   s.bankLoans = s.bankLoans ?? [];
@@ -266,6 +280,20 @@ function normalizeState(state: GameState): EngineState {
   s.taxIndex = s.taxIndex ?? 0;
   s.dangerSeatId = s.dangerSeatId ?? null;
   s.dangerDeadlineMs = s.dangerDeadlineMs ?? null;
+  // 旧ACTION快照的全局等待指针：提交请求的借款人行动已经用掉。
+  if (s.phase === "ACTION" && s.pendingRequestId !== null) {
+    const request = s.requests.find(item => item.requestId === s.pendingRequestId);
+    const borrower = s.players.find(player => player.playerId === request?.borrowerId);
+    if (borrower) {
+      if (!s.actedSeats.includes(borrower.seatId)) s.actedSeats.push(borrower.seatId);
+      if (s.currentSeatId === borrower.seatId) {
+        s.currentSeatId = null;
+        s.windowDeadlineMs = null;
+        s.deadlineAt = null;
+      }
+    }
+    s.pendingRequestId = null;
+  }
   return s as EngineState;
 }
 
@@ -302,6 +330,16 @@ function setPhase(s: EngineState, phase: GameState["phase"], deadlineMs: number 
 
 function actionSec(s: EngineState): number {
   return TIMERS[s.config.timerMode].actionSec;
+}
+
+function earliestPendingRequestDeadline(s: EngineState): number | null {
+  let deadlineMs: number | null = null;
+  for (const request of s.requests) {
+    if (request.status === "PENDING") {
+      deadlineMs = deadlineMs === null ? request.deadlineMs : Math.min(deadlineMs, request.deadlineMs);
+    }
+  }
+  return deadlineMs;
 }
 
 /* ------------------------------------------------------------------ */
@@ -357,28 +395,26 @@ function runSystem(s: EngineState, ctx: CommandContext, events: GameEvent[]): bo
     }
 
     if (s.phase === "ACTION") {
-      if (s.pendingRequestId !== null) {
-        const request = s.requests.find((item) => item.requestId === s.pendingRequestId);
-        if (!request || request.status !== "PENDING") {
-          s.pendingRequestId = null;
-          setDeadline(s, null);
-          changed = true;
-          continue;
-        }
-        if (ctx.nowMs >= request.deadlineMs) {
+      // 每笔请求各自超时；不结束任何人的当前行动或重设其窗口。
+      for (const request of s.requests) {
+        if (request.status === "PENDING" && ctx.nowMs >= request.deadlineMs) {
           replaceRequest(s, request.requestId, expireLoanRequest(request));
-          s.pendingRequestId = null;
-          finishSeatAction(s);
           emit(s, events, ctx, "LOAN_REQUEST_EXPIRED", { requestId: request.requestId });
           changed = true;
-          continue;
         }
-        break;
       }
 
       if (s.currentSeatId === null) {
         const seat = nextSeat(s);
         if (seat === null) {
+          const pendingDeadline = earliestPendingRequestDeadline(s);
+          if (pendingDeadline !== null) {
+            if (s.windowDeadlineMs !== pendingDeadline) {
+              setDeadline(s, pendingDeadline);
+              changed = true;
+            }
+            break;
+          }
           enterBetting(s, ctx, events);
           changed = true;
           continue;
@@ -965,7 +1001,7 @@ function createPrivateRequest(
   }
 
   const requestDeadline = ctx.nowMs + TIMERS[s.config.timerMode].requestSec * 1000;
-  const deadlineMs = Math.min(requestDeadline, windowDeadline);
+  const deadlineMs = s.phase === "TAX" ? Math.min(requestDeadline, windowDeadline) : requestDeadline;
 
   const request = createLoanRequest({
     requestId,
@@ -983,8 +1019,10 @@ function createPrivateRequest(
     lenderAlive: lender.alive,
   });
   s.requests = [...s.requests, request];
-  s.pendingRequestId = request.requestId;
-  setDeadline(s, deadlineMs);
+  if (s.phase === "TAX") {
+    s.pendingRequestId = request.requestId;
+    setDeadline(s, deadlineMs);
+  }
   emit(s, events, ctx, "LOAN_REQUESTED", {
     requestId: request.requestId,
     borrowerId: player.playerId,
@@ -992,6 +1030,7 @@ function createPrivateRequest(
     principalCents,
     rateBps,
   }, [player.playerId, lender.playerId]);
+  if (s.phase === "ACTION") finishSeatAction(s);
 }
 
 function handleAcceptPrivateLoan(
@@ -1065,20 +1104,18 @@ function handleRefusePrivateLoan(
 }
 
 /**
- * 请求处理完后的窗口收尾：普通行动结束本轮行动；危险自救只是回到自救总截止，
+ * ACTION提交时已用掉借款人行动，答复不触碰当前座位；危险自救只是回到自救总截止，
  * 该玩家仍可继续自救（是否结束由系统在金币 >= 0 时判定）。
  */
 function closeRequestWindow(s: EngineState, rescue: boolean): void {
   s.pendingRequestId = null;
   if (rescue) {
     setDeadline(s, s.dangerDeadlineMs);
-  } else {
-    finishSeatAction(s);
   }
 }
 
 /**
- * 借款人取消自己的待处理请求：ACTION 阶段消耗本次行动（R05 取消不退行动）；
+ * 借款人取消自己的待处理请求：ACTION提交时已消耗行动，取消不退还也不结束别人行动；
  * TAX 阶段只是回到自救总截止，自救继续、仍可再次发起。
  */
 function handleCancelPrivateLoan(
@@ -1088,7 +1125,7 @@ function handleCancelPrivateLoan(
   events: GameEvent[],
 ): void {
   const request = findPendingRequest(s, readStringField(payload, "requestId"));
-  if (s.pendingRequestId !== request.requestId) {
+  if (s.phase === "TAX" && s.pendingRequestId !== request.requestId) {
     throw new CommandFailure("INVALID_ACTION", "这个请求当前不在等待窗口");
   }
   const actor = mustPlayer(s, actorOf(ctx, payload));
@@ -1102,7 +1139,6 @@ function handleCancelPrivateLoan(
       requestId: request.requestId,
       status: "CANCELLED",
     });
-    finishSeatAction(s);
     return;
   }
 
@@ -1287,9 +1323,6 @@ function requireActionPhase(s: EngineState): void {
 
 function assertTurn(s: EngineState, playerId: PlayerId): GameState["players"][number] {
   requireActionPhase(s);
-  if (s.pendingRequestId !== null) {
-    throw new CommandFailure("INVALID_ACTION", "正在等待出借人答复，不能继续行动");
-  }
   const player = mustPlayer(s, playerId);
   if (s.currentSeatId !== player.seatId) {
     throw new CommandFailure("NOT_YOUR_TURN", "还没轮到你");

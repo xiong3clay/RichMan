@@ -75,7 +75,7 @@ for(const point of ['before_rename','after_rename'] as const) {
       restoredB.p.send(accept);expect(await restoredB.p.next('command_result')).toEqual(reply);
       const stateNow=JSON.parse(await readFile(path.join(dir,'rooms',code,'snapshot.json'),'utf8'));
       expect(stateNow.game.players.map((p:Message)=>p.cents)).toEqual([10500,9500]);expect(stateNow.game.privateLoans).toHaveLength(1);
-      const currentB=(await restoredB.p.next('snapshot',m=>m.view.currentSeatId===2&&m.view.paused===false)).view;
+      const currentB=(await restoredB.p.next('snapshot',m=>m.view.currentSeatId===2&&m.view.paused===false&&m.view.version===stateNow.game.version)).view;
       restoredB.p.send({protocolVersion:1,gameId:first.gameId,commandId:'continue-end',type:'END_ACTION',payload:{},expectedGameVersion:currentB.version});
       expect((await restoredB.p.next('command_result')).outcome.ok).toBe(true);
       console.log('[06 restart demo]',point,JSON.stringify({healthBefore,healthLive,healthAfter,

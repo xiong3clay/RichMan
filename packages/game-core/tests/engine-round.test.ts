@@ -80,8 +80,8 @@ describe("action_timeout_advances", () => {
   });
 });
 
-describe("waiting_loan_blocks_next_phase", () => {
-  it("请求等待答复期间阶段不推进，其他人也不能行动", () => {
+describe("pending_loan_does_not_block_action", () => {
+  it("提交即用掉行动，下一位仍可行动；阶段末等待请求收口，答复不耗出借人行动", () => {
     const requested = run(
       newState(2),
       "REQUEST_PRIVATE_LOAN",
@@ -91,20 +91,33 @@ describe("waiting_loan_blocks_next_phase", () => {
     );
     expect(requested.outcome.ok).toBe(true);
     expect(requested.state.phase).toBe("ACTION");
-    expect(requested.state.pendingRequestId).not.toBeNull();
+    expect(requested.state.pendingRequestId).toBeNull();
+    expect(requested.state.currentSeatId).toBe(2);
+    expect(requested.state.actedSeats).toEqual([1]);
     expect(requested.state.requests[0]?.requestId).toBe("req-1");
     expect(requested.state.requests[0]?.status).toBe("PENDING");
-    // 截止 = min(请求 45 秒, 行动 60 秒)
-    expect(requested.state.windowDeadlineMs).toBe(45_000);
+    // 请求45秒与下一座位60秒行动窗口独立。
+    expect(requested.state.requests[0]?.deadlineMs).toBe(45_000);
+    expect(requested.state.windowDeadlineMs).toBe(60_000);
 
     const other = run(requested.state, "END_ACTION", { playerId: "p2" }, 1_000, "c2");
-    expect(other.outcome.ok).toBe(false);
-    expect(other.outcome.ok ? null : other.outcome.code).toBe("INVALID_ACTION");
+    expect(other.outcome.ok).toBe(true);
     expect(other.state.phase).toBe("ACTION");
+    expect(other.state.currentSeatId).toBeNull();
+    expect(other.state.actedSeats).toEqual([1, 2]);
+    expect(other.state.requests[0]?.status).toBe("PENDING");
+    expect(other.state.windowDeadlineMs).toBe(45_000);
+    expect(other.state.deadlineAt).toBe(new Date(45_000).toISOString());
+    expect(other.state.players).toEqual(requested.state.players);
+    const expired = advanceSystem(other.state, { actorId: "SYSTEM", nowMs: 45_000, drawResult: 0 });
+    expect(expired.state.phase).toBe("BETTING");
+    expect((expired.state as EngineState).requests[0]?.status).toBe("EXPIRED");
+    expect(expired.events.filter(event => event.type === "LOAN_REQUEST_EXPIRED")).toHaveLength(1);
+    expect(expired.state.players).toEqual(requested.state.players);
 
     const borrowerAgain = run(requested.state, "END_ACTION", { playerId: "p1" }, 1_000, "c3");
     expect(borrowerAgain.outcome.ok).toBe(false);
-    expect(borrowerAgain.outcome.ok ? null : borrowerAgain.outcome.code).toBe("INVALID_ACTION");
+    expect(borrowerAgain.outcome.ok ? null : borrowerAgain.outcome.code).toBe("NOT_YOUR_TURN");
     expect(borrowerAgain.state.phase).toBe("ACTION");
 
     const accepted = run(
@@ -120,6 +133,8 @@ describe("waiting_loan_blocks_next_phase", () => {
     expect(accepted.state.players[0]?.cents).toBe(15_000);
     expect(accepted.state.players[1]?.cents).toBe(5_000);
     expect(accepted.state.currentSeatId).toBe(2);
+    expect(accepted.state.actedSeats).toEqual([1]);
+    expect(accepted.state.deadlineAt).toBe(requested.state.deadlineAt);
   });
 });
 
@@ -417,7 +432,7 @@ describe("views_privacy", () => {
 });
 
 describe("cancel_private_loan", () => {
-  it("ACTION 取消后座位前进，出借人再同意返回 REQUEST_EXPIRED 且不转账", () => {
+  it("ACTION 提交后座位前进，取消不退行动，出借人再同意返回 REQUEST_EXPIRED 且不转账", () => {
     const requested = run(
       newState(2),
       "REQUEST_PRIVATE_LOAN",
@@ -426,7 +441,9 @@ describe("cancel_private_loan", () => {
       "req-1",
     );
     expect(requested.outcome.ok).toBe(true);
-    expect(requested.state.pendingRequestId).toBe("req-1");
+    expect(requested.state.pendingRequestId).toBeNull();
+    expect(requested.state.currentSeatId).toBe(2);
+    expect(requested.state.actedSeats).toEqual([1]);
 
     const cancelled = run(
       requested.state,
@@ -439,6 +456,8 @@ describe("cancel_private_loan", () => {
     expect(cancelled.state.requests[0]?.status).toBe("CANCELLED");
     expect(cancelled.state.pendingRequestId).toBeNull();
     expect(cancelled.state.currentSeatId).toBe(2);
+    expect(cancelled.state.actedSeats).toEqual([1]);
+    expect(cancelled.state.deadlineAt).toBe(requested.state.deadlineAt);
 
     const lateAccept = run(
       cancelled.state,
@@ -474,7 +493,7 @@ describe("cancel_private_loan", () => {
     expect(forged.outcome.ok).toBe(false);
     expect(forged.outcome.ok ? null : forged.outcome.code).toBe("UNAUTHORIZED");
     expect(forged.state.requests[0]?.status).toBe("PENDING");
-    expect(forged.state.pendingRequestId).toBe("req-1");
+    expect(forged.state.pendingRequestId).toBeNull();
     expect(forged.state.version).toBe(requested.state.version);
   });
 });

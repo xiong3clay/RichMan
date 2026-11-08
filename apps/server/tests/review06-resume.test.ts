@@ -18,7 +18,8 @@ it.each(['ACTION','TAX','BANK_DUE','INTEREST','TAX_AUTO'] as const)('S5 server_r
     if(phase==='ACTION'||phase==='TAX'){
       state=applyCommand(state,{protocolVersion:1,gameId:state.gameId,commandId:'request-fixture',type:'REQUEST_PRIVATE_LOAN',payload:{lenderId:'p2',principalCents:100,rateBps:1000},expectedGameVersion:state.version},
         {actorId:'p1',nowMs:1001,drawResult:0}).state as EngineState;
-      expect(state.pendingRequestId).not.toBeNull();
+      if(phase==='ACTION')expect(state.pendingRequestId).toBeNull();
+      else expect(state.pendingRequestId).not.toBeNull();
     }
     if(phase==='BANK_DUE'||phase==='INTEREST'){
       state.round=phase==='BANK_DUE'?4:2;
@@ -36,10 +37,13 @@ it.each(['ACTION','TAX','BANK_DUE','INTEREST','TAX_AUTO'] as const)('S5 server_r
     if(phase==='ACTION'||phase==='TAX'){
       const after=h.server().manager.getGame(code)!;
       expect(after.players).toEqual(before.players);expect(after.actedSeats).toEqual(before.actedSeats);
-      expect(Date.parse(resumed.deadlineAt)).toBe(10000000+45000);
-      expect(after.requests.find(r=>r.requestId===after.pendingRequestId)!.deadlineMs).toBe(10000000+45000);
+      expect(Date.parse(resumed.deadlineAt)).toBe(10000000+(phase==='ACTION'?60000:45000));
+      const request=after.requests.find(r=>r.borrowerId==='p1'&&r.status==='PENDING')!;
+      expect(request.deadlineMs).toBe(10000000+45000);
+      expect(after.currentSeatId).toBe(before.currentSeatId);
+      if(phase==='ACTION')expect(after.pendingRequestId).toBeNull();
       if(phase==='TAX')expect(after.dangerDeadlineMs).toBe(10000000+60000);
-      guest.p.send({protocolVersion:1,gameId:state.gameId,commandId:'resume-accept',type:'ACCEPT_PRIVATE_LOAN',payload:{requestId:after.pendingRequestId}});
+      guest.p.send({protocolVersion:1,gameId:state.gameId,commandId:'resume-accept',type:'ACCEPT_PRIVATE_LOAN',payload:{requestId:request.requestId}});
       expect((await guest.p.next('command_result')).outcome.ok).toBe(true);
       expect(h.server().manager.getGame(code)!.privateLoans).toHaveLength(1);
     }else if(phase==='BANK_DUE'){

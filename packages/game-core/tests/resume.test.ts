@@ -120,10 +120,13 @@ describe("resumeFromPause", () => {
 
     const resumed = resumeFromPause(state, { nowMs: 100_000 });
 
-    expect(resumed.pendingRequestId).toBe("pending");
+    expect(resumed.pendingRequestId).toBe(phase === "TAX" ? "pending" : null);
     expect(resumed.requests).toEqual([{ ...before.requests[0], deadlineMs: requestDeadline }]);
-    expect(resumed.windowDeadlineMs).toBe(requestDeadline);
-    expect(resumed.deadlineAt).toBe(new Date(requestDeadline).toISOString());
+    const seatDeadline = phase === "TAX" ? requestDeadline : mode === "standard" ? 160_000 : 130_000;
+    expect(resumed.windowDeadlineMs).toBe(seatDeadline);
+    expect(resumed.deadlineAt).toBe(new Date(seatDeadline).toISOString());
+    expect(resumed.currentSeatId).toBe(before.currentSeatId);
+    expect(resumed.actedSeats).toEqual(before.actedSeats);
     expect(resumed.dangerDeadlineMs).toBe(rescueDeadline);
     expect(resumed.privateLoans).toEqual([]);
     expect(resumed.players).toEqual(before.players);

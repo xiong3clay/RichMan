@@ -109,7 +109,9 @@ it("refresh_same_seat: resume保留金币、行动、待办、合同与原deadli
   const snapshot = await replacement.next("snapshot");
   expect(snapshot.view.finance.pendingRequest).not.toBeNull();
   expect(s.manager.getGame(room)).toEqual(before);
-  clients[1]!.send(command(s, room, "accept", "ACCEPT_PRIVATE_LOAN", { requestId: before!.pendingRequestId }));
+  clients[1]!.send(command(s, room, "accept", "ACCEPT_PRIVATE_LOAN", {
+    requestId: before!.requests.find(request => request.borrowerId === "p1" && request.status === "PENDING")!.requestId,
+  }));
   expect((await clients[1]!.next("command_result")).outcome.ok).toBe(true);
   clients[1]!.send(command(s, room, "end2", "END_ACTION", {}));
   expect((await clients[1]!.next("command_result")).outcome.ok).toBe(true);
@@ -216,7 +218,9 @@ it("ack_lost_retry: 断线恢复后原转账命令只执行一次且同ID改金�
   const { s, room, clients, identities } = await game();
   clients[0]!.send(command(s, room, "ask", "REQUEST_PRIVATE_LOAN", { lenderId: "p2", principalCents: "500", rateBps: 0 }));
   expect((await clients[0]!.next("command_result")).outcome.ok).toBe(true);
-  const accept = command(s, room, "transfer", "ACCEPT_PRIVATE_LOAN", { requestId: s.manager.getGame(room)!.pendingRequestId });
+  const accept = command(s, room, "transfer", "ACCEPT_PRIVATE_LOAN", {
+    requestId: s.manager.getGame(room)!.requests.find(request => request.borrowerId === "p1" && request.status === "PENDING")!.requestId,
+  });
   clients[1]!.send(accept);
   const committed = await clients[0]!.next("snapshot", m => m.view.finance.cents === "10500");
   expect(committed.view.finance.cents).toBe("10500");
@@ -334,7 +338,9 @@ it("command_error_money_strings: 真实催收失败的合法上限也按字符�
   const { s, room, clients } = await game();
   clients[0]!.send(command(s, room, "ask-limit", "REQUEST_PRIVATE_LOAN", { lenderId: "p2", principalCents: "500", rateBps: 1000 }));
   expect((await clients[0]!.next("command_result")).outcome.ok).toBe(true);
-  clients[1]!.send(command(s, room, "accept-limit", "ACCEPT_PRIVATE_LOAN", { requestId: s.manager.getGame(room)!.pendingRequestId }));
+  clients[1]!.send(command(s, room, "accept-limit", "ACCEPT_PRIVATE_LOAN", {
+    requestId: s.manager.getGame(room)!.requests.find(request => request.borrowerId === "p1" && request.status === "PENDING")!.requestId,
+  }));
   expect((await clients[1]!.next("command_result")).outcome.ok).toBe(true);
   clients[1]!.send(command(s, room, "end-limit", "END_ACTION", {}));
   expect((await clients[1]!.next("command_result")).outcome.ok).toBe(true);

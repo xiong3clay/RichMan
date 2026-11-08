@@ -151,7 +151,8 @@ function validateCategory(state: EngineState, playerId: string, command: GameCom
     const requestId = payload.requestId ?? command.requestId;
     if (typeof requestId !== "string" || requestId.length === 0) return failure("INVALID_ACTION", "命令缺少 requestId");
     const request = state.requests.find((item) => item.requestId === requestId && item.status === "PENDING");
-    if (request === undefined || request.createdRound !== state.round || state.pendingRequestId !== requestId) {
+    if (request === undefined || request.createdRound !== state.round
+      || (state.phase === "TAX" && state.pendingRequestId !== requestId)) {
       return failure("REQUEST_EXPIRED");
     }
     if (request.lenderId !== playerId) return failure("UNAUTHORIZED");

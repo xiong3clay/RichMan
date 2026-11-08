@@ -7,7 +7,7 @@
 1. 借款人提交私人借款请求成功，立即消耗其本轮主要行动；牌桌不等待，下一位继续。
 2. 同一借款人全局最多一个 PENDING 请求（现有 createLoanRequest 已保证，保留）。
 3. 出借人可以同时收到多个借款人的 PENDING 请求，逐个同意/拒绝；同意/拒绝都不消耗出借人的行动。
-4. 所有未答复请求在 ACTION 阶段结束时统一收口（置 EXPIRED），不得进入 BETTING。
+4. 所有未答复请求在 ACTION 阶段结束前统一收口（置 EXPIRED），但“所有座位已行动”不等于立即进入 BETTING：只要还有 PENDING，阶段保持 ACTION（currentSeatId=null），deadlineAt 取最早一笔请求截止；请求全部被同意/拒绝/取消/过期后，才进入 BETTING。这样最后一位玩家提交的请求仍有机会被答复，又不需要全桌等待某位玩家行动。
 5. 借款人取消请求不退还已消耗的行动；取消后行动仍算完成。
 6. TAX 自救阶段的“危险玩家借款”保持现有语义：等待答复期间自救计时暂停式处理不变，仍用 pendingRequestId；本单元不改变自救流程。
 
@@ -29,7 +29,10 @@
    - 删除“pendingRequestId 非空则阻塞整桌”的分支。
    - 每 tick 先扫描全部 PENDING 请求：deadlineMs <= now 的逐个 expireLoanRequest + LOAN_REQUEST_EXPIRED，状态变更；不要调用 finishSeatAction，也不要清 currentSeatId。
    - 然后再走 currentSeatId 选座、行动超时、nextSeat。
-   - 全部座位 acted 后进入 enterBetting；enterBetting 现有“所有 PENDING 置 EXPIRED”逻辑保留（即阶段末统一收口），事件逐条发。
+   - currentSeatId 为 null 时先算 nextSeat：
+     - nextSeat 非空：照常选中该座位并设置行动窗口，不受 PENDING 影响；
+     - nextSeat 为空且仍有 PENDING：不得进入 BETTING；保持 currentSeatId=null，setDeadline(所有 PENDING 中最早的 deadlineMs) 后 break。每笔到期后重算；全部答复/过期后再进入 BETTING。
+   - enterBetting 现有“所有 PENDING 置 EXPIRED”逻辑保留为最后兜底；正常路径到这里时不应再有 PENDING。
 4. 同意/拒绝
    - handleAcceptPrivateLoan / handleRefusePrivateLoan 在 ACTION 阶段不再调用 finishSeatAction，也不改 currentSeatId / deadline。
    - closeRequestWindow(s, rescue)：rescue=true 时恢复 dangerDeadlineMs；ACTION 时只清 pendingRequestId（本来为 null），不做行动收尾。
@@ -40,6 +43,7 @@
    - TAX：保持现有 pendingRequestId/危险玩家校验。
 6. resumeFromPause
    - ACTION 阶段除了重建当前座位窗口，还要把所有 PENDING 请求 deadline 改为 nowMs + requestSec*1000（避免停服后旧 deadline 导致一恢复就全部过期）；不得重置已 acted 的座位。
+   - 续期后若 currentSeatId 为 null 且仍有 PENDING，deadlineAt 必须设为最早一笔请求的 deadlineMs，否则服务端恢复后没有计时器唤醒，请求会永久 PENDING。
 7. 视图
    - getPlayerView 现有 pendingRequest（本人 PENDING）与 incomingRequests（本人为出借人的 PENDING 数组）已满足多请求；不要新增他人可见字段，不要暴露请求金额给第三人。
    - 若请求数组顺序影响 UI，按 createdAtMs 升序、requestId 次序稳定输出。
@@ -60,18 +64,22 @@ T3 出借人是当前座位时同意：其行动不结束，仍可继续借款/�
 T4 拒绝不消耗出借人行动；拒绝后 incomingRequests 少一条，其余请求仍在。
 T5 借款人提交后取消：CANCELLED、actedSeats 不重复、行动不退还、牌桌继续。
 T6 一个请求 45 秒到期时另一个仍在等待：过期事件只针对前者，currentSeat/其他请求不受影响。
-T7 阶段末统一收口：所有座位行动完成后进入 BETTING，所有剩余 PENDING 都变 EXPIRED，BETTING 中 requests 无 PENDING。
+T7 阶段末等待请求：所有座位行动完成但仍有 PENDING 时，phase 仍为 ACTION、currentSeatId=null、requests 仍 PENDING、deadlineAt=最早请求 deadline；到最早 deadline 只过期该笔，最后一笔过期后才进入 BETTING，BETTING 中 requests 无 PENDING。
 T8 同一借款人第二个请求被 DUPLICATE_PENDING_REQUEST 拒绝，且不消耗其行动（若其仍当前座位）。
 T9 TAX 自救借款回归：危险玩家请求→出借人同意→负余额转正→自救结束，流程与旧测试一致。
 T10 旧快照迁移：ACTION + pendingRequestId 的 state 经 normalize/加载后，借款人座位在 actedSeats、pendingRequestId 为 null，牌桌可继续（可直接调用 applyCommand/advanceSystem 验证）。
+T20 最后一位玩家提交请求：2 人局 p1 先 END_ACTION，p2 再提交请求；提交后 phase 仍 ACTION、currentSeatId=null、请求 PENDING、deadlineAt=请求截止（不是立即 BETTING）；p1 在截止前同意后转账成功并进入 BETTING。
+T21 最后一位请求无人答复：同 T20 场景，advanceSystem 到请求截止时请求 EXPIRED、发 LOAN_REQUEST_EXPIRED、进入 BETTING。
+T22 阶段末多笔请求按最早截止逐个收口：3 人局 p1 结束行动，p2 在 t=1000 提交（截止 46000），p3 在 t=2000 提交（截止 47000）；此时 deadlineAt=46000；t=46000 只过期 p2 的请求且仍 ACTION、deadlineAt=47000；t=47000 过期 p3 的请求并进入 BETTING。
 T11 出借人余额不足（沿用计划 199 行，不得改成 INSUFFICIENT_FUNDS）：同意仍返回 ok:true，但请求置 FAILED、发 LOAN_REQUEST_CLOSED(status=FAILED)、不转账、不建合同；ACTION 下借款人行动已在提交时消耗，其他 PENDING 请求不受影响，不得出现负出借人。
 
 五、验收
 - pnpm -s exec vitest run packages/game-core 全绿；pnpm -s test 全量不得低于 840 且无旧测试被削弱（语义变更需逐条说明）。
 - pnpm typecheck 0；pnpm -s build 0。
-- 变异探针（自己跑并写进交接）：MUT1 提交后不 finishSeatAction → T1 应红；MUT2 ACTION 仍按 pendingRequestId 阻塞 → T1/T2 应红；MUT3 同意时调用 finishSeatAction → T3 应红；MUT4 阶段末不清 PENDING → T7 应红。
+- 变异探针（自己跑并写进交接）：MUT1 提交后不 finishSeatAction → T1 应红；MUT2 ACTION 仍按 pendingRequestId 阻塞 → T1/T2 应红；MUT3 同意时调用 finishSeatAction → T3 应红；MUT4（2026-11-08 复核后作废）删除 enterBetting 的逐笔 EXPIRED 兜底 → 实测 22 绿/exit0，属等价变异（新正常路径已在 runSystem 逐笔收口）；不再作为红探针，兜底保留作防御；MUT5 currentSeatId=null 且仍有 PENDING 时直接 enterBetting（本次修复前的行为）→ T20/T21/T22 应红；MUT6 阶段末 deadline 取最晚而非最早 → T22 应红。
 - 四份交接 handoff/单元10A-{成果报告,运行与验收,下一阶段交接,注意事项}.txt，写清改动文件:行、语义、测试数、变异结果、旧断言改动清单。
 - 不 commit；不碰 apps/server/data 与 8000 端口。
 
 六、给 10B 的接口约定
 UI 只依赖现有快照字段：finance.pendingRequest（本人发出）、finance.incomingRequests（本人收到，可多条）、每个请求的 deadlineMs。10B 负责：等待卡显示“本次行动已用掉”、按 request.deadlineMs 倒计时、incoming 显示“还有 N 个请求”、同意/拒绝后不显示“行动已结束”等文案。10A 不改协议字段。
+顺序约定：incomingRequests 按请求到达顺序（引擎 append 顺序）稳定排列，不承诺 requestId 字典序；10B 如需固定 tie-break 再单独约定。
