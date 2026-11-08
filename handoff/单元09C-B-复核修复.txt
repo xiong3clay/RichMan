@@ -1,0 +1,127 @@
+单元09C-B 复核修复（M1/M2 + 测试缺口 + 文档纠偏）
+================================================================
+日期：2026-11-08
+上游：handoff/复核-单元09C-B.txt（Qoder 只读复核，结论“需修复”）；Lead 已独立复现 M1/M2。
+基线：HEAD ab85732，工作区已有 09C-B 的实现（4 改 + 3 新增脚本 + 4 份交接），本轮全部未提交。
+本轮不 commit；完成后由 Lead 验收，再交 Qoder 做针对性复验。
+
+一、Lead 已确认的 must-fix
+M1 父路径 reparse point 写穿（规格 F0-3 “outDir 不存在时先创建再校验（或先 realpath 父目录），不得写穿”未兑现）
+  - 现象：parent 是 junction 时 backup.ps1 -Out <parent-link>\child 返回 exit 0，
+    parent-target 下实际出现 child/manifest.json、child/rooms/<code>。
+  - 复现（Lead 实际执行）：New-Item -ItemType Junction -Path <parent-link> -Target <parent-target>
+    → backup.ps1 -DataDir <data> -Out <parent-link>\child -Json → exit 0，target\child 被写穿。
+M2 backup.ps1 接受已存在的显式 -Out
+  - 现象：显式 -Out 指向已存在空目录时 exit 0 并写入 manifest.json/rooms/；
+    规格行为 3 与 F0-6 要求“脚本层一律新建 outDir，不复用已存在空目录”。
+  - 复现（Lead 实际执行）：mkdir <exists-empty> → backup.ps1 -DataDir <data> -Out <exists-empty> -Json
+    → exit 0，<exists-empty> 下出现 manifest.json 与 rooms/。
+  - 对照：显式 -Out 指向非空目录时已是 exit 2 BACKUP_OUT_EXISTS（CLI 判定），行为正确，保留。
+
+二、允许修改的文件（其余一律禁止）
+- apps/server/src/storage/backup.ts（只做 F1）
+- apps/server/tests/backup.test.ts（只追加 T23；T1–T22 一条断言都不许改）
+- apps/server/tests/scripts.test.ts（只追加 T23–T28；T1–T22 一条断言都不许改）
+- scripts/backup.ps1（F2）
+- scripts/cleanup.ps1（F6）
+- README.md（F5，只改“备份、恢复与清理”一节）
+- handoff/单元09C-B-{成果报告,运行与验收,下一阶段交接,注意事项}.txt（F4）
+禁止：backup-cli.ts、file-store.ts、atomic.ts、apps/server/src/ 其它文件、packages/**、apps/web/**、
+09B 四个脚本、richman-common.ps1、协议、依赖；不碰 apps/server/data 与 8000；不 commit；
+不要改 handoff/复核-单元09C-B.txt（那是 Qoder 的原始报告）与 handoff/单元09C-B-备份恢复清理脚本.txt。
+
+三、F1 核心：拒绝父路径中的 reparse point（backup.ts）
+1. 新增模块内私有函数（可不导出，若测试需要可导出但不要进 CLI/公共契约）：
+   assertNoReparsePointInPath(target: string): Promise<void>
+   - 从 path.resolve(target) 的文件系统根开始，逐级拼接组件；
+   - 对每个“已存在”的前缀执行 lstat：isSymbolicLink() 为 true 时抛
+     new BackupError("BACKUP_OUT_INVALID", "outDir 不能是符号链接/junction：父路径 " + current)；
+   - 遇到 ENOENT 立即停止（后续组件都不存在），其它错误原样抛出；
+   - 不允许把“大小写不同/短路径”当成拒绝理由，只按 lstat 的 reparse point 判定。
+2. 在 createBackup 里，mkdir 之前调用它；已有的直接 outDir lstat 检查与创建后 lstat 复检保留。
+   直接 outDir 是 junction 时，message 仍必须包含子串 “outDir 不能是符号链接/junction”，
+   以便 T21 不改断言继续通过；父路径拒绝用上面的“父路径”文案。
+3. 拒绝必须发生在任何 mkdir/writeFileAtomic 之前：失败后 outDir 与链接目标都不得出现新文件。
+4. 不改变核心“outDir 已存在且为空时允许（兼容）”的现有行为——脚本层才拒绝（见 F2）。
+
+四、F2 脚本：backup.ps1 拒绝任何已存在的显式 -Out
+1. 计算 $outPath 后（显式分支，[System.IO.Path]::GetFullPath($Out) 之后）：
+   if (Test-Path -LiteralPath $outPath) { Fail-Backup 'BACKUP_OUT_EXISTS' ('输出目录已存在，请换一个不存在的目录：' + $outPath) 2 }
+   - 目录、文件、空目录、非空目录一律 exit 2，不写入任何东西；
+   - 不传 -Out 的默认分支保持“时间戳 + while(Test-Path) 换名”，仍保证全新目录。
+2. -Json 仍恰好一行；错误文案走 JSON 的 message，不写进度。
+
+五、F6 脚本：cleanup.ps1 数据目录不存在时明确失败
+- 在 Resolve-DataDir 之后：不存在即 Fail-Cleanup 'DATA_DIR_MISSING' ('数据目录不存在：' + $dataPath)，exit 1。
+- 现有空目录语义不变（存在但没有任何可清理项 → ok=true、计数 0、exit 0）。
+
+六、F3 新增测试（真实文件/真实 PowerShell，不用 mock，不削弱旧断言）
+apps/server/tests/backup.test.ts（新增 1 条，编号 T23）
+- T23 create_refuses_parent_junction:
+  junctionTarget=tempDir()；link=<temp>/parent-link；symlink(junctionTarget, link, "junction")；
+  source 里 commit 一个房间；outDir=path.join(link,"child")；
+  断言 rejects.toMatchObject({ code:"BACKUP_OUT_INVALID", message: expect.stringContaining("父路径") })；
+  断言 readdir(junctionTarget) 为空（零写入，且 child 未被创建）；finally rmdir(link)。
+apps/server/tests/scripts.test.ts（新增 6 条，编号 T23–T28；复用现有 fixture/runScript/runScriptToFile/helpers）
+- T23 backup_script_refuses_existing_out:
+  已存在空目录 → exit 2、ok=false、code=BACKUP_OUT_EXISTS、目录仍为空；
+  已存在非空目录（keep.txt）→ exit 2、keep.txt 内容不变；两次都不应生成 manifest.json。
+- T24 restore_all_success:
+  造两个房间（如 0042、7506，均用 FileRoomStore.commitRoom + createBackup 一次导出）；
+  start-lan（随机端口）→ stop → 删两个房间目录 → restore.ps1 -All -Port <port> -Json
+  → exit 0、restored 按 code 升序两条、keptPath 均为 null；
+  再 start-lan → /health rooms=2 → /api/rooms 两个房间 paused=true → stop；
+  finally 确保停服、释放端口、清理临时目录。
+- T25 restore_all_and_room_conflict:
+  restore.ps1 -Backup <有效备份> -All -Room 0042 -Json → exit 1、code=BAD_ARGUMENT，
+  且不产生 restore-keep-*、快照字节不变。
+- T26 backup_script_parent_junction_refused:
+  junction link → target；backup.ps1 -Out <link>\child -Json → exit 1、code=BACKUP_OUT_INVALID、
+  message 含“父路径”，target 目录为空。
+- T27 backup_script_keep_prunes_only_matching:
+  父目录放 keep.txt、other-dir/file.txt；连续两次 backup.ps1 -Out <parent>/richman-backup-a、-b 且 -Keep 1；
+  第二次 exit 0、pruned=1；a 目录消失、b 存在；keep.txt 与 other-dir 未被删。
+- T28 script_arg_errors:
+  restore.ps1 -Nope 1 → exit 1 且无 PS 堆栈；cleanup.ps1 -Nope 1 → exit 1；
+  cleanup.ps1 -DataDir <不存在目录> -Json → exit 1、code=DATA_DIR_MISSING。
+要求：每条都必须能在缺实现时变红（写测试前先确认红灯，再实现）。旧 22+22 条不得减少或放宽。
+
+七、F4 交接文档（四份都要改；结论与数字以本轮真实运行结果为准）
+1. 成果报告：
+   - 新增“复核修复（M1/M2）”一节：现象、修复点、测试编号、真实命令输出；
+   - 把“显式 -Out 已存在空目录交 CLI/兼容”改为“脚本拒绝任何已存在 -Out（含空目录），exit 2；
+     核心库为兼容仍允许已有空 outDir，但脚本层不复用”；
+   - junction 说明改为“直接 outDir 与任一父路径是 reparse point 都拒绝，零写入”；
+   - 测试清单补 T23（核心）与 T23–T28（脚本），总条数按实际全量结果写（预期 66 文件 / 832 条，
+     以你真实跑出来为准；旧 825 不得减少）；T21 描述限定为“直接 outDir junction”；
+   - pwsh 7.6.5 的冒烟改为“历史记录，本机当前无 pwsh，未独立复现”（如你本机可以复跑，再写实测）。
+2. 运行与验收：追加本轮命令与输出（backup.test.ts 23 条、scripts.test.ts 28 条、全量、typecheck、build），
+   并追加 M1/M2 的手工探针步骤与输出；明确 09cb-pwsh7.txt 的历史记录属性。
+3. 注意事项：
+   - 写入口：显式 -Out 必须不存在；任一父路径为 reparse point 拒绝；核心兼容空目录仅限库内/测试；
+   - 恢复保护：state 缺失/损坏且未传 -Port 时只能探 8000，自定义端口必须显式 -Port；
+     health 只做一次 2s 请求，状态文件 running 仍先拒绝（低风险窗口说明）；
+   - cleanup 对不存在的数据目录现在返回 DATA_DIR_MISSING、exit 1。
+4. 下一阶段交接：把新增不变量写进“不可回退的不变量”（父路径 reparse 拒绝、脚本拒绝已存在 -Out、
+   cleanup 缺目录报错），并更新“仍缺能力/测试缺口”清单（保留 S6 真实 ACL 清理失败、S8 中仍未自动化的
+   force 普通文件、S14 单次 health 探针）。
+5. 任何地方出现的测试数字、耗时、退出码表都必须与实际一致；不要复制旧数字。
+
+八、F5 README（只改“备份、恢复与清理（Windows）”一节）
+- 明确：显式 -Out 必须指向尚不存在的路径（包括空目录也不允许复用）；脚本会以 BACKUP_OUT_EXISTS exit 2 拒绝。
+- 明确：outDir 及其任一父路径是符号链接/junction 时拒绝（BACKUP_OUT_INVALID）；只读 backupDir 允许跟随。
+- 明确：run/server.json 缺失或损坏时，restore.ps1 需要显式 -Port，否则只探测 8000。
+- 其余排版与已有事实不变，不要把 09B/09C-A 的旧数字带进来。
+
+九、验收判据（由 Lead 复跑）
+- corepack pnpm -s vitest run apps/server/tests/backup.test.ts → 23/23
+- corepack pnpm -s vitest run apps/server/tests/scripts.test.ts → 28/28（真实 PS5.1）
+- corepack pnpm -s test → 66 文件 / 832 条（旧 825 一条不少）
+- corepack pnpm -s typecheck、corepack pnpm -s build → exit 0
+- git diff 证明 T1–T22（两份测试文件）只有追加、没有改写；除第二节允许文件外零改动
+- 手工：父目录 junction 被拒且零写入；显式空 Out exit 2；两房 -All 恢复后 paused=true；-Keep 1 只删旧备份
+- 交接四份 + README 与真实行为一致；pwsh7 声明已降级为历史记录
+
+十、报告方式
+完成后在本轮回复里列出：改了哪些文件、每条新测试的红灯/绿灯证据、全部命令输出、M1/M2 手工复现结果。
+不要 commit。
