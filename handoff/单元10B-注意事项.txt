@@ -1,0 +1,77 @@
+单元 10B 注意事项
+================================================================
+日期：2026-11-08
+对象：后续 UI/引擎实现者、09D 真机验收者、复核者。
+
+一、请求截止的来源
+- 请求卡只能用 request.deadlineMs（pendingRequest 或 incomingRequests[0]）。
+- 绝对不能再用 view.deadlineAt 当请求截止：它是阶段/当前行动席的截止，D6 下常与
+  请求无关；页头“剩余”仍按 view.deadlineAt，这是有意的，不要一起改。
+- requestDeadlineIso 对非法/缺失 deadline 返回 null；UI 按“已截止/等待系统收口”
+  处理并禁用按钮，避免发出服务端必拒的迟到命令。
+
+二、过期只是客户端保护，不是权威裁决
+- useRequestExpired 用快照 serverNow + receivedAtMs 校准，250ms 刷新；它只决定
+  disabled/文案，不删除请求、不改快照、不发命令、不做权威收口。
+- 有当前行动席时，服务端 EXPIRED 广播可能晚到该席的下一次 tick；客户端会先置灰，
+  但请求仍在快照里，直到服务端广播关闭。不要因此以为客户端已收口。
+- 非法规整输入（NaN/Infinity/坏 serverNow）返回 false、不抛错；不要把它变成崩溃。
+
+三、多请求与隐私
+- incomingRequests 顺序是服务端 append/到达顺序，不是 deadline/创建时间排序；
+  本轮不排序，未来要排序必须先改服务端稳定顺序。
+- 只显示当前第一笔 + 总数；不要渲染其它请求的借款人/金额/利率/信用；
+  不要新增全局“待答复请求数”协议字段。
+- 全席已行动时只说明“等待借款请求收口”，不要显示具体待答复数量（客户端没有全局计数）。
+- 页头 0:10 与请求卡 0:45 同时存在是正常的；T4/T6a 断言只针对步骤卡。
+
+四、确认卡与按钮
+- acceptLoan 过期必须自动撤回；showConfirmation 对 acceptLoan+expired 为 false，
+  确认按钮也 disabled 且 onClick 有守卫。
+- 过期只影响这一笔请求的按钮/确认；不要禁用其它命令、清空输入或改快照。
+- 取消仍走 client.cancelPrivateLoan；同意仍走 acceptLoan 确认 + acceptPrivateLoan；
+  拒绝仍直接 refusePrivateLoan；不要改命令语义或版本参数。
+- requestFixture.deadlineMs 已按规格改为 2099；这是旧测试数据失真修正，
+  不要改回 60000（否则旧点击测试会被新的过期禁用挡住）。
+
+五、文案与测试
+- 固定文案不要改写：
+  “请求截止：已截止，等待系统收口”
+  “待答复请求：共 N 个，当前第 1 个；答复后自动出现下一笔。”
+  “本轮行动已结束”
+  “正在等待未答复的借款请求收口；全部答复或到期后自动进入下注。”
+- 不要恢复“本轮行动即将结束”到 acted=true 且 seatId=null 分支；
+  acted=false 且 seatId=null 的旧分支按规格保留。
+- MUT1–MUT5 是防回归门槛；改 steps/GameView/hook 后应重跑对应测试或变异。
+- 不要削弱 866 条旧测试；本轮只允许改 view-fixtures 的 deadlineMs。
+
+六、已知边界
+- 没有全局待答复请求计数；出借人只知道当前这笔和 incoming 总数。
+- 过期后的等待服务端广播收口；客户端不做权威裁决。
+- 本轮未做真机/360px 视觉验收；新增两行 step-hint 未加 CSS，沿用 08B 无横向滚动契约。
+- 本轮不改协议、服务端、引擎、scheduler、依赖；请求过期/收口仍由服务端决定。
+
+七、复核修复后的口径（F1–F6，2026-11-08）
+1. 债务中心不是 10B 的引导卡。
+   - 10B 规格“不把 incomingRequests 渲染成完整列表、只显示当前一笔 + 总数”只约束
+     GameView 的 requestLender 引导卡。
+   - 07A 的 DebtCenter 仍逐条展示本人作为出借人的所有 incoming（借款人、金额、利率、
+     创建时信用、失信欠款、风险行）。这是有意行为，不是隐私泄露；不要为了 10B
+     文案去删它，也不要把它改成“共 N 个”。
+   - debt-center.test.ts 已新增两条 incoming 同时展示、不出现“共 N 个”的测试。
+2. 过期守卫测试不要依赖 DOM 的 disabled 点击。
+   - dom-harness 的 clickElement/click 在 disabled 时不派发；直接 dispatch 或临时移除
+     DOM disabled 也会被 React 按 fiber props 抑制。
+   - clickUnchecked/clickElementUnchecked 直接调用按钮挂载的 React onClick props，
+     用于验证组件内 if (requestExpired) return;；不要把它当成生产行为或删掉 disabled。
+   - MUT6（删 4 处守卫、保留 disabled）必须让 T5/T6b 红；否则守卫会再次变成无测试的
+     冗余代码。
+3. T11b/T4/T10 的新增断言：
+   - 借款人卡在 view.deadlineAt=null 时仍用 pendingRequest.deadlineMs 显示 0:45；
+     页头才显示“—”。
+   - 两笔请求必须是不同借款人（p2/p3）；引导卡只显示第一笔姓名/金额，第二笔的
+     “丙”/“777”不能出现在页面。
+   - T10 真实点击“拒绝”后断言 refusePrivateLoan 一次，再切换视图；不要退回“只注入
+     下一视图、不点击”的旧写法。
+4. MUT1–MUT6 必须在仓库内临时改、跑完逐字节还原并核对 sha256；不要把临时 clone
+   的结果冒充本轮 in-repo 变异。

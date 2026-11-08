@@ -1,0 +1,67 @@
+单元 10B 下一阶段交接
+================================================================
+日期：2026-11-08
+代码基线：362e217（10B 规格）+ 本轮未提交的 apps/web 改动。
+下一单元：10C/09D 或后续多请求界面/真机验收。
+
+一、本轮固定接口
+apps/web/src/game/steps.ts
+- GuidedStep.requestLender = { kind, request, pendingCount: number }
+- deriveStep 收到请求时返回 incomingRequests[0] + pendingCount=incomingRequests.length；
+  顺序严格按服务端数组，不排序；收到请求仍优先于自己发出的 pendingRequest。
+apps/web/src/game/request-deadline.ts
+- requestDeadlineIso(deadlineMs: unknown): string|null
+  finite → new Date(ms).toISOString()；NaN/Infinity/非数字/越界 → null。
+- isRequestExpired(deadlineMs: number|null|undefined, serverNow: string,
+  receivedAtMs: number, nowMs = Date.now()): boolean
+  用 calibrateServerClock 校准；deadline <= 服务端 now 即 true；非法输入 false、不抛错。
+apps/web/src/game/use-request-expired.ts
+- useRequestExpired(deadlineMs:number|null, serverNow:string, receivedAtMs:number): boolean
+  250ms interval；卸载清理；serverNow/deadlineMs/receivedAtMs 变化重新校准。
+apps/web/src/GameView.tsx
+- 借款人卡/出借人卡“请求截止”只用 request.deadlineMs；
+- 过期：固定文案“已截止，等待系统收口”，取消/同意/拒绝/确认按钮 disabled；
+- acceptLoan 确认卡过期自动 setConfirmAction(null)，showConfirmation 对
+  acceptLoan+requestExpired 返回 false；
+- 出借人卡固定文案“待答复请求：共 {pendingCount} 个，当前第 1 个；答复后自动出现下一笔。”；
+- actionWait 在 acted=true 且 seatId=null 时“本轮行动已结束”+“正在等待未答复的
+  借款请求收口；全部答复或到期后自动进入下注。”；acted=false+seatId=null 的旧文案保留。
+
+二、测试防回归
+- apps/web/tests/request-deadline.test.ts：T1/T2/T3/T3b。
+- apps/web/tests/gameview-10b.test.ts：T4/T5/T6a/T6b/T7/T8/T9/T10/T11。
+- T4/T6a 的“不含 0:10”断言只看当前步骤卡；页头仍按 view.deadlineAt 显示 0:10，
+  并额外断言页头含“剩余 0:10”。不要把该断言改成整页搜索。
+- MUT1 pendingCount=1、MUT2 改用 view.deadlineAt、MUT3 去过期禁用、
+  MUT4 去 250ms refresh、MUT5 恢复旧 actionWait 文案，均已验证会红；
+  改相关代码后应重跑这些变异或对应测试。
+
+三、下一阶段若扩展
+- 不要新增全局“待答复请求数”协议字段；当前 pendingCount 来自
+  view.finance.incomingRequests.length，只用于出借人当前卡。
+- 不要把 incomingRequests 展开成完整列表（隐私与手机溢出）。
+- 若要改请求排序，必须先改服务端稳定顺序并在所有端一致；本轮禁止前端排序。
+- 若引擎改变 request 截止语义（例如新状态），先更新 request-deadline 纯函数与
+  T2/T3，再改 UI；不要在 JSX 里散落算时间/判过期。
+- view.deadlineAt 仍是阶段/当前行动席截止，页头、BankDue、Danger、Betting 的
+  倒计时来源不变；只允许请求卡使用 request.deadlineMs。
+- 不要在过期时本地删除请求或本地收口；权威收口仍由服务端广播/推进。
+
+四、复核修复后补充（F1–F6）
+- 测试辅助 apps/web/tests/dom-harness.ts 的 clickUnchecked/clickElementUnchecked：
+  React 会按 fiber props 的 disabled 抑制合成 click；临时移除 DOM disabled 也无效。
+  该辅助直接调用按钮挂载的 React onClick props（找不到才退回 native click），
+  专门验证组件内 if (requestExpired) return;。不要把它当成“修复 disabled 行为”的
+  生产代码；正常用户仍被 disabled 挡住。
+- 过期守卫回归门槛：MUT6（删 4 处守卫、保留 disabled）必须让 T5/T6b 红；
+  MUT1–MUT5 也必须在仓库内临时改、跑后逐字节还原并核对 sha256。
+- T11b：借款人卡在 view.deadlineAt=null 时仍按 pendingRequest.deadlineMs 显示 0:45，
+  取消可用，页头为“—”；T11 出借人分支保留。
+- T4/T1 两笔请求使用不同借款人（p2/p3，第二笔金额 777），断言引导卡只显示第一笔的
+  姓名/金额，整页不出现第二笔姓名/金额。
+- T10 先真实点击“拒绝”并断言 refusePrivateLoan 调用一次，再切换第二笔视图。
+- 债务中心口径（S2）：10B 的“只显示当前一笔 + 总数”仅约束引导请求卡；
+  apps/web/src/game/DebtCenter.tsx 保持 07A 的只读全量 incoming 列表，并新增
+  debt-center.test.ts 两条 incoming 同时展示、不出现“共 N 个”的测试。
+  不要为了统一措辞去删债务中心的多条展示（那会违反 07A）。
+- T2 增加 Number.MAX_SAFE_INTEGER → null 且不抛错。

@@ -1,0 +1,115 @@
+单元 10B 运行与验收说明
+================================================================
+日期：2026-11-08
+适用：多请求界面与请求截止文案；只改 apps/web/**，不 commit。
+
+一、环境
+Windows；Node v24.18.0；pnpm 11.7.0；Vitest 5.0.5；React 19。
+本轮测试全部在 Web DOM harness / vitest Node 环境运行，不占 8000、不碰 apps/server/data。
+PATH 中 WindowsPowerShell 正常，无需补路径；未把环境问题当代码失败。
+
+二、红测（实现前）
+corepack pnpm -s vitest run apps/web/tests/request-deadline.test.ts apps/web/tests/gameview-10b.test.ts
+- request-deadline.test.ts 因 request-deadline.ts 不存在而失败（模块缺失）。
+- gameview-10b.test.ts 9 条全红：请求卡无笔数、无请求倒计时、过期未禁用、
+  actionWait 仍是“你已完成本轮行动”。
+日志：artifacts/test-logs/10B-red.log
+
+三、绿测（实现后）
+新增 13 条：
+corepack pnpm -s vitest run apps/web/tests/request-deadline.test.ts apps/web/tests/gameview-10b.test.ts
+  2 文件 / 13 条通过，414ms，EXIT 0
+日志：artifacts/test-logs/10B-green-2.log
+
+Web 全量：
+corepack pnpm -s vitest run apps/web/tests
+  33 文件 / 399 条通过，6.59s，WEB_EXIT=0
+日志：artifacts/test-logs/10B-web.log
+
+仓库全量：
+corepack pnpm -s test
+  Test Files  71 passed (71)
+       Tests  879 passed (879)
+    Duration  114.46s
+    TEST_EXIT=0
+说明：基线 69 文件 / 866 条未少；新增 2 个测试文件、13 条测试。
+日志：artifacts/test-logs/10B-full-test.log
+
+四、类型与构建
+corepack pnpm -s typecheck
+  TSC_EXIT=0（无诊断）
+corepack pnpm -s build
+  ✓ 143 modules transformed
+  apps/web/dist/assets/index--JyM_5JG.css 18.07 kB
+  apps/web/dist/assets/index-Cs5Nm0o4.js 427.55 kB
+  ✓ built in 376ms
+  BUILD_EXIT=0
+日志：artifacts/test-logs/10B-typecheck.log（0 字节）、10B-build.log
+
+五、范围与空白检查
+git diff --check：EXIT 0（无空白错误）
+git status --short（写交接前）：
+  M apps/web/src/GameView.tsx
+  M apps/web/src/game/steps.ts
+  M apps/web/tests/view-fixtures.ts
+  ?? apps/web/src/game/request-deadline.ts
+  ?? apps/web/src/game/use-request-expired.ts
+  ?? apps/web/tests/gameview-10b.test.ts
+  ?? apps/web/tests/request-deadline.test.ts
+git diff --stat（已跟踪文件）：
+  GameView.tsx | 68 ++++++++++++++++++++++++++++++++++-------
+  steps.ts     | 10 ++++--
+  view-fixtures.ts | 2 +-
+  3 files changed, 66 insertions(+), 14 deletions(-)
+未改 packages/**、apps/server/**、wire.ts、package.json、pnpm-lock、scheduler、CSS。
+
+六、变异探针（仓库外 clone，已删除）
+MUT1 pendingCount 固定 1 → T1/T4/T10 红。
+MUT2 请求卡改用 view.deadlineAt → T4/T6a/T11 红。
+MUT3 删除过期禁用（requestExpired=false）→ T5/T6b/T7/T8 红。
+MUT4 useRequestExpired 去掉 250ms refresh → T7/T8 红。
+MUT5 actionWait 恢复“本轮行动即将结束” → T9 红。
+每组真实失败文本见成果报告第四节与 10B-mut-*.log。
+基线 13/13 绿；临时 clone %TEMP%\richman-10b-mut-* 已删除。
+
+七、手工验收建议（未在本轮执行）
+- 真机/360px：请求卡新增两行文案后仍无横向滚动（沿用 08B 契约，未加 CSS）。
+- 真实服务多笔请求：出借人答复第一笔后看到下一笔；过期后按钮置灰，等待服务端广播。
+- 这些不是本轮自动化证据；本轮证据为 13 条新测试 + 旧 866 条全绿。
+
+八、复核修复后的最终验收（2026-11-08）
+corepack pnpm -s test
+  Test Files  71 passed (71)
+       Tests  881 passed (881)
+    Duration  117.26s
+    TEST_EXIT=0
+说明：旧 879 条未减少；新增 2 条（债务中心两条 incoming 展示、T11b 借款人
+view.deadlineAt=null），旧 866 基线共新增 15 条。
+corepack pnpm -s typecheck
+  TSC_EXIT=0
+corepack pnpm -s build
+  143 modules，built in 357ms，BUILD_EXIT=0
+  index-Cs5Nm0o4.js 427.55kB（生产代码未变，产物与复核前一致）
+git diff --check：EXIT 0
+git status --short：apps/web 下 5 个修改 + 4 个新增源码/测试 + 4 份交接。
+  修改：GameView.tsx、steps.ts、debt-center.test.ts、dom-harness.ts、view-fixtures.ts
+  新增：request-deadline.ts、use-request-expired.ts、gameview-10b.test.ts、
+        request-deadline.test.ts
+日志：artifacts/test-logs/10Bfix-{full-test,typecheck,build}.log、10Bfix-tests-1.log。
+
+九、复核修复变异（全部在仓库内临时改，跑后逐字节还原并核对 sha256）
+MUT6 删除 GameView 4 处 if (requestExpired) return;（保留 disabled）
+  EXIT 1；T5/T6b 红：
+  - T5 `expected "vi.fn()" to not be called at all, but actually been called 1 times`
+    （refusePrivateLoan，gameview-10b.test.ts:135）
+  - T6b 同上（cancelPrivateLoan，:201）
+  MUT6_RESTORED=True，GameView sha256 4FABF116…911CD。
+MUT1–MUT5 重新在仓库内跑（因为 T4/T10/T11 的测试夹具已加强）：
+  MUT1 pendingCount=1：T1/T4/T10 红；RESTORED=True。
+  MUT2 改用 view.deadlineAt：T4/T11/T11b/T6a 红；RESTORED=True。
+  MUT3 requestExpired=false：T5/T6b/T7/T8 红；RESTORED=True。
+  MUT4 去掉 250ms refresh：T7/T8 红；RESTORED=True。
+  MUT5 恢复旧 actionWait 文案：T9 红；RESTORED=True。
+  每次 sha256 与原文件一致；日志 10B-fix-mut-1..5.log、10B-MUT6.log。
+注意：S1 最初用“直接 dispatch/临时移除 disabled”两次仍绿（React 按 fiber props 抑制）；
+最终 clickUnchecked 直接调用 React onClick props，才真正触达守卫并让 MUT6 红。

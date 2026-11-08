@@ -1,0 +1,155 @@
+单元 10B 成果报告（多请求界面与请求截止文案）
+================================================================
+日期：2026-11-08
+代码基线：362e217（10B 规格提交；10A 代码基线 69 文件/866 条）
+本轮范围：只改 apps/web/**，未 commit。
+
+一、改动文件
+修改：
+- apps/web/src/game/steps.ts
+    GuidedStep.requestLender 增加必填 pendingCount:number；
+    deriveStep 在 incomingRequests.length>0 时返回第一笔 + pendingCount=length，不排序。
+- apps/web/src/GameView.tsx
+    新增 activeRequest / requestDeadlineIso / useRequestExpired 调用；
+    借款人卡与出借人卡改用 request.deadlineMs 倒计时；
+    过期显示“已截止，等待系统收口”，取消/同意/拒绝/确认按钮 disabled；
+    acceptLoan 确认卡过期自动撤回，showConfirmation 对 acceptLoan+expired 返回 false；
+    出借人卡显示“待答复请求：共 N 个，当前第 1 个；答复后自动出现下一笔”；
+    actionWait 在 acted=true 且 currentSeatId=null 时改为“本轮行动已结束”。
+- apps/web/tests/view-fixtures.ts
+    仅按授权把 requestFixture.deadlineMs 60000 → Date.parse("2099-01-01T00:00:00.000Z")；
+    未改任何旧断言。
+新增：
+- apps/web/src/game/request-deadline.ts
+    requestDeadlineIso(deadlineMs): string|null
+    isRequestExpired(deadlineMs, serverNow, receivedAtMs, nowMs=Date.now()): boolean
+- apps/web/src/game/use-request-expired.ts
+    useRequestExpired(deadlineMs:number|null, serverNow:string, receivedAtMs:number): boolean
+    250ms interval，卸载清理，serverNow/deadlineMs/receivedAtMs 变化重新校准。
+- apps/web/tests/request-deadline.test.ts（4 条）
+- apps/web/tests/gameview-10b.test.ts（9 条）
+
+未改：packages/**、apps/server/**、wire.ts、协议、依赖、scheduler、CSS。
+
+二、关键行为
+- 只给请求卡使用 request.deadlineMs；页头“剩余”仍按阶段 view.deadlineAt（F 不变量）。
+- requestExpired = 本地校准时间已到 || requestDeadlineIso 为 null（非法截止按过期处理，避免发出必被拒的命令）。
+- 过期只禁用这一笔请求的按钮并撤回 acceptLoan 确认；不禁用其它命令、不清输入、不改快照。
+- 不删除请求、不本地收口；等服务端广播 EXPIRED/关闭。
+- incomingRequests 只显示当前第一笔 + 总数，不展示其它请求金额/借款人。
+
+三、T1–T12 对应测试名与结果
+T1  request-deadline.test.ts：
+    “T1 两笔 incomingRequests 返回第一笔且 pendingCount=2，不改数组” PASS
+T2  request-deadline.test.ts：
+    “T2 有限毫秒转 ISO，NaN/Infinity/非数字返回 null” PASS
+    （复核后补 Number.MAX_SAFE_INTEGER：不抛错且返回 null）
+T3  request-deadline.test.ts：
+    “T3 截止前/恰好等于/之后按服务端校准时间判定，客户端偏差不改变结论” PASS
+T3b request-deadline.test.ts：
+    “T3b 非法 deadline/serverNow/receivedAtMs 不抛错且返回 false” PASS
+T4  gameview-10b.test.ts：
+    “T4 两笔请求显示共 2 个，倒计时用 request.deadlineMs 的 0:45 而不是
+     view.deadlineAt 的 0:10” PASS
+T5  gameview-10b.test.ts：
+    “T5 过期请求显示已截止，同意/拒绝 disabled 且点击不产生命令” PASS
+T6a gameview-10b.test.ts：
+    “T6a 借款人倒计时用 pendingRequest.deadlineMs 的 0:45，而不是
+     view.deadlineAt 的 0:10” PASS
+T6b gameview-10b.test.ts：
+    “T6b 借款人过期显示已截止，取消请求 disabled 且点击不产生命令” PASS
+T7  gameview-10b.test.ts：
+    “T7 挂载后 1.1 秒变已截止，同意/拒绝/取消全部 disabled” PASS
+T8  gameview-10b.test.ts：
+    “T8 同意借款确认卡在过期时自动撤回，accept 未被调用” PASS
+T9  gameview-10b.test.ts：
+    “T9 acted=true 且 currentSeatId=null 显示本轮行动已结束，不再显示即将结束” PASS
+T10 gameview-10b.test.ts：
+    “T10 第一笔答复后切换第二笔，显示新借款人并恢复可操作，不残留第一笔” PASS
+T11 gameview-10b.test.ts：
+    “T11 view.deadlineAt=null 时仍显示请求倒计时且按钮可用” PASS
+T12 全量：71 文件 / 879 条通过（基线 69 文件 / 866 条未少）。
+新增测试共 13 条（超过最低 12）。
+
+T4/T6a 的 0:10 断言范围说明：
+- 页头按设计始终显示阶段 view.deadlineAt（本轮测试故意设 0:10），整页文本必然含 0:10。
+- 因此断言“当前步骤卡”文本含“请求截止：0:45”且不含 0:10，同时断言页头仍含
+  “剩余 0:10”，证明请求卡没有回退到 view.deadlineAt。不是放宽断言。
+
+四、MUT1–MUT5（仓库外临时 clone，已删除）
+基线：13/13 绿。
+MUT1 steps pendingCount 固定 1：
+  红 T1/T4/T10。
+  T1 实际：AssertionError: expected 1 to be 2（pendingCount）。
+  T4 实际：卡文本“共 1 个”而不是“共 2 个”。
+MUT2 请求卡截止改用 view.deadlineAt：
+  红 T4/T6a/T11。
+  T4 实际：卡内“请求截止：0:10”，期望 0:45。
+  T6a 实际同上；T11 期望“请求截止：0:45”未出现。
+MUT3 requestExpired 固定 false（删除过期禁用）：
+  红 T5/T6b/T7/T8。
+  实际失败：卡文本不含“已截止，等待系统收口”；T8 确认卡仍在。
+MUT4 useRequestExpired 的 250ms interval 不再触发 refresh：
+  红 T7/T8；计时器推进 1.1s 后仍显示未过期，确认卡不撤回。
+MUT5 actionWait 文案恢复“本轮行动即将结束”：
+  红 T9；实际：期望“正在等待未答复的借款请求收口…”未出现。
+日志：artifacts/test-logs/10B-mut-{baseline,1,2,3,4,5}.log。
+临时 clone %TEMP%\richman-10b-mut-* 已删除；仓库文件未做变异。
+
+五、验收真实结果
+corepack pnpm -s vitest run apps/web/tests
+  33 文件 / 399 条通过，6.59s，WEB_EXIT=0
+corepack pnpm -s test
+  71 文件 / 879 条通过，114.46s，TEST_EXIT=0
+corepack pnpm -s typecheck
+  TSC_EXIT=0
+corepack pnpm -s build
+  143 modules transformed，built in 376ms，BUILD_EXIT=0
+  index-Cs5Nm0o4.js 427.55kB（此前 index-CoBDshf7.js 426.08kB）
+git diff --check：EXIT 0
+git status：仅 apps/web 下 3 个修改 + 4 个新增测试/源码文件；另 4 份交接。
+
+六、隐私与边界
+- 只显示当前 incoming 请求；不渲染其它请求的金额/借款人，不新增全局待答复计数协议字段。
+- incoming 顺序严格按服务端数组，不按 requestId/deadline 排序。
+- 客户端时钟只用于禁用按钮和文案，不是权威裁决；过期后等待服务端广播收口。
+- 有当前行动席时，服务端 EXPIRED 广播可能晚到该席下一次 tick；客户端只置灰，不删请求。
+- 全席已行动时只说明“等待借款请求收口”，不显示具体数量。
+
+七、复核修复 F1–F6（2026-11-08）
+F1 过期守卫真测试（S1）
+- apps/web/tests/dom-harness.ts：新增 clickElementUnchecked / clickUnchecked。
+  实测 React 会按 fiber props 的 disabled 抑制合成 click，临时移除 DOM disabled 也无效；
+  因此辅助直接调用按钮挂载的 React onClick props（找不到才退回 native click），
+  模拟“脚本/开发者工具强行触发”，专门验证组件内 4 处 if (requestExpired) return;。
+- apps/web/tests/gameview-10b.test.ts：T5 用 clickUnchecked 点“同意借款/拒绝”，
+  T6b 用 clickUnchecked 点“取消请求”，断言 client spy 未被调用；保留 disabled 断言。
+- MUT6（仓库内删 4 处守卫、保留 disabled，sha256 还原）红：
+  T5 失败于 `expected "vi.fn()" to not be called at all, but actually been called 1 times`
+  （refusePrivateLoan 被调用，gameview-10b.test.ts:135）；
+  T6b 同样失败（cancelPrivateLoan 被调用，:201）。
+F2 债务中心口径（S2）
+- apps/web/src/game/DebtCenter.tsx 未改。
+- apps/web/tests/debt-center.test.ts 追加“两条 incomingRequests 在债务中心逐条展示
+  （07A 只读账本），不出现 10B 引导卡共 N 个文案” PASS。
+- 结论：10B“只显示当前一笔 + 总数”只约束引导请求卡；07A 债务中心保留全量只读列表。
+F3 T11 借款人分支（S3）
+- gameview-10b.test.ts 新增“T11b 借款人卡在 view.deadlineAt=null 时仍显示 0:45，
+  取消可用且页头为 —” PASS；原 T11 出借人分支保留。
+F4 T1/T4 不同借款人（S4）
+- request-deadline.test.ts T1 两笔改用 p2/p3，并断言 incoming borrowerId 顺序。
+- gameview-10b.test.ts T4 两笔改用 p2（500）与 p3（777）；断言卡上只有乙/500，
+  整页不出现“丙”与“777”。
+F5 T10 真实点击（S5）
+- gameview-10b.test.ts T10 先真实点击“拒绝”，断言 refusePrivateLoan 被调用恰好 1 次，
+  再切换为只剩第二笔的视图，断言第二笔出现、第一笔不残留、按钮可用。
+F6 T2 边界（S6）
+- request-deadline.test.ts T2 增加 Number.MAX_SAFE_INTEGER：不抛错且返回 null。
+
+八、复核修复后的测试与验收
+- 全量 71 文件 / 881 条通过（旧 879 未减少；新增债务中心多请求 1 条 + T11b 1 条）。
+- typecheck/build 0；git diff --check 0。
+- MUT1–MUT5 在仓库内重跑并逐字节还原（sha256 全部 True）：
+  MUT1 T1/T4/T10 红；MUT2 T4/T11/T11b/T6a 红；
+  MUT3 T5/T6b/T7/T8 红；MUT4 T7/T8 红；MUT5 T9 红。
+- 日志：artifacts/test-logs/10B-fix-mut-1..5.log、10B-MUT6.log。

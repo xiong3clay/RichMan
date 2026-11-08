@@ -1,6 +1,6 @@
 RichMan 项目当前状态
 更新日期：2026-11-08
-更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复；07A/07B/07C 由 Trae 实现，Qoder 三轮复核，Lead 验收；08A/08B/08C 由 Trae 实现并完成复核修复；09A 已提交 eeec8ca，第四轮测试补强已提交 bb7c2f2（交接 1ebdbe0，Qoder 复核 PASS）；09B 已提交 6491fe9（文档 39dc1b9），Qoder 复核 FAIL(M1/M2)；第五/六轮修复 bcb9aae、文档 71e099a，Qoder 第六轮验证 code PASS、文档硬伤已改并提交 59c00f0；09C-B 规格已写（handoff/单元09C-B-备份恢复清理脚本.txt，含 Qoder S1–S6 补强）；09C-A 由 Trae 实现、Lead 验收并提交 2bd84cd，Qoder 复核判可提交（66 文件/813 条）；09C-B 已提交 70b18a0（Qoder 两轮复核：M1/M2 修复后 code PASS，文档 M-DOC 已改）；09C-C 已提交 7c8fd7d，Qoder 复核可提交（无 must-fix，S1 文档计数已改）；09C-D 已提交 839c3c6（0.9.0 LICENSE/CHANGELOG/README，typecheck/build 0）；09D 起服时发现 /health 仍硬编码 0.0.0，已改为 0.9.0 并加测试（66 文件/835 条，已提交 d07e13d）；单元 10A D6 多请求引擎已实现并提交 a8016c2，Qoder 只读复核可提交（无 must-fix，S1–S5 已处置），69 文件/866 条）
+更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复；07A/07B/07C 由 Trae 实现，Qoder 三轮复核，Lead 验收；08A/08B/08C 由 Trae 实现并完成复核修复；09A 已提交 eeec8ca，第四轮测试补强已提交 bb7c2f2（交接 1ebdbe0，Qoder 复核 PASS）；09B 已提交 6491fe9（文档 39dc1b9），Qoder 复核 FAIL(M1/M2)；第五/六轮修复 bcb9aae、文档 71e099a，Qoder 第六轮验证 code PASS、文档硬伤已改并提交 59c00f0；09C-B 规格已写（handoff/单元09C-B-备份恢复清理脚本.txt，含 Qoder S1–S6 补强）；09C-A 由 Trae 实现、Lead 验收并提交 2bd84cd，Qoder 复核判可提交（66 文件/813 条）；09C-B 已提交 70b18a0（Qoder 两轮复核：M1/M2 修复后 code PASS，文档 M-DOC 已改）；09C-C 已提交 7c8fd7d，Qoder 复核可提交（无 must-fix，S1 文档计数已改）；09C-D 已提交 839c3c6（0.9.0 LICENSE/CHANGELOG/README，typecheck/build 0）；09D 起服时发现 /health 仍硬编码 0.0.0，已改为 0.9.0 并加测试（66 文件/835 条，已提交 d07e13d）；单元 10A D6 多请求引擎已实现并提交 a8016c2，Qoder 只读复核可提交（无 must-fix，S1–S5 已处置），69 文件/866 条；10B 多请求界面与请求截止已提交 1ffe107，Qoder 复核可提交（无 must-fix，S1/S2 已按 Lead 裁决补强），71 文件/881 条）
 
 【版本】
 方案版本：V1.3.3（V1.3.2 + 引导式界面 + 连接实测）
@@ -9,8 +9,8 @@ RichMan 项目当前状态
 游戏版本：开发版 0.9.0（未发布，目标 V1.0；1.0.0 门槛：09D 真机矩阵 + 单元 10 D6 + 发布包）
 
 【进度与范围】
-已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（已提交 eeec8ca，第四轮补强 bb7c2f2，交接 1ebdbe0）、09B（首版 6491fe9/39dc1b9；第五、六轮复核修复已提交 bcb9aae，文档 71e099a）、09C-A（实现 2bd84cd，规格 c522bb4，Qoder 复核可提交）、09C-B（实现 70b18a0，Qoder 复核 M1/M2 修复后 code PASS）、09C-C（实现 7c8fd7d，Qoder 复核可提交）、09C-D（发布文档 0.9.0，839c3c6；/health 版本号修复 d07e13d）、10A（D6 多请求引擎/阶段末等待，实现 a8016c2，Qoder 复核可提交）。
-当前子任务：10B 多请求界面与文案（规格待写）；09D 真机发布验收矩阵（用户按清单操作、Lead 记录；清单已写 handoff/单元09D-真机发布矩阵.txt，D01–D20，2885 字符，待用户执行）；08C 背景音乐已换成三首外部曲目轮播（已提交 e23191c/a1aa986）；单元 10A D6 多请求引擎已实现并提交 a8016c2，语义 A（提交即消耗行动、牌桌继续、阶段末按最早请求截止逐笔收口），Qoder 复核无 must-fix。09C-D 已完成：仓库进入开发版 0.9.0，MIT LICENSE、CHANGELOG、README 总览与五处 package.json 版本号已提交 839c3c6。
+已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（已提交 eeec8ca，第四轮补强 bb7c2f2，交接 1ebdbe0）、09B（首版 6491fe9/39dc1b9；第五、六轮复核修复已提交 bcb9aae，文档 71e099a）、09C-A（实现 2bd84cd，规格 c522bb4，Qoder 复核可提交）、09C-B（实现 70b18a0，Qoder 复核 M1/M2 修复后 code PASS）、09C-C（实现 7c8fd7d，Qoder 复核可提交）、09C-D（发布文档 0.9.0，839c3c6；/health 版本号修复 d07e13d）、10A（D6 多请求引擎/阶段末等待，实现 a8016c2，Qoder 复核可提交）、10B（多请求引导卡/请求截止倒计时/过期守卫，实现 1ffe107，Qoder 复核可提交）。
+当前子任务：09D 真机发布验收矩阵（用户按清单操作、Lead 记录；清单已写 handoff/单元09D-真机发布矩阵.txt，D01–D20，2885 字符，待用户执行）与单元 11 稳定性与故障演练；08C 背景音乐已换成三首外部曲目轮播（已提交 e23191c/a1aa986）；单元 10A D6 多请求引擎已实现并提交 a8016c2，语义 A（提交即消耗行动、牌桌继续、阶段末按最早请求截止逐笔收口），Qoder 复核无 must-fix。09C-D 已完成：仓库进入开发版 0.9.0，MIT LICENSE、CHANGELOG、README 总览与五处 package.json 版本号已提交 839c3c6。
 09C-B 完成（70b18a0）：backup.ps1/restore.ps1/cleanup.ps1 + README 备份节 + 09C-A S1/S2 补强；
 Qoder 首轮 M1（父路径 junction 写穿）/M2（显式已存在空 Out）已修复，复验 code PASS，M-DOC（pwsh7 未复现声明）由 Lead 改文档。
 09C 拆分：A 核心库与 CLI（已提交 2bd84cd）→ B PowerShell 包装与备份节（已提交 70b18a0）→
@@ -54,11 +54,13 @@ start-tunnel 打印 https://catalogs-organize-listings-garage.trycloudflare.com�
      终局名单与本人破产说明；只改 apps/web，BET_SETTLED 只取本人条目。
 06 起会话与命令去重已落盘（apps/server/data，RICHMAN_DATA_DIR 可覆盖），服务重启后房间恢复为暂停态，房主 resume_game 继续。
 
-【测试与构建（2026-11-08 单元10A 提交后实测）】
-pnpm -s test    69 文件 / 866 条（10A 新增 26：engine-requests 22、d6-requests 4），TEST_EXIT=0
+【测试与构建（2026-11-08 单元10B 提交后实测）】
+pnpm -s test    71 文件 / 881 条（10B 新增 15：request-deadline 4、gameview-10b 10、debt-center 1），TEST_EXIT=0
 pnpm typecheck  TSC_EXIT=0
-pnpm -s build   BUILD_EXIT=0（index--JyM_5JG.css 18.07kB、index-CoBDshf7.js 426.08kB，
-                141 modules；dist/audio 为 3 mp3 + CREDITS.txt + 5 wav，无 bgm-loop.wav）
+pnpm -s build   BUILD_EXIT=0（index--JyM_5JG.css 18.07kB、index-Cs5Nm0o4.js 427.55kB，
+                143 modules；dist/audio 为 3 mp3 + CREDITS.txt + 5 wav，无 bgm-loop.wav）
+10B 变异（Lead 实跑）：MUT6 删 4 处 requestExpired 守卫 → T5/T6b 红；
+                MUT2 请求卡改用 view.deadlineAt → T4/T11/T11b/T6a 红；均逐字节还原。
 backup.test.ts 23/23、scripts.test.ts 28/28（真实 Windows PowerShell 5.1）
 pwsh7：本机 where.exe/Test-Path 均找不到 pwsh，09cb-pwsh7.txt 与 09cbfix-pwsh7-current.txt 仅作历史，不作为验收。
 09D 起服：/health 实测 version=0.9.0、protocolVersion=1（计划任务 RichManServer/RichManTunnel 托管）。
@@ -122,6 +124,22 @@ pnpm smoke:lan PASS（05D 验收时）
   可被 -DataDir / RICHMAN_DATA_DIR 覆盖；日志/状态只写 dataDir。
 - 所有脚本支持 -CheckOnly，最后一行单行 JSON；stop/status 的 CheckOnly 不写文件。
 - 停止顺序固定先 tunnel 后 server。
+
+【10B 不得回退的点】
+- 引导请求卡（GameView requestLender）只显示当前一笔 + pendingCount（=incomingRequests.length），
+  顺序严格按服务端数组，不在前端排序；不得渲染其它 incoming 的借款人/金额。
+- 07A 债务中心仍逐条展示本人作为出借人的全部 incoming（只读账本），10B 的“只显示一笔”不约束它；
+  不得为了文案统一删掉 DebtCenter 的多条展示。
+- 请求卡截止只能用 request.deadlineMs；页头“剩余”仍用阶段 view.deadlineAt，两者同时存在是正常的。
+- requestDeadlineIso 对 NaN/Infinity/非数字/超 Date 范围返回 null；requestExpired = 校准时间已到 || ISO 为 null。
+- 过期必须同时：4 处按钮 disabled、onClick 内有 if (requestExpired) return;、
+  showConfirmation 对 acceptLoan+expired 为 false、确认卡 effect 自动 setConfirmAction(null)；
+  只加 disabled 不加守卫会让 MUT6 失效。
+- dom-harness 的 clickUnchecked/clickElementUnchecked 直接调 React onClick props，仅用于测守卫，
+  不得当成生产行为，也不得因此删掉 disabled。
+- view-fixtures.requestFixture.deadlineMs 固定为 2099；改回 60000 会让旧点击测试被过期禁用挡住。
+- MUT1 pendingCount=1、MUT2 改用 view.deadlineAt、MUT3 去过期禁用、MUT4 去 250ms refresh、
+  MUT5 恢复“本轮行动即将结束”、MUT6 删守卫，改相关代码后必须重跑并保持变红。
 
 【06 不得回退的点】
 - 提交顺序：tmp + fsync → 备份旧 snapshot 到 snapshot.bak.json → rename 才算出账；rename 成功后才发布内存/广播/回成功。

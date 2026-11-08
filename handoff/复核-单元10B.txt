@@ -1,0 +1,293 @@
+RichMan 单元 10B 多请求界面与请求截止文案 独立复核
+================================================
+复核员：Qoder（只读复核；未改实现/测试/协议/交接，未 commit）
+日期：2026-11-08
+工作区：D:\Lianjunjie\biancheng\RichMan
+当前 HEAD：362e217
+复核范围：
+- apps/web/src/GameView.tsx（修改）
+- apps/web/src/game/steps.ts（修改）
+- apps/web/tests/view-fixtures.ts（唯一旧测试数据修改）
+- apps/web/src/game/request-deadline.ts（新增）
+- apps/web/src/game/use-request-expired.ts（新增）
+- apps/web/tests/request-deadline.test.ts（新增）
+- apps/web/tests/gameview-10b.test.ts（新增）
+- handoff/单元10B-{成果报告,运行与验收,下一阶段交接,注意事项}.txt
+- 规格 handoff/单元10B-多请求界面与截止文案.txt
+
+一、结论
+可提交。
+未发现会造成错误转账、过期请求仍可操作、确认卡误转、请求卡卡死或第三人隐私泄露的 must-fix。
+有 5 项 should-fix：最实质的是 C2 测试自证（过期按钮的“点击不发命令”实际未测到 onClick 守卫）；
+另有 DebtCenter 既有全量请求列表与 10B 规格第 15 行的范围口径冲突需 Lead 确认，以及 T11/T4/T10 的覆盖补强。
+测试基线真实为 71 文件 / 879 条全绿（旧 866 + 新增 13），typecheck/build 均通过。
+
+二、must-fix 列表
+无。
+
+三、should-fix 列表
+
+S1（测试质量，优先级最高）T5/T6b 的“点击不产生命令”是空断言，onClick 守卫也无测试覆盖
+   位置：apps/web/tests/dom-harness.ts:242-244（clickElement 内 `if (!button.disabled)` 才 dispatch）；
+         apps/web/tests/gameview-10b.test.ts:126-127（T5 点击同意/拒绝）、:183（T6b 点击取消）。
+   问题：按钮 disabled 为 true 时 harness 根本不派发 click，因此 client spy 的 not.toHaveBeenCalled()
+         不可能失败；它证明的是 disabled 存在，不是“点击路径被守卫”。
+   额外实证（我在仓库内临时改后已逐字节还原，sha256 校验通过）：
+   - 删除 GameView.tsx 中 4 处 `if (requestExpired) return;`（确认卡、取消、同意、拒绝），保留 disabled；
+   - 运行 13 条新测试，仍然 13 passed / 2 files passed，exit 0。
+   - 说明这些守卫当前没有任何测试能防止回归。
+   建议：
+   (a) 保留 `expect(button.disabled).toBe(true)`（这是真实用户契约）；
+   (b) 在 dom-harness 增加一个明确命名为 `dispatchClickUnchecked` 的测试辅助：绕过 disabled 检查直接
+       dispatch，再断言 spy 不被调用；若 React 对 disabled 按钮抑制合成事件导致该断言仍无法触达 handler，
+       则把守卫抽成可直接单测的纯函数（如 `canRespondToRequest(requestExpired)`）并单测；
+   (c) 不要只依赖“disabled 下 click 无调用”，否则未来把 guard 删掉测试仍会全绿。
+   这不是产品 must-fix：当前源码确实同时有 disabled 和 guard，真实用户不会触发。
+
+S2（范围/隐私口径）既有“债务中心”仍逐条渲染所有 incomingRequests，需 Lead 明确是否违反 10B 规格
+   位置：apps/web/src/game/DebtCenter.tsx:219-236（`finance.incomingRequests.map(...)`，逐条显示
+         borrowerId/金额/利率/创建时信用/创建时失信欠款/风险行）；
+         apps/web/src/GameView.tsx:694-695（“债务中心（只读）”入口，打开后可见）。
+   规格：handoff/单元10B-多请求界面与截止文案.txt:15 写“不把 incomingRequests 渲染成完整列表，
+         不展示其他借款请求的金额/借款人；只显示当前这一笔 + 总数”。
+   现状：10B 新增的引导请求卡确实只渲染 `incomingRequests[0]` + pendingCount（steps.ts:275-283），
+         但既有 DebtCenter 仍是完整列表。它只对“本人作为出借人”的请求显示，不是第三人泄露；
+         且 07A 规格 handoff/单元07A-债务中心.txt:39 明确要求“incomingRequests……显示借款人昵称、
+         金额、利率、创建时信用、创建时失信欠款”。因此它没有在本轮被改，也没有违反 D1 的改动范围。
+   判断：如果 10B 第 15 行只约束引导请求卡（从上下文看最可能），当前实现 PASS；
+         如果要求全局（主界面 + 债务中心）都只显示当前一笔，则这是一个未处理的隐私/手机溢出面，
+         需要另立小任务或明确豁免；不能悄悄改 DebtCenter 而不更新 07A 规格与测试。
+   建议：Lead 在 10B 规格/注意事项中补一句“此限制仅针对引导请求卡；07A 债务中心保持只读全量列表”，
+         或明确要求后续收口 DebtCenter；二选一，不要保持含糊。
+   现有 debt-center.test.ts:243-261 只有单 incoming 用例，未覆盖多条列表；若决定保留全量，建议加一条
+         两条 incoming 的只读展示测试，明确这是有意行为。
+
+S3（覆盖）T11 只测了出借人卡，未测借款人卡在 view.deadlineAt=null 时的行为
+   位置：apps/web/tests/gameview-10b.test.ts:154-163（T11 使用 lenderView）；T6a:165-174 的借款人
+         用例使用 view.deadlineAt=+10 秒，不是 null。
+   规格 T11 写“view.deadlineAt=null 但 request.deadlineMs 未来：仍显示请求倒计时且按钮可用”，
+   没有限定出借人。两份卡共用 activeRequest/Countdown 代码，当前代码看不会分叉，但测试只证明一半。
+   建议：增加 borrowerView(45_000, null) 变体，断言 0:45、取消按钮可用、页头为“—”。
+
+S4（覆盖/真实性）T1/T4 的两笔请求来自同一借款人，违反引擎“同一借款人最多一个 PENDING”的事实
+   位置：apps/web/tests/request-deadline.test.ts:8-10（两笔都用 requestFixture 的 borrowerId=p2）；
+         apps/web/tests/gameview-10b.test.ts:107-109（两笔 borrowerId 都是 p2）。
+   事实：packages/game-core/src/private-loans.ts:204-210 禁止同一 borrower 同时有第二个 PENDING；
+         真实服务端不会产生这种视图。它不影响 UI 计数逻辑，但让测试不是有效真实场景，也没覆盖
+         “第二笔借款人的金额/姓名不出现”的隐私断言。
+   建议：两笔改用不同 borrower（如 p2/p3），并在 T4 初始状态断言页面主卡不出现第二笔的姓名/金额；
+         这同时加强 B1。
+
+S5（覆盖，低优先）T10 是直接替换视图数组，不是实际答复后由服务端快照产生下一笔
+   位置：apps/web/tests/gameview-10b.test.ts:133-151。
+   现状：先断言“共 2 个”，再 `mounted.update` 注入 `incomingRequests:[second]`；能证明渲染切换、
+         不残留第一笔、按钮恢复，但没有证明“点击同意/拒绝→发送命令→下一快照”的完整路径。
+   建议：若要覆盖端到端，可在现有 07C/guided-integration 的真实客户端路径上补一条多请求答复后
+         第二笔出现的测试；或在 DOM 测试里点击后断言 command 被发送，再注入 answered-view。
+   另：T8 只能证明“过期后确认卡消失”，无法区分是 useEffect 撤回还是 showConfirmation 门控
+         （两者代码都有，行为要求满足）；若想分别防回归，可加“保留 confirm 状态但强制 requestExpired”
+         的组件级测试，或对 showConfirmation 条件做纯函数测试。非阻塞。
+   还有 T9 的夹具没有 pending 请求（真实引擎下全席 acted 且 current=null 必定还有 PENDING），
+        UI 分支测试可接受，但与真实状态不一致，建议补一个带两笔 PENDING 的夹具。
+
+S6（低优先）requestDeadlineIso 的“有限但超出 Date 范围”输入没有测试
+   位置：apps/web/src/game/request-deadline.ts:4-11；T2 只测 NaN/Infinity/非数字/字符串。
+   现状：`new Date(8.64e15+1)` 会得到 Invalid Date，返回 null，随后 requestExpired 按已截止处理。
+   这不是合法服务端数据（wire deadlineMs 为 number，来自有限定时器），属于 fail-safe；
+   若想锁定边界，补一个 `Number.MAX_SAFE_INTEGER` 断言即可。低优先。
+
+四、A/B/C/D 逐条判定
+
+A1 PASS：两张请求卡都只按 request.deadlineMs 倒计时，页头仍按 view.deadlineAt
+   证据：
+   - GameView.tsx:211-219 用 activeRequest（step 的 requestLender/requestBorrower）算 requestDeadlineIso，
+     用 useRequestExpired(activeRequest.deadlineMs,...)；requestExpired 只由请求 deadline 决定（或 ISO 非法）。
+   - 借款人卡 GameView.tsx:790-793、出借人卡 :827-830 使用 requestDeadlineIsoValue 的 Countdown；
+     没有再用 view.deadlineAt。
+   - 页头 GameView.tsx:1634 仍 `<Countdown deadlineAt={paused ? null : view.deadlineAt}>`；
+     其它 Countdown:533（放弃自救）、:742（银行到期）、:1036/:1055（危险自救/下注）均非请求卡，来源未改。
+   - DebtCenter.tsx:44-52 的请求等待文案使用 request.deadlineMs（非 view.deadlineAt），也不是新卡。
+   结论：没有发现用 view.deadlineAt 充当请求截止的残留。T4/T6a/T11 均通过；MUT2（改 view.deadlineAt）
+   使 T4/T6a/T11 红，证明该断言有效。
+
+A2 PASS：requestDeadlineIso 为 null 也算过期不会误伤合法数据
+   证据：
+   - WireLoanRequest.deadlineMs 在 apps/web/src/net/wire.ts:70-82 定义为 number；服务端 wireCopy
+     （apps/server/src/ws.ts:123-126）只把 *Cents/cents 字符串化，deadlineMs 保持 number。
+   - 引擎 LoanRequest.deadlineMs 为 number；createLoanRequest 用 assertTimeMs（private-loans.ts:181-190）
+     校验，存档校验 file-store.ts:75-77 也要求 Number.isSafeInteger(deadlineMs)。
+   - requestDeadlineIso 对非 number、NaN、±Infinity、超出 Date 范围返回 null；正常请求 deadline 由
+     now + 45/20 秒等有限定时器产生，不会落入 null。
+   - 非法/缺失 deadline 被当作“已截止”是 fail-safe：按钮置灰并显示“等待系统收口”，不会发出必被服务端
+     拒绝的迟到命令；合法数据没有误伤路径。
+   T2/T3/T3b 通过；T11 view.deadlineAt=null 但 request deadline 未来仍可用，证明没有把 stage deadline
+   当作请求 deadline。
+
+A3 PASS：acceptLoan 确认卡过期自动撤回；effect 依赖、disabled、onClick 守卫都存在
+   证据：
+   - GameView.tsx:218-223：requestExpired 变化时执行 `setConfirmAction(current => current?.kind ===
+     "acceptLoan" ? null : current)`；依赖数组 [requestExpired] 覆盖了唯一的触发条件；setConfirmAction
+     使用函数式更新，不会闭包吞掉其他确认状态。
+   - GameView.tsx:1560-1563：showConfirmation 对 `currentConfirmation.kind === "acceptLoan" &&
+     requestExpired` 返回 false，即使 effect 尚未跑，确认卡也会在同一渲染被隐藏。
+   - 确认按钮 GameView.tsx:581-584：disabled={requestExpired} 且 onClick 内 `if (requestExpired) return;`；
+     请求卡的同意/拒绝/取消（:801-804、:839-843、:849-853）同样都有 disabled + 守卫。
+   - T8 实际跑通：打开确认卡→推进 1.1 秒→确认卡消失、请求卡已截止、accept 未被调用；
+     T7 证明实时过期后三类按钮 disabled。
+   说明：T8 的行为也同时被 effect 与 showConfirmation 门控满足，测试无法单独区分两者（见 S5），
+   但两个机制在源码中都存在，不存在“卡死/无法重开”：新未过期请求出现时 requestExpired 重算为 false，
+   按钮恢复，T10 验证了恢复可操作。
+
+A4 PASS：pendingCount === incomingRequests.length，且优先级未改
+   证据：
+   - apps/web/src/game/steps.ts:156 给 requestLender 增加必填 pendingCount:number；
+     :275-287 仍先判断 `view.finance.incomingRequests.length > 0`，再返回
+     `{ kind:"requestLender", request: incomingRequests[0], pendingCount: incomingRequests.length }`；
+     之后才判断 pendingRequest（自己发出的请求）——原有“收到请求优先于自己 pending”未改。
+   - T1（request-deadline.test.ts:7-22）断言第一笔 requestId、pendingCount=2、数组长度/引用不变；
+     MUT1（固定 pendingCount=1）使 T1/T4/T10 红，证明计数断言有效。
+   - 没有排序：未增加 sort/reverse；服务端数组顺序原样消费。
+
+A5 PASS：actionWait 两个新分支文案正确，旧分支未被误改
+   证据：
+   - GameView.tsx:865-884：
+     acted=true && seatId=null → 标题“本轮行动已结束”，说明“正在等待未答复的借款请求收口；
+     全部答复或到期后自动进入下注。”；
+     acted=true && seatId!=null → 仍是“你已完成本轮行动”/“本轮不再给你新的问题……”；
+     acted=false && seatId=null → 仍是“本轮行动即将结束。”；
+     acted=false && seatId!=null → 仍是“等待其他玩家行动”/“其他玩家完成后会依次轮到你。”。
+   - T9（gameview-10b.test.ts:229-238）用 ACTION/actedSeats=[me.seatId]/currentSeatId=null 断言
+     “本轮行动已结束”“借款请求收口”，且全页不含“本轮行动即将结束”；MUT5 使其红。
+   - 旧分支文本与 diff 前一致（git diff 只有 acted=true 且 seatId=null 的内层三元变化）。
+
+B1 PASS（就 10B 新增引导卡而言）：只渲染当前第一笔，未把其他 incoming 展平到主卡
+   证据：
+   - steps.ts:275-283 只取 incomingRequests[0]；GameView.tsx:810-856 只使用 current.request 的
+     borrowerId/金额/利率/信用/失信欠款，pendingCount 只显示为数字，没有 map 其它请求。
+   - T10 从 req-1(p2) 切到 req-2(p3) 后只显示 p3，且 page 不再含 p2 的“想向你借款”；
+     T4 只显示“共 2 个/当前第 1 个”。
+   附注（S2）：既有 DebtCenter.tsx:219-236 仍完整列出所有 incoming；这是 07A 规格明确要求的只读
+   债务中心，且只对出借人本人显示，不是第三人泄露；但与 10B 规格第 15 行的全局措辞冲突，需 Lead 明确
+   范围。新增 10B 卡本身没有泄露第二笔详情。
+
+B2 PASS：没有新增协议字段、没有依赖服务端新字段
+   证据：apps/web/src/net/wire.ts 未改（git diff 为空）；WireLoanRequest/WireFinance 保持原字段；
+   pendingCount 只加在 steps.ts 的 GuidedStep 客户端步骤类型上（:156/:281），不是 wire/快照字段；
+   request-deadline.ts/use-request-expired.ts 只依赖现有 request.deadlineMs、view.serverNow、receivedAtMs；
+   git diff 未包含 packages/**、apps/server/**、scheduler、依赖、CSS。
+
+C1 PASS（就主要用例而言）：T1–T11 多为真实行为断言；T4/T6a 的 0:10 对照既证明没有回退也没有放宽
+   证据：
+   - T4（:103-117）用两笔请求 + view.deadlineAt=+10 秒；断言步骤卡含“请求截止：0:45”且不含“0:10”，
+     同时断言整页含“剩余 0:10”。T6a（:165-174）对借款人卡做同样对照。
+   - MUT2（把 requestDeadlineIsoValue 改 view.deadlineAt）实测 T4/T6a/T11 红，证明该断言不是空转；
+     MUT1（count 固定 1）使 T1/T4/T10 红；MUT3（requestExpired 固定 false）使 T5/T6b/T7/T8 红；
+     MUT4（去掉 250ms refresh）使 T7/T8 红；MUT5（恢复旧等待标题）使 T9 红。
+   - T7/T8 用 fake timers 推进真实 1.1 秒，验证 hook 的 250ms 刷新和确认卡撤回，不是静态文本自证。
+   - 但 T5/T6b 的“click 无命令”子断言因 harness 跳过 disabled 而空转，见 C2/S1；这不影响
+     它们对 disabled 的断言，但不能作为 onClick 守卫的证据。
+
+C2 FAIL（测试质量，非产品缺陷）：T5/T6b 的“点击无命令”确实变成空断言
+   证据：
+   - dom-harness.ts:242-244：`clickElement` 只在 `if (!button.disabled)` 时 dispatch；disabled 按钮
+     永远不会触发 click 监听，T5:126-127 与 T6b:183 的 client spy 断言无法失败。
+   - 我额外删除 GameView.tsx 中全部 4 处 `if (requestExpired) return;`（保留 disabled），再跑
+     gameview-10b + request-deadline，结果 13 passed / 2 files passed，exit 0；说明 guards 未被任何测试
+     覆盖。随后已逐字节还原并校验 sha256。
+   更硬写法建议：
+   - harness 增加 `dispatchClickUnchecked`（不检查 disabled，直接 dispatch）；
+   - 或把过期守卫收成可单测纯函数并在 T5/T6b 直接断言；
+   - 或至少不要声称“点击路径已验证”；保留 disabled 断言 + 另测 guard；
+   - 若 React 对 disabled 元素抑制合成 click，直接 dispatch 可能仍无法触达 handler，此时纯函数测试
+     是最可靠的方案。
+
+C3 PASS（规格用例已覆盖）：T6b/T7 的借款人分支、T10 的逐笔切换都在
+   证据：
+   - T6b（:176-187）：borrowerView(-1000)，断言“已截止，等待系统收口”、取消 disabled、点击无调用；
+   - T7（:189-211）：先测出借人同意/拒绝，再 cleanup 后测借款人取消，1.1 秒后全部 disabled；
+   - T10（:133-151）：req-1(p2)→req-2(p3)，断言“共 1 个，当前第 1 个”、p3 出现、p2 不再出现、按钮恢复。
+   仍存在的覆盖缺口（详见 should-fix）：T11 只测出借人；T4/T1 两笔来自同一借款人；T10 是直接注入
+   下一视图而不是实际点击答复后由服务端快照切换；T8 不区分 effect 与 showConfirmation 门控。
+
+D1 PASS：没有越界改动
+   证据：git status 只有 apps/web 下 3 个修改 + 4 个新增文件；git diff --name-only 仅
+   apps/web/src/GameView.tsx、apps/web/src/game/steps.ts、apps/web/tests/view-fixtures.ts。
+   packages/**、apps/server/**、apps/web/src/net/wire.ts、协议、依赖、CSS、scheduler 均无 diff；
+   新增文件只在 apps/web/src/game 和 apps/web/tests。
+   注意：既有 DebtCenter.tsx 未改，因此仍有 S2 的完整列表现象；这是范围外既有页面，不是本轮越界。
+
+D2 PASS：旧 866 条只改了 view-fixtures 一处数据，未改其它旧断言
+   证据：
+   - apps/web/tests 下只有 apps/web/tests/view-fixtures.ts 一处 1 行增加/1 行删除
+     （deadlineMs:60000 → Date.parse("2099-01-01T00:00:00.000Z")）；其余旧测试文件无 diff。
+     另外两处 tracked diff 是 GameView.tsx/steps.ts 源码，不属于旧测试断言。
+   - 新增 2 个测试文件共 13 条；全量 71 文件/879 条 = 旧 866 + 13。
+   - 我独立把 fixture 临时改回 60000 后跑 apps/web/tests：6 failed / 393 passed (399)，
+     失败恰好是：07C“acceptLoan 返回不发送”、07C“M2-acceptLoan 暂停后确认卡消失”、
+     F1“ACCEPT FAILED 先事件后回执”、F1“REFUSED”、F1“CANCELLED”、F1“前一条同意回执晚于后一次发送”。
+     说明 2099 是必要的数据修正，不是为通过而放宽断言；已逐字节还原并校验 sha256。
+
+五、独立复跑的测试与变异结果（真实命令与真实输出摘要）
+
+1) corepack pnpm -s test
+   Test Files  71 passed (71)
+        Tests  879 passed (879)
+   Duration 115.97s
+   exit 0。
+   基线核对：866 旧条 + 13 新条（4 条 request-deadline + 9 条 gameview-10b），无旧测试减少。
+
+2) corepack pnpm -s vitest run apps/web/tests
+   Test Files  33 passed (33)
+        Tests  399 passed (399)
+   Duration 8.03s
+   exit 0。
+
+3) corepack pnpm -s vitest run apps/web/tests/gameview-10b.test.ts apps/web/tests/request-deadline.test.ts
+   Test Files  2 passed (2)
+        Tests  13 passed (13)
+   最终还原后复跑 708ms，exit 0。
+
+4) corepack pnpm -s typecheck
+   TSC exit 0（无诊断输出）。
+
+5) corepack pnpm -s build
+   ✓ 143 modules transformed
+   apps/web/dist/assets/index-Cs5Nm0o4.js 427.55 kB（gzip 125.70 kB）
+   built in 399ms，exit 0。
+
+6) git diff --check → exit 0；git status 只含 10B 3 个修改 + 4 个新增 + 4 份交接。
+
+7) 变异探针（仓库内临时改，跑后立即逐字节还原；sha256 全部校验 OK）
+   MUT1 steps.ts pendingCount 固定 1
+     Tests 3 failed / 10 passed (13)；失败 T1/T4/T10（与交接一致）。
+   MUT2 GameView.tsx requestDeadlineIsoValue 改用 view.deadlineAt
+     Tests 3 failed / 10 passed (13)；失败 T4/T6a/T11（与交接一致）。
+   MUT3 GameView.tsx requestExpired 固定 false
+     Tests 4 failed / 9 passed (13)；失败 T5/T6b/T7/T8（与交接一致）。
+   MUT4 use-request-expired.ts 去掉 refresh
+     Tests 2 failed / 11 passed (13)；失败 T7/T8（与交接一致）。
+   MUT5 GameView.tsx actionWait 恢复“本轮行动即将结束”
+     Tests 1 failed / 12 passed (13)；失败 T9（与交接一致）。
+   另加 S1 的守卫探针：删除 4 处 `if (requestExpired) return;` 后 13/13 仍绿（证明守卫无测试）。
+
+8) fixture 回退探针
+   把 view-fixtures.ts 的 deadlineMs 临时改回 60000，跑 apps/web/tests：
+   Tests 6 failed / 393 passed (399)；失败名称见 D2；还原后 13 条新测试与全量基线恢复。
+
+五·附、未覆盖/未验证项（补充，不改变上五节判定）
+- 未做真机/360px 视觉验收；新增两行 step-hint 未改 CSS，横向滚动未验证（交接已写未验证项）。
+- 未做真实手机、真实网络、跨设备时钟偏差测试；客户端只做本地校准禁用，服务端权威未在本轮改。
+- 未做服务端真实多请求 + UI 的端到端测试；T10 是 DOM 注入下一视图，不是 WS 全链路。
+- 未验证“第一笔答复后服务端立即广播第二笔”的真实时序；本轮只验证渲染逻辑。
+- DebtCenter 的多 incoming 展示没有新测试（既有 07A 用例只覆盖单条）；其全量列表与 10B 规格口径
+  的关系需 Lead 决策（S2）。
+- 未测试服务端 EXPIRED 广播晚到（已知边界）时 UI 的最终收口；客户端只负责置灰与文案。
+- 未测试极端 deadline（超出 Date 范围、字符串、缺失字段）在真实 wire/快照中的端到端表现；
+  纯函数 T2/T3b 已覆盖 NaN/Infinity/非法 serverNow，超范围有限值未单独覆盖（S6）。
+- 未对 `requestExpired` 的确认卡 effect 与 showConfirmation 门控分别做故障注入（S5/T8 说明）。
+- 未做长跑/内存/定时器泄漏测试；useRequestExpired 在请求长期 PENDING 时会持续 250ms refresh，
+  正常服务端收口后停止（请求卡消失/切换），本轮未压测。
+
+复核结论：代码与测试整体满足 10B 规格，可提交；建议提交前至少处理 S1（补过期守卫测试）并在
+交接中明确 S2 的 DebtCenter 范围口径。本复核未留下任何源码/测试改动（所有变异均逐字节还原并
+校验 sha256），未 commit，只新增本文件。

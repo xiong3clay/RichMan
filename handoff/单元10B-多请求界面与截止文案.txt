@@ -12,7 +12,7 @@ RichMan 单元 10B：多请求界面与请求截止文案（唯一规格）
 - 只改 apps/web/src、apps/web/tests；可新增 apps/web/src/game/request-deadline.ts、apps/web/src/game/use-request-expired.ts 与测试。
 - 不改引擎、协议、服务端、scheduler、wire 类型、金额/账户语义、依赖。
 - 不新增全局“待答复请求数”协议字段；不使用 view.deadlineAt 充当请求截止（view.deadlineAt 是当前阶段/当前行动席的截止，D6 下常与请求无关）。
-- 不把 incomingRequests 渲染成完整列表，不展示其他借款请求的金额/借款人；只显示当前这一笔 + 总数，避免隐私与手机溢出。
+- 引导请求卡（GameView 的 requestLender）不把 incomingRequests 渲染成完整列表，不展示其他借款请求的金额/借款人；只显示当前这一笔 + 总数，避免隐私与手机溢出。07A 债务中心（apps/web/src/game/DebtCenter.tsx）仍按 07A 规格逐条展示本人作为出借人的全部 incoming，这是只读账本视图，不属本条约束；不得为了统一措辞删掉债务中心的多条展示。
 - 不按 requestId/createdAtMs 重新排序；顺序以服务端快照数组为准（10A 规格：到达顺序，稳定）。
 - 不削弱 866 条旧测试；除下面“允许的旧测试改动”外，不改旧断言。
 
@@ -70,11 +70,11 @@ F. 不变量
 
 五、测试清单（新增/扩展，最低 12 条）
 T1 steps：incomingRequests 两笔时 deriveStep 返回第一笔且 pendingCount===2；数组不被修改。
-T2 request-deadline：requestDeadlineIso 有限值→ISO；NaN/Infinity→null。
+T2 request-deadline：requestDeadlineIso 有限值→ISO；NaN/Infinity/非数字→null；Number.MAX_SAFE_INTEGER 等超出 Date 范围的有限值不抛错且返回 null。
 T3 request-deadline：isRequestExpired 在 deadline 前 false、恰好等于 true、之后 true；serverNow 与 receivedAtMs 有时钟偏差时按服务端时间判定；非法输入不抛错。
 T4 DOM 出借人卡：两笔请求，显示“共 2 个，当前第 1 个”；“请求截止”显示 request.deadlineMs 的 0:45，而 view.deadlineAt 故意设为 0:10，断言不出现 0:10。
-T5 DOM 出借人卡：请求已过期（deadlineMs=serverNow-1000）时显示“已截止，等待系统收口”，同意/拒绝按钮 disabled；用 client spy 点击确认不产生调用。
-T6 DOM 借款人卡：pendingRequest deadline 为 +45 秒、view.deadlineAt 为 +10 秒，显示 0:45；过期版本显示“已截止”且“取消请求”disabled。
+T5 DOM 出借人卡：请求已过期（deadlineMs=serverNow-1000）时显示“已截止，等待系统收口”，同意/拒绝按钮 disabled；用 dom-harness 的 clickUnchecked 绕过 disabled 直接触发 React onClick，断言 client spy 不产生调用（只断言 disabled 会让组件内守卫永远无测试）。
+T6 DOM 借款人卡：pendingRequest deadline 为 +45 秒、view.deadlineAt 为 +10 秒，显示 0:45；过期版本显示“已截止”且“取消请求”disabled，并用 clickUnchecked 断言不发命令。
 T7 DOM 实时过期：初始 deadline=+1 秒，挂载后 1.1 秒（advanceTimersByTimeAsync）变“已截止”，同意/拒绝/取消变为 disabled。
 T8 DOM 确认卡撤回：先点“同意借款”打开确认卡，推进到过期，确认卡消失且请求卡显示已截止；client.acceptPrivateLoan 未被调用。
 T9 DOM 行动等待：ACTION、actedSeats=[本人座位]、currentSeatId=null，显示“本轮行动已结束”和“借款请求收口”，不出现“本轮行动即将结束”。
@@ -88,7 +88,8 @@ MUT2 请求卡改用 view.deadlineAt → T4/T6/T11 红。
 MUT3 删除过期 disabled → T5/T6/T7 红。
 MUT4 useRequestExpired 去掉 250ms interval → T7 红。
 MUT5 actionWait 恢复“本轮行动即将结束” → T9 红。
-至少执行 MUT1–MUT5，记录实际红条与还原后测试。
+MUT6 删除 GameView 4 处 if (requestExpired) return; 但保留 disabled → T5/T6b 红（证明守卫有测试，不是冗余代码）。
+至少执行 MUT1–MUT6，记录实际红条与还原后测试。
 
 六、允许的旧测试改动（只此一处）
 apps/web/tests/view-fixtures.ts:26 requestFixture 的 deadlineMs: 60000 改为固定未来值 Date.parse("2099-01-01T00:00:00.000Z")。
@@ -112,7 +113,14 @@ apps/web/tests/view-fixtures.ts:26 requestFixture 的 deadlineMs: 60000 改为�
    必须写清：改了哪些文件、T1–T12 对应测试名、MUT1–MUT5 实测结果、旧 866 条是否全绿、已知边界（没有全局待答复计数、过期后等待服务端广播收口、客户端时钟只用于禁用按钮不做权威判定）。
 3) 不 commit；完成后报告 git status、测试/typecheck/build 的真实输出摘要。
 
-九、已知边界（写进注意事项，不要在本轮修）
+九、复核修订补充（2026-11-08，Qoder 复核后）
+1. T1/T4 的两笔请求必须使用不同借款人（p2/p3），否则违反引擎“同一借款人最多 1 PENDING”；T4 还要断言第二笔昵称与金额（丙/777）不出现在页面。
+2. 新增 T11b：借款人卡在 view.deadlineAt=null 时仍按 pendingRequest.deadlineMs 显示倒计时，页头显示“—”。
+3. T10 必须先真实点击“拒绝”并断言 refusePrivateLoan 调用 1 次，再切换为只剩第二笔的视图，不能只注入下一视图。
+4. 债务中心口径见第二节第 15 行：07A 只读全量列表保留，并补“两条 incoming 同时展示、不出现共 N 个文案”的测试。
+5. 交付文档必须记录 MUT6 的实际红条（T5/T6b）与 sha256 还原核对。
+
+十、已知边界（写进注意事项，不要在本轮修）
 - 有当前行动席时，服务端的请求过期广播可能晚到该席的下一次 tick；客户端只按本地校准时钟把按钮置灰并显示“等待系统收口”，不自行删除请求，不做权威裁决。
 - incomingRequests 的稳定顺序是服务端 append 顺序，不是按 deadline/创建时间排序；不要在本轮加排序。
 - 本轮不显示全局待答复请求总数；全席已行动时的等待卡只说明“等待借款请求收口”，不伪造数量。
