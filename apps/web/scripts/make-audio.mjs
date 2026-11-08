@@ -17,22 +17,6 @@ const ATTACK_SECONDS = 0.005;
 const RELEASE_SECONDS = 0.030;
 const MAX_AMPLITUDE = 100;
 
-const C4 = 261.63;
-const G4 = 392.0;
-const A4 = 440.0;
-const F4 = 349.23;
-const C3 = 130.81;
-const G3 = 196.0;
-const A3 = 220.0;
-const F3 = 174.61;
-
-const CHORDS = [
-  { melody: [C4, 329.63, 392.0, C4], bass: C3 },
-  { melody: [G4, 493.88, 587.33, G4], bass: G3 },
-  { melody: [A4, 523.25, 659.25, A4], bass: A3 },
-  { melody: [F4, 440.0, 523.25, F4], bass: F3 },
-];
-
 /** 25% 或 50% 占空比方波；相位从 0 开始。 */
 function square(time, frequency, duty) {
   const phase = (time * frequency) % 1;
@@ -58,44 +42,6 @@ function addNote(buffer, startSample, lengthSamples, frequency, amplitude, duty 
     const time = index / SAMPLE_RATE;
     buffer[target] += (square(time, frequency, duty) - dc) * amplitude * envelope(index, lengthSamples);
   }
-}
-
-/** 每拍短噪声脉冲：固定高频交替，不使用随机数。 */
-function addShaker(buffer, startSample, lengthSamples, amplitude) {
-  for (let index = 0; index < lengthSamples; index += 1) {
-    const target = startSample + index;
-    if (target >= buffer.length) break;
-    const decay = 1 - index / lengthSamples;
-    const sign = index % 2 === 0 ? 1 : -1;
-    buffer[target] += sign * amplitude * decay;
-  }
-}
-
-function renderBgm() {
-  const seconds = 16;
-  const length = Math.round(seconds * SAMPLE_RATE);
-  const buffer = new Float64Array(length);
-  const beatSamples = Math.round(0.5 * SAMPLE_RATE);
-  const beatCount = Math.round(seconds / 0.5);
-  for (let beat = 0; beat < beatCount; beat += 1) {
-    const chord = CHORDS[Math.floor(beat / 4) % CHORDS.length];
-    const beatInChord = beat % 4;
-    const start = beat * beatSamples;
-    addNote(buffer, start, beatSamples, chord.melody[beatInChord], 30, 0.25);
-    addNote(buffer, start, beatSamples, chord.bass, 20, 0.5);
-    addShaker(buffer, start, Math.round(0.030 * SAMPLE_RATE), 6);
-  }
-  // 起音 5ms 淡入 + 末音 50ms 淡出，保证循环两端都接近 0。
-  const fadeInSamples = Math.round(0.005 * SAMPLE_RATE);
-  for (let index = 0; index < fadeInSamples; index += 1) {
-    buffer[index] *= index / fadeInSamples;
-  }
-  const fadeSamples = Math.round(0.050 * SAMPLE_RATE);
-  for (let index = 0; index < fadeSamples; index += 1) {
-    const target = length - fadeSamples + index;
-    buffer[target] *= 1 - index / fadeSamples;
-  }
-  return { buffer, seconds };
 }
 
 function renderSfx(seconds, segments) {
@@ -137,7 +83,6 @@ function encodeWav(buffer) {
 }
 
 const FILES = [
-  { name: "bgm-loop.wav", seconds: 16, render: renderBgm },
   {
     name: "sfx-tap.wav",
     seconds: 0.06,

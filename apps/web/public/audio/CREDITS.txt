@@ -1,0 +1,29 @@
+RichMan 背景音乐（BGM）素材与许可
+====================================
+
+本项目为非商业个人项目。以下三首 BGM 来自 incompetech.com，作者 Kevin MacLeod，
+均以 Creative Commons Attribution 4.0 International（CC BY 4.0）许可使用。
+按要求保留署名；如再分发，请保留本文件与下列链接。
+
+1. Fluffing a Duck
+   作者：Kevin MacLeod (incompetech.com)
+   许可：CC BY 4.0 — https://creativecommons.org/licenses/by/4.0/
+   来源：https://incompetech.com/music/royalty-free/mp3-royaltyfree/Fluffing%20a%20Duck.mp3
+   本地文件：bgm-funny-1.mp3
+
+2. Monkeys Spinning Monkeys
+   作者：Kevin MacLeod (incompetech.com)
+   许可：CC BY 4.0 — https://creativecommons.org/licenses/by/4.0/
+   来源：https://incompetech.com/music/royalty-free/mp3-royaltyfree/Monkeys%20Spinning%20Monkeys.mp3
+   本地文件：bgm-funny-2.mp3
+
+3. Silly Fun
+   作者：Kevin MacLeod (incompetech.com)
+   许可：CC BY 4.0 — https://creativecommons.org/licenses/by/4.0/
+   来源：https://incompetech.com/music/royalty-free/mp3-royaltyfree/Silly%20Fun.mp3
+   本地文件：bgm-funny-3.mp3
+
+播放顺序：bgm-funny-1 → bgm-funny-2 → bgm-funny-3 → 回到 1，无限循环。
+替换曲目时必须同步更新 apps/web/src/audio/manifest.ts、本文件与 README 的素材声明。
+
+音效（SFX）不在此列：sfx-*.wav 由 apps/web/scripts/make-audio.mjs 现场合成，无第三方采样。

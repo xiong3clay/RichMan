@@ -15,7 +15,7 @@ import {
   createAudioController,
   deriveSfxEvents,
 } from "../src/audio/audio";
-import { AUDIO_BYTES, AUDIO_FILES, AUDIO_SHA256 } from "../src/audio/manifest";
+import { AUDIO_BYTES, AUDIO_FILES, AUDIO_MANIFEST, AUDIO_SHA256, BGM_TRACKS } from "../src/audio/manifest";
 import type { RichmanClient } from "../src/net/client";
 import type { JoinedInfo, WireRoom, WireSnapshotView } from "../src/net/wire";
 import { mountDom } from "./dom-harness";
@@ -58,10 +58,16 @@ class FakeAudio {
   pauseCalls = 0;
   onended: (() => void) | null = null;
   rejectPlay = false;
+  rejectAll = false;
   constructor(readonly src: string) {}
   play(): Promise<void> {
     this.playCalls += 1;
-    return this.rejectPlay ? Promise.reject(new Error("blocked")) : Promise.resolve();
+    if (this.rejectAll) return Promise.reject(new Error("blocked"));
+    if (this.rejectPlay) {
+      this.rejectPlay = false;
+      return Promise.reject(new Error("blocked"));
+    }
+    return Promise.resolve();
   }
   pause(): void {
     this.pauseCalls += 1;
@@ -140,10 +146,9 @@ function gameProps(client: ReturnType<typeof fakeClient>, view: WireSnapshotView
 }
 
 describe("08C 音频", () => {
-  it("A1 6 个 WAV 皆为 22050Hz / 8-bit / 单声道 / 标准头，时长与大小合规", () => {
-    expect(AUDIO_FILES).toHaveLength(6);
+  it("A1 5 个音效 WAV 皆为 22050Hz / 8-bit / 单声道 / 标准头，时长与大小合规", () => {
+    expect(AUDIO_FILES).toHaveLength(5);
     const expected: Record<string, number> = {
-      "bgm-loop.wav": 16,
       "sfx-tap.wav": 0.06,
       "sfx-submit.wav": 0.14,
       "sfx-win.wav": 0.6,
@@ -163,12 +168,11 @@ describe("08C 音频", () => {
       expect(info.dataLength).toBe(info.buffer.length - 44);
       expect(info.dataLength / info.sampleRate).toBeCloseTo(expected[name]!, 2);
       expect(info.buffer.length).toBe(AUDIO_BYTES[name]);
-      if (name === "bgm-loop.wav") expect(info.buffer.length).toBeLessThanOrEqual(420000);
-      else expect(info.buffer.length).toBeLessThanOrEqual(40960);
+      expect(info.buffer.length).toBeLessThanOrEqual(40960);
     }
   });
 
-  it("A1 8-bit 峰值不超过 ±100；BGM 首尾接近中值", () => {
+  it("A1 8-bit 峰值不超过 ±100、整轨均值接近 0", () => {
     for (const name of AUDIO_FILES) {
       const buffer = readWav(name);
       let sum = 0;
@@ -180,9 +184,29 @@ describe("08C 音频", () => {
       // N1/M2：不能只查峰值；整轨均值必须 ≤2。
       expect(Math.abs(sum / (buffer.length - 44))).toBeLessThanOrEqual(2);
     }
-    const bgm = readWav("bgm-loop.wav");
-    expect(Math.abs(bgm.readUInt8(44) - 128)).toBeLessThanOrEqual(3);
-    expect(Math.abs(bgm.readUInt8(bgm.length - 1) - 128)).toBeLessThanOrEqual(3);
+  });
+
+  it("A4 三首 BGM 为 MP3、清单唯一且与 CREDITS 署名一致", () => {
+    expect(BGM_TRACKS).toHaveLength(3);
+    expect(AUDIO_MANIFEST.bgmTracks).toHaveLength(3);
+    expect(new Set(BGM_TRACKS.map((track) => track.file)).size).toBe(3);
+    expect(new Set(AUDIO_MANIFEST.bgmTracks).size).toBe(3);
+    for (const track of BGM_TRACKS) {
+      const buffer = readFileSync(AUDIO_DIR + track.file);
+      expect(buffer.length).toBeGreaterThan(500_000);
+      expect(buffer.length).toBeLessThanOrEqual(6 * 1024 * 1024);
+      const id3 = buffer.toString("ascii", 0, 3) === "ID3";
+      const sync = buffer[0] === 0xff && (buffer[1]! & 0xe0) === 0xe0;
+      expect(id3 || sync).toBe(true);
+      expect(track.title.length).toBeGreaterThan(0);
+      expect(track.license).toContain("CC BY");
+      expect(track.sourceUrl).toMatch(/^https:\/\//);
+    }
+    const credits = readFileSync(AUDIO_DIR + "CREDITS.txt", "utf8");
+    for (const track of BGM_TRACKS) {
+      expect(credits).toContain(track.title);
+      expect(credits).toContain(track.author);
+    }
   });
 
   it("A2 文件 sha256 与 manifest 记录一致", () => {
@@ -237,13 +261,66 @@ describe("08C 音频", () => {
     expect(controller.isUnlocked()).toBe(false);
     controller.unlock();
     expect(fake.audios).toHaveLength(1);
-    expect(fake.audios[0]!.loop).toBe(true);
+    expect(fake.audios[0]!.loop).toBe(false);
+    expect(fake.audios[0]!.src).toBe(AUDIO_MANIFEST.bgmTracks[0]);
     expect(fake.audios[0]!.volume).toBe(0.5);
     expect(fake.audios[0]!.playCalls).toBe(1);
     controller.unlock();
     expect(fake.audios).toHaveLength(1);
     expect(fake.audios[0]!.playCalls).toBe(1);
     expect(controller.isUnlocked()).toBe(true);
+  });
+
+  it("B8 BGM 播完复用同一元素按清单轮播三首并循环", () => {
+    const fake = fakeAudioFactory();
+    const controller = createAudioController({ storage: memoryStorage(), createAudio: fake.createAudio });
+    controller.unlock();
+    controller.setBgmVolume(0.2);
+    expect(fake.audios).toHaveLength(1);
+    expect(fake.audios[0]!.src).toBe(AUDIO_MANIFEST.bgmTracks[0]);
+    fake.audios[0]!.ended();
+    expect(fake.audios).toHaveLength(1);
+    expect(fake.audios[0]!.src).toBe(AUDIO_MANIFEST.bgmTracks[1]);
+    expect(fake.audios[0]!.playCalls).toBe(2);
+    expect(fake.audios[0]!.volume).toBe(0.2);
+    fake.audios[0]!.ended();
+    expect(fake.audios[0]!.src).toBe(AUDIO_MANIFEST.bgmTracks[2]);
+    expect(fake.audios[0]!.playCalls).toBe(3);
+    fake.audios[0]!.ended();
+    expect(fake.audios[0]!.src).toBe(AUDIO_MANIFEST.bgmTracks[0]);
+    expect(fake.audios[0]!.playCalls).toBe(4);
+    expect(controller.isUnavailable()).toBe(false);
+  });
+
+  it("B9 单首播放失败顺延下一首；三首全失败才 unavailable", async () => {
+    const audios: FakeAudio[] = [];
+    const oneFails = (src: string): HTMLAudioElement => {
+      const audio = new FakeAudio(src);
+      audio.rejectPlay = true;
+      audios.push(audio);
+      return audio as unknown as HTMLAudioElement;
+    };
+    const controller = createAudioController({ storage: memoryStorage(), createAudio: oneFails });
+    controller.unlock();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(controller.isUnavailable()).toBe(false);
+    expect(audios).toHaveLength(1);
+    expect(audios[0]!.src).toBe(AUDIO_MANIFEST.bgmTracks[1]);
+    expect(audios[0]!.playCalls).toBe(2);
+
+    const allReject = createAudioController({
+      storage: memoryStorage(),
+      createAudio: (src: string): HTMLAudioElement => {
+        const audio = new FakeAudio(src);
+        audio.rejectAll = true;
+        audios.push(audio);
+        return audio as unknown as HTMLAudioElement;
+      },
+    });
+    allReject.unlock();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(allReject.isUnavailable()).toBe(true);
   });
 
   it("B4 静音时 playSfx 返回 false 且不创建；取消静音 resume BGM", () => {
@@ -264,7 +341,7 @@ describe("08C 音频", () => {
     controller.setMuted(true);
     controller.unlock();
     expect(fake.audios).toHaveLength(1);
-    expect(fake.audios[0]!.loop).toBe(true);
+    expect(fake.audios[0]!.src).toBe(AUDIO_MANIFEST.bgmTracks[0]);
     expect(fake.audios[0]!.playCalls).toBe(0);
     controller.setMuted(false);
     expect(fake.audios[0]!.playCalls).toBe(1);
@@ -284,7 +361,7 @@ describe("08C 音频", () => {
     const audios: FakeAudio[] = [];
     const rejectingFactory = (src: string): HTMLAudioElement => {
       const audio = new FakeAudio(src);
-      audio.rejectPlay = true;
+      audio.rejectAll = true;
       audios.push(audio);
       return audio as unknown as HTMLAudioElement;
     };
@@ -292,6 +369,7 @@ describe("08C 音频", () => {
     expect(() => controller.unlock()).not.toThrow();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(controller.isUnavailable()).toBe(true);
+    // 复用同一元素依次尝试三首，全部失败才整体降级。
     expect(audios).toHaveLength(1);
   });
 

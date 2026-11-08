@@ -30,6 +30,9 @@ const MIME: Record<string, string> = {
   ".png": "image/png",
   ".ico": "image/x-icon",
   ".woff2": "font/woff2",
+  ".mp3": "audio/mpeg",
+  ".wav": "audio/wav",
+  ".txt": "text/plain; charset=utf-8",
 };
 
 export interface ServerOptions {
@@ -151,7 +154,12 @@ async function handleCreateRoom(
   }
 }
 
-function serveStatic(res: http.ServerResponse, requested: string, staticDir: string): void {
+function serveStatic(
+  res: http.ServerResponse,
+  requested: string,
+  staticDir: string,
+  rangeHeader?: string,
+): void {
   const relative = requested === "/" ? "index.html" : requested.replace(/^\/+/, "");
   const baseDir = path.resolve(staticDir);
   const filePath = path.resolve(baseDir, relative);
@@ -178,7 +186,39 @@ function serveStatic(res: http.ServerResponse, requested: string, staticDir: str
       sendJson(res, 404, { ok: false, error: "NOT_FOUND", hint: "尚未构建前端：先运行 pnpm build" });
       return;
     }
-    res.writeHead(200, withSecurityHeaders({ "content-type": MIME[path.extname(filePath)] ?? "application/octet-stream" }));
+    const contentType = MIME[path.extname(filePath)] ?? "application/octet-stream";
+    // iOS Safari 对 <audio> 通常先发 Range 请求；不支持 206 时应答 200 全量。
+    const match = rangeHeader === undefined ? null : /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+    if (match !== null && data.length > 0) {
+      const rawStart = match[1] === "" ? NaN : Number(match[1]);
+      const rawEnd = match[2] === "" ? NaN : Number(match[2]);
+      let start = Number.isNaN(rawStart) ? 0 : rawStart;
+      let end = Number.isNaN(rawEnd) ? data.length - 1 : rawEnd;
+      if (start <= end && start < data.length) {
+        end = Math.min(end, data.length - 1);
+        const chunk = data.subarray(start, end + 1);
+        res.writeHead(206, withSecurityHeaders({
+          "content-type": contentType,
+          "accept-ranges": "bytes",
+          "content-range": `bytes ${start}-${end}/${data.length}`,
+          "content-length": String(chunk.length),
+        }));
+        res.end(chunk);
+        return;
+      }
+      res.writeHead(416, withSecurityHeaders({
+        "content-type": "text/plain; charset=utf-8",
+        "accept-ranges": "bytes",
+        "content-range": `bytes */${data.length}`,
+      }));
+      res.end("RANGE_NOT_SATISFIABLE");
+      return;
+    }
+    res.writeHead(200, withSecurityHeaders({
+      "content-type": contentType,
+      "accept-ranges": "bytes",
+      "content-length": String(data.length),
+    }));
     res.end(data);
   });
 }
@@ -243,7 +283,7 @@ export function createRequestHandler(opts: ServerOptions = {}): http.RequestList
       sendJson(res, 405, { ok: false, error: "METHOD_NOT_ALLOWED" });
       return;
     }
-    serveStatic(res, decodedPath, staticDir);
+    serveStatic(res, decodedPath, staticDir, req.headers.range);
   };
 }
 

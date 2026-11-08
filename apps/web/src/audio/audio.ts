@@ -109,6 +109,7 @@ export function createAudioController(options: AudioControllerOptions = {}): Aud
   let unlocked = false;
   let disposed = false;
   let bgm: HTMLAudioElement | null = null;
+  let bgmIndex = -1;
   const active: HTMLAudioElement[] = [];
   const lastByName = new Map<SfxName, number>();
   const listeners = new Set<() => void>();
@@ -150,6 +151,70 @@ export function createAudioController(options: AudioControllerOptions = {}): Aud
     }
   }
 
+  /**
+   * 播放下标 index 的 BGM；一首播完自动切下一首并循环。
+   * 复用同一个 HTMLAudioElement：iOS Safari 只对已获用户手势授权的元素放行后续 play()。
+   * 单首加载/播放失败时顺延到下一首，连续三首都失败才整体降级（不阻塞游戏）。
+   */
+  function playBgmAt(index: number, attempts = 0): void {
+    if (disposed) return;
+    const tracks = AUDIO_MANIFEST.bgmTracks;
+    if (attempts >= tracks.length) {
+      markUnavailable();
+      return;
+    }
+    const nextIndex = index % tracks.length;
+    const src = tracks[nextIndex]!;
+    if (bgm === null) {
+      let created: HTMLAudioElement | null = null;
+      try {
+        created = createAudio(src);
+      } catch {
+        playBgmAt(nextIndex + 1, attempts + 1);
+        return;
+      }
+      if (created === null) {
+        playBgmAt(nextIndex + 1, attempts + 1);
+        return;
+      }
+      bgm = created;
+      try {
+        bgm.loop = false;
+        bgm.onended = () => {
+          if (!disposed) playBgmAt(bgmIndex + 1, 0);
+        };
+      } catch {
+        markUnavailable();
+        return;
+      }
+    } else {
+      try {
+        bgm.src = src;
+      } catch {
+        playBgmAt(nextIndex + 1, attempts + 1);
+        return;
+      }
+    }
+    bgmIndex = nextIndex;
+    try {
+      bgm.volume = current.bgmVolume;
+    } catch {
+      markUnavailable();
+      return;
+    }
+    if (current.muted) return;
+    try {
+      const result = bgm.play();
+      if (result !== undefined && typeof result.then === "function") {
+        result.catch(() => {
+          if (!disposed) playBgmAt(bgmIndex + 1, attempts + 1);
+        });
+      }
+    } catch {
+      if (!disposed) playBgmAt(bgmIndex + 1, attempts + 1);
+    }
+  }
+
   function update(patch: Partial<AudioState>): void {
     current = { ...current, ...patch };
     persist();
@@ -175,19 +240,7 @@ export function createAudioController(options: AudioControllerOptions = {}): Aud
     unlock(): void {
       if (unlocked || disposed) return;
       unlocked = true;
-      try {
-        const created = createAudio(AUDIO_MANIFEST.bgm);
-        if (created === null) {
-          markUnavailable();
-          return;
-        }
-        bgm = created;
-        bgm.loop = true;
-        bgm.volume = current.bgmVolume;
-        if (!current.muted) safePlay(bgm);
-      } catch {
-        markUnavailable();
-      }
+      playBgmAt(0);
     },
     setMuted(muted: boolean): void {
       if (disposed) return;
@@ -250,7 +303,10 @@ export function createAudioController(options: AudioControllerOptions = {}): Aud
       if (disposed) return;
       disposed = true;
       if (bgm !== null) {
-        try { bgm.pause(); } catch { /* ignore */ }
+        try {
+          bgm.onended = null;
+          bgm.pause();
+        } catch { /* ignore */ }
         bgm = null;
       }
       for (const audio of active) {
