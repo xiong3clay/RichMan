@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import net from "node:net";
+import { readFileSync } from "node:fs";
 import WebSocket from "ws";
 import { NicknameSchema } from "@richman/shared";
 import {
@@ -246,6 +247,13 @@ describe("09A security", () => {
     const page = await fetch(`http://127.0.0.1:${s.port}/`);
     expect(page.status).toBe(200);
     expect(page.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
+  it("21b /health 版本号与根 package.json 一致", async () => {
+    const s = await server();
+    const body = await (await fetch(`http://127.0.0.1:${s.port}/health`)).json() as { version: string };
+    const pkg = JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as { version: string };
+    expect(body.version).toBe(pkg.version);
   });
 
   it("22 升级带 evil Origin 被 403 拒绝", async () => {
