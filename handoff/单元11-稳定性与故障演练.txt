@@ -68,11 +68,18 @@ T5 snapshot_scale：取 S2 终局 state，JSON.stringify(state).length < 512*102
 T6 ten_players_round：POST /api/rooms 建房，10 个 Peer 依次 join/ready，房主 start；断言 10 个 joined 的 seatId 为 1..10、/health connections=10、rooms=1；每人 END_ACTION 直到进入 BETTING；10 人各 SUBMIT_BET 0/0/1；断言 /health 仍 10；房主 destroy_room；断言所有 Peer 收到 room_destroyed 或 close code 4002、/health connections=0、rooms=0。
 T7 room_lifecycle_release：连续建 12 个房间（每个 1 人 join 后 destroy），最后 /health rooms=0、connections=0；磁盘 rooms/ 下无残留目录（允许 backups 之外为空）。
 T8 reconnect_storm：10 人开局后同时 close 全部连接，再并发 resume：5 人用 sessionToken（同一 token 可继续用，不轮换），5 人用 recoveryCode（会签发新 token 并作废旧 token）。断言 10 个 joined 的 seatId 与原座位一致；用恢复码的 5 人新 token 与原 token 不同，且旧 token 再 resume 必须被拒；/health connections=10、房间 PLAYING；随后 5 人 close，/health connections=5；全部 close 后为 0，房间仍存在。（注意：sessionToken 路径不轮换 token，不要断言它变了。）
-T9 recovery_race：同一玩家用同一 recoveryCode 并发恢复两次。恢复码本身不轮换（设计如此，它是长期凭证），两次握手都可能返回 joined，但会各自签发新 token，后一次使前一次失效。断言：最终该玩家只有 1 条当前会话/1 个 token 有效；两个连接中恰好一个仍可发命令并收到 snapshot，另一个被 4001/REPLACED 关闭或在后续命令收到 NOT_JOINED/REPLACED；游戏 version 与快照字节不变；不能出现两个会话记录或两条座位。
-T10 stale_token_after_rotation：用 recoveryCode resume 得到新 token 后，旧 token 再 resume 必须被拒绝（NOT_JOINED），且旧连接不能发命令改变状态（对照 version 与快照字节）。
+T9 recovery_race：同一玩家用同一 recoveryCode 并发恢复两次。恢复码本身不轮换（设计如此，它是长期凭证），两次握手都可能返回 joined，但会各自签发新 token，后一次使前一次失效。断言：最终该玩家只有 1 条当前会话/1 个 token 有效；两个连接中恰好一个仍可发命令并收到 snapshot；另一个被顶替时收到 error.code==="REPLACED"（或 close code 4001），此后不能发命令改变状态；游戏 version 与快照字节不变；不能出现两个会话记录或两条座位。
+T10 stale_token_after_rotation：用 recoveryCode resume 得到新 token 后，旧 token 再 resume 必须被拒绝，错误码沿用现有契约 UNAUTHORIZED（见 apps/server/tests/session.test.ts:144-158 的 recover_different_origin，认证失败统一 UNAUTHORIZED，不要改成 NOT_JOINED）；旧连接被顶替时收到 REPLACED/close 4001，且旧连接不能发命令改变状态（对照 version 与快照字节）。
 T11 kill_restart_midgame：用 fork + execArgv ["--import","tsx"] 起 recovery-worker（参考 review06-crash.test.ts），3 人房开局并进入 BETTING、2 人已锁定；SIGKILL 子进程；读磁盘 snapshot，重启服务；断言房间 paused、state 与磁盘快照逐字段一致（players/cents/version/phase/requests/bankLoans/privateLoans）、host resume 后 version+1 且 lastEvents[0].type==="GAME_RESUMED"、未锁定者仍可 SUBMIT_BET 并正常结算。
 
-3.2 允许的最小生产修改
+3.2 错误码契约（已冻结，测试断言必须沿用，不得为通过测试而改码）
+- 旧/无效/跨房 sessionToken 或 recoveryCode 发起 resume → error.code UNAUTHORIZED；
+- 连接被新连接按同一身份顶替 → 旧连接收到 error.code REPLACED（服务端随后 close 4001）；
+- 未完成 join/resume 的连接直接发命令 → error.code NOT_JOINED；
+- 只有“被顶替后的旧连接继续发命令”才可能出现 NOT_JOINED；旧 token 再 resume 不是 NOT_JOINED。
+参考 apps/server/tests/session.test.ts:128-183。
+
+3.3 允许的最小生产修改
 如测试暴露真实 bug：只允许改 apps/server/src/** 或 packages/game-core/src/** 的最小片段，必须在交接「修复清单」写 文件:行号、复现用例、修复理由；不得改协议、规则、schema、依赖。若无法最小修复，保持失败并报告，不要弱化断言。
 
 四、变异探针（实现后必须自己跑并记录红条）
