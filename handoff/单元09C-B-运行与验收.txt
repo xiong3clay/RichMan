@@ -1,0 +1,172 @@
+单元09C-B 运行与验收：本轮复核修复（2026-11-08）
+================================================================
+唯一工单：handoff/单元09C-B-复核修复.txt；原Qoder复核只读保留，本轮不commit。
+基线：工单写ab85732；本轮开工实际HEAD dbeaa9a，保留原未提交09C-B工作区，不回退已有实现。
+上轮完整运行记录保存在artifacts/test-logs/09cbfix-runtime-history.txt，只作历史，不当本轮结论。
+
+一、环境与指定命令
+仓库：D:\Lianjunjie\biancheng\RichMan
+Node v24.18.0；Windows PowerShell 5.1.26100.9711；pnpm由corepack调用。
+本机当前只有Windows PowerShell 5.1；where.exe/Get-Command均找不到pwsh，旧09cb-pwsh7.txt与09cbfix-pwsh7-current.txt均属未复现历史记录，见第六节。
+以下五条均真实执行，最终完整输出在本文件末尾：
+  corepack pnpm -s vitest run apps/server/tests/backup.test.ts
+  corepack pnpm -s vitest run apps/server/tests/scripts.test.ts
+  corepack pnpm -s test
+  corepack pnpm -s typecheck
+  corepack pnpm -s build
+所有新测试用随机临时目录/端口，旧825条一条不减少。禁止目录apps/server/data与8000未用于演练。
+
+二、新增7条测试的红/绿证据
+核心T23 create_refuses_parent_junction：
+  09cbfix-core-red.txt：旧实现promise resolved而非拒绝，1 failed；确有父路径写穿。
+  09cbfix-core-green.txt、09cbfix-backup-final.txt：原22+新1全部23/23通过，最终4.26s，exit0。
+脚本T23 backup_script_refuses_existing_out：
+  09cbfix-scripts-red.txt：旧实现显式空Out exit0，预期2；实现F2后正常新增集通过。
+脚本T24 restore_all_success：
+  原行为本来正确。09cbfix-mutation-baseline-copies.txt：原样临时真实脚本副本T24/T25/T27共3/3通过。
+  09cbfix-mutation-T24-no-all.txt：只删副本-All展开，restored=[]，同名T24真实红（exit1）。
+脚本T25 restore_all_and_room_conflict：
+  09cbfix-mutation-T25-no-conflict.txt：只删副本互斥guard，实际exit2/RESTORE_TARGET_EXISTS，
+  预期exit1/BAD_ARGUMENT，同名T25真实红（exit1）。
+脚本T26 backup_script_parent_junction_refused：
+  09cbfix-scripts-red.txt：旧实现真实父链接目标写穿且exit0，预期1；F1后正常新增集通过。
+脚本T27 backup_script_keep_prunes_only_matching：
+  09cbfix-mutation-T27-no-keep.txt：只删副本--keep传参，pruned0预期1，同名T27红（exit1）。
+脚本T28 script_arg_errors：
+  09cbfix-scripts-red.txt：缺目录旧行为exit0，预期DATA_DIR_MISSING/1；F6后正常新增集通过。
+正常新增集09cbfix-scripts-new-green.txt：6/6 passed，32.22s，exit0。
+T28最后还加强了stdout+stderr无运行栈，最终指定28条与全量将核该最终断言。
+变异汇总09cbfix-mutations.txt；副本实际跑原common/真实CLI/真实文件，不mock返回结果；
+仅变异新用例所用临时脚本，仓库restore/common不改，服务/副本已停止回收。
+早期新包装开关引用错误只算无效测试准备，不将其报作功能反例红灯。
+原两份T1–T22相对开工保存文件为完整字节前缀，最终scope日志提供核对。
+
+三、四项手工复现命令与真实结果
+使用真实powershell.exe与start-lan/backup/stop/restore脚本，不是内存server桩。
+执行程序保存在artifacts/test-logs/09cbfix-manual-runner.txt；
+可复跑：Get-Content artifacts/test-logs/09cbfix-manual-runner.txt -Raw | node --input-type=module
+程序为每次运行新建临时根与随机端口，路径检查通过后仅删自己的临时房间，最后停服回收。
+本次临时根：
+  C:\Users\连俊杰\AppData\Local\Temp\richman-09cbfix-manual-v4R8bT
+数据目录：上述根\data 验收；备份父目录：上述根\backups 验收；随机端口65139。
+起start-lan exit0，POST两房各HTTP201，房间0903/3638；未使用默认data与8000。
+
+手工1：父目录junction拒绝/零写入
+  symlink(<temp>parent-target,<temp>parent-link,'junction')
+  backup.ps1 -DataDir <data> -Out <parent-link>child -Json
+实际exit1；stdout恰好一行：
+  {"ok":false,"script":"backup","code":"BACKUP_OUT_INVALID","message":"outDir 不能是符号链接/junction：父路径 C:\Users\连俊杰\AppData\Local\Temp\richman-09cbfix-manual-v4R8bT\parent-link"}
+随后readdir(parent-target)=[]，child未创建；rmdir仅移除junction自身。
+
+手工2：显式已有空Out拒绝
+  mkdir <temp>exists-empty
+  backup.ps1 -DataDir <data> -Out <temp>exists-empty -Json
+实际exit2；stdout：
+  {"ok":false,"script":"backup","code":"BACKUP_OUT_EXISTS","message":"输出目录已存在，请换一个不存在的目录：C:\Users\连俊杰\AppData\Local\Temp\richman-09cbfix-manual-v4R8bT\exists-empty"}
+检查entries=[]；没有manifest或rooms目录。
+
+手工3：Keep1仅清匹配备份
+  在backups 验收下放keep.txt与other-dir/file.txt
+  backup.ps1 -DataDir <data> -Out <parent>\richman-backup-a -Keep 1 -Json
+  backup.ps1 -DataDir <data> -Out <parent>\richman-backup-b -Keep 1 -Json
+两次实际exit0，分别rooms2/skipped0/pruned0与rooms2/skipped0/pruned1。
+a消失，b存在；父目录entries=["keep.txt","other-dir","richman-backup-b"]；
+keep.txt仍为"keep"，other-dir/file.txt仍为"other"。
+
+手工4：两房-All恢复后暂停
+  stop.ps1 -DataDir <data> → exit0
+  删临时rooms/0903与rooms/3638（校验绝对路径在该temp根内）→ exit0
+  restore.ps1 -DataDir <data> -Backup <parent>\richman-backup-b -All -Port 65139 -Json
+实际exit0，stdout：
+  {"ok":true,"script":"restore","restored":[{"code":"0903","keptPath":null},{"code":"3638","keptPath":null}],"pausedHint":true}
+  start-lan.ps1 -DataDir <data> -Port 65139 → exit0
+  GET /health → {"ok":true,"service":"richman","version":"0.0.0","protocolVersion":1,"uptimeSec":0,"connections":0,"rooms":2,"serverNow":"2026-11-08T07:38:45.831Z"}
+  GET /api/rooms → {"rooms":[{"roomCode":"0903","state":"LOBBY","paused":true,"playerCount":0},{"roomCode":"3638","state":"LOBBY","paused":true,"playerCount":0}]}
+  stop.ps1 -DataDir <data> → exit0
+本次先后服务pid5156/14504均已由stop退出，临时根已删除；result={"ok":true,"exit":0}。
+每步完整args/exit/stdout/stderr/JSON：artifacts/test-logs/09cbfix-manual-final.txt。
+serverNow为UTC，对应本地2026-11-08；不把历史不同端口的输出混作本轮手工证据。
+
+四、错误码与当前入口语义
+核心outDir及任一父路径为reparse point均BACKUP_OUT_INVALID，mkdir之前拒绝，目标零写入。
+显式-Out已存在路径在脚本层优先BACKUP_OUT_EXISTS/2（包括直接junction），与核心错误码优先级有别。
+核心空outDir兼容不变；脚本不复用任何已有显式Out（空/非空目录或普通文件）。
+cleanup缺目录DATA_DIR_MISSING/1，已有空目录零计数成功；-Json均一行。
+state缺失/坏且省略Port只探8000；非默认端口务必显式Port，本轮测试只传随机端口。
+health单次2s请求；running归属状态仍拒绝，不因health偶发失败允许恢复。未知状态+繁忙探针失败低风险窗口保留。
+
+五、未完成测试缺口与边界
+S6脚本真实ACL failed非空/exit1尚未稳定自动化，核心seam注入不等价真实ACL；
+S8 force普通文件、state删除后的保护尚未专门自动化，两房All/paused现在由T24覆盖；
+S14单次health请求的繁忙/超时仍无故障回归，本轮不允许修改restore.ps1。
+不声称生产数据规模、手机弱网或物理断电已验证；不扩展加密/云上传/定时备份。
+原复核、原规格和本轮工单文件保持不变，不commit。
+
+六、PowerShell7证据纠偏（未能复现）
+09cb-pwsh7.txt为上轮7.6.5历史记录；09cbfix-pwsh7-current.txt自述“当前7.6.9四项边界冒烟”
+（backup已存在Out exit2、cleanup缺目录exit1、cleanup空目录DryRun exit0、restore无效Backup exit1）。
+但本轮复核在本机执行 where.exe pwsh（exit 1、无输出）与
+powershell -NoProfile -Command "Test-Path 'C:\Program Files\PowerShell\7\pwsh.exe'"（False）
+均找不到pwsh，无法独立复现，故两份pwsh7日志都不作为本轮结论，仅保留为历史记录。
+正式脚本回归为真实Windows PowerShell 5.1（28/28）。若后续安装pwsh，须给出pwsh.exe绝对路径、
+命令与原始输出后才能记为实测。
+
+七、最终五项命令的真实输出（均exit0，原825+本轮7=832）
+
+$ corepack pnpm -s vitest run apps/server/tests/backup.test.ts
+
+ RUN  v5.0.5 D:/Lianjunjie/biancheng/RichMan
+
+
+ Test Files  1 passed (1)
+      Tests  23 passed (23)
+   Start at  15:39:57
+   Duration  4.26s (tests 92%, import 5%, transform 3%)
+
+
+exit=0
+
+$ corepack pnpm -s vitest run apps/server/tests/scripts.test.ts
+
+ RUN  v5.0.5 D:/Lianjunjie/biancheng/RichMan
+
+
+ Test Files  1 passed (1)
+      Tests  28 passed (28)
+   Start at  15:43:02
+   Duration  121.20s (tests 100%)
+
+
+exit=0
+
+$ corepack pnpm -s test
+
+ RUN  v5.0.5 D:/Lianjunjie/biancheng/RichMan
+
+
+ Test Files  66 passed (66)
+      Tests  832 passed (832)
+   Start at  15:45:16
+   Duration  126.33s (tests 79%, import 17%, transform 5%)
+
+
+exit=0
+
+$ corepack pnpm -s typecheck
+exit=0
+
+exit=0
+
+$ corepack pnpm -s build
+vite v8.3.5 building client environment for production...
+transforming...
+✓ 141 modules transformed.
+rendering chunks...
+computing gzip size...
+apps/web/dist/index.html                   0.49 kB │ gzip:   0.31 kB
+apps/web/dist/assets/index--JyM_5JG.css   18.07 kB │ gzip:   4.10 kB
+apps/web/dist/assets/index-CrCvzBNf.js   425.13 kB │ gzip: 124.92 kB
+
+✓ built in 306ms
+
+exit=0

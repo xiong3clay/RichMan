@@ -1,0 +1,186 @@
+RichMan 单元 09C-B 复核修复 独立验证
+================================================
+复核员：Qoder（只读复核；未改实现/测试/脚本/README/交接，未 commit）
+日期：2026-11-08
+代码基线：ab85732（工单指定）；当前 HEAD dbeaa9a（仅新增修复工单文档）
+工作区提交面：4 修改 + 3 新增脚本 + 4 份 09C-B 交接未跟踪
+复核对象：
+  - handoff/单元09C-B-复核修复.txt（F1–F6）
+  - handoff/复核-单元09C-B.txt（上一轮报告）
+  - handoff/单元09C-B-{成果报告,运行与验收,下一阶段交接,注意事项}.txt
+  - scripts/backup.ps1、cleanup.ps1、backup.ts 与 T23/T23–T28
+
+结论：需修复（仅文档 pwsh 声明；代码/测试/修复项全部 PASS）
+  核心 F1 父路径 reparse、F2 已存在 -Out、F3 新增测试、F6 cleanup 缺目录、
+  S6/S8/S14 的限制说明均落地；A/B/C/D 与 MUT1–MUT3 全部符合；
+  backup 23/23、scripts 28/28、全量 66 文件/832 条、typecheck/build 0。
+  唯一必须修复：四份交接把“当前 pwsh7.6.9 实测”写成可复现事实，但当前
+  Get-Command/where 均找不到 pwsh，只有自述日志；按工单 F4 应降级为历史/
+  未独立复现或给出可复核路径。
+
+一、独立执行结果
+1) backup.test.ts：1 file / 23 passed，4.26s，EXIT 0
+2) scripts.test.ts：1 file / 28 passed，119.36s，EXIT 0（真实 PS5.1）
+3) corepack pnpm -s test：66 文件 / 832 条，125.60s，EXIT 0
+4) typecheck：TSC_EXIT=0；build：141 modules，277ms，BUILD_EXIT=0
+5) git diff 只含 README、backup.ts、backup.test.ts、scripts.test.ts；
+   新增 scripts/{backup,restore,cleanup}.ps1 与四份 09C-B 交接；
+   restore.ps1、richman-common.ps1、backup-cli.ts、09B 其它脚本零改动；
+   git diff -U0：backup.test.ts 仅 import 增加 rmdir/symlink + 追加 T23；
+   scripts.test.ts 仅在 T1–T22 之后追加 T23–T28；T1–T22 断言未改写。
+
+二、A–D 独立对抗（真实 powershell.exe/临时数据/随机端口）
+A. 父目录 junction：PASS
+  Junction parent-link -> parent-target，执行
+  backup.ps1 -DataDir <data> -Out <parent-link>\child -Json：
+  EXIT=1，一行 JSON：
+  {"ok":false,"script":"backup","code":"BACKUP_OUT_INVALID",
+   "message":"outDir 不能是符号链接/junction：父路径 ...parent-link"}
+  parent-target 目录 entries 为空，child 未创建（零写入）。
+  直接 outDir junction（显式 -Out 自身已存在）：
+  EXIT=2，code=BACKUP_OUT_EXISTS，target 仍为空（符合“显式 Out 已存在先 EXISTS/2”）。
+B. 显式已存在空目录：PASS
+  mkdir exists-empty → backup.ps1 -Out exists-empty -Json：
+  EXIT=2，{"ok":false,"script":"backup","code":"BACKUP_OUT_EXISTS",
+   "message":"输出目录已存在，请换一个不存在的目录：..."}
+  exists-empty 仍为空，无 manifest.json。
+C. 两房 -All：PASS
+  start-lan 19200，创建 0599/9913；backup.ps1 -Out two-backup -Json
+  → exit0，rooms=2；stop；删除两房；
+  restore.ps1 -All -Port 19200 -Json
+  → exit0，restored=[{0599,null},{9913,null}]，pausedHint=true；
+  重启 /health：rooms=2；
+  /api/rooms：[0599 paused=true, 9913 paused=true]；stop 后端口释放。
+D. cleanup 缺目录/空目录：PASS
+  cleanup.ps1 -DataDir <missing> -Json：
+  EXIT=1，{"ok":false,"script":"cleanup","code":"DATA_DIR_MISSING",
+   "message":"数据目录不存在：..."}；missing 未被创建。
+  cleanup.ps1 -DataDir <existing-empty> -DryRun -Json：
+  EXIT=0，removed 四类 0，wouldRemove 四类 0，failed=[]。
+
+三、MUT1–MUT3（仓库外副本，逐组还原，sha256 前后一致）
+副本基线：T21/T23 2/2、T23/T26/T28 3/3 绿。
+MUT1 把 assertNoReparsePointInPath 改成 no-op：
+  T23 核心红：promise resolved 而不是 reject（backup.test.ts T23）。
+  T26 脚本红：STDOUT 为成功 backup rooms=1，expected +0 to be 1。
+  **T21 直接 outDir junction 仍绿**（1 passed）。
+  backup.ts sha256 前后：caf69a10b975d3044035b47860cb9996c4a62939e7736db0faccd6ec3fb0a1fa
+  还原后 diff 完全一致。
+MUT2 去掉 backup.ps1 的 Test-Path 拒绝：
+  T23 脚本红：STDOUT 成功写 empty Out，expected +0 to be 2。
+  backup.ps1 sha256 前后：354ba4359100a58aa6e1bb67232288ae166235e707269d55b359cf390616a5df
+  还原一致。
+MUT3 去掉 cleanup.ps1 的 DATA_DIR_MISSING：
+  T28 红：STDOUT cleanup ok true，expected +0 to be 1。
+  cleanup.ps1 sha256 前后：8412ab32f99f83f15c99667feb4937eed37156a4c4d234cc76684d8e7662e9bb
+  还原一致。
+三组均真实变红；T21 未被父路径修复误伤。
+
+四、F1/F2/F3/F6 逐项
+F1 父路径 reparse：PASS
+- backup.ts:231-247 新增 assertNoReparsePointInPath：从根逐级 lstat 已存在前缀，
+  遇到 isSymbolicLink 立即抛 BACKUP_OUT_INVALID（message 含“父路径”），
+  ENOENT 停止；createBackup 在 mkdir 前调用（backup.ts:260）。
+- 直接 outDir 旧 lstat 检查和创建后复检保留（:264-267、:280-282）。
+- T21 直接 junction 仍过；T23 父 junction target 零写入；T26 脚本零写入。
+F2 显式 -Out：PASS
+- backup.ps1:38-43 GetFullPath 后 Test-Path，任何已存在（目录/文件/空目录/
+  非空目录/显式 junction）均 BACKUP_OUT_EXISTS exit2，CLI 前拒绝；默认 Out 仍
+  while(Test-Path) 取全新名。
+- 实测 B 空目录 exit2；A direct junction exit2；非空/文件由 T23 覆盖。
+- 核心 createBackup 仍允许已存在空 outDir（兼容），脚本层拒绝，文档已写明。
+F3 测试：PASS
+- backup.test.ts T23 真实 junction、INVALID/父路径、target 空/child 不存在，
+  finally rmdir(link)。
+- scripts.test.ts T23–T28：existing Out（空/非空/文件）、两房 -All + paused、
+  All+Room 冲突、父 junction、-Keep prune 不碰无关项、未知参数 + DATA_DIR_MISSING。
+- T24/T25/T27 均真实 start-lan/文件/脚本，无 mock；T24 真实 /health 与 /api/rooms。
+F6 cleanup：PASS
+- cleanup.ps1:30-33 Resolve-DataDir 后 Test-Path；缺目录 DATA_DIR_MISSING exit1；
+  已存在空目录 dryRun zero 计数 exit0；D 实测。
+- 核心 cleanupData 未改候选/保留规则；T20/T21 仍绿。
+
+五、重点判定
+1) 错误码优先级：自洽。
+   - 显式 -Out 自身已存在（含直接 junction）→ 脚本 Test-Path → EXISTS/2，
+     不进入 CLI；A direct junction 实测 exit2。
+   - 父 junction 下不存在 child → 脚本 Test-Path child=false → 核心逐级 lstat
+     命中父链接 → INVALID/1；A 实测 exit1。
+   - 核心库仍允许“已有空 outDir”（兼容），脚本层一律拒绝；README/交接已讲清。
+2) 零写入：成立。
+   - A parent-target 为空、child 未创建；B empty Out 仍为空；direct junction
+     target 为空；核心 assert 在 mkdir 前，脚本 Test-Path 在 CLI 前。
+3) T24/T25/T27 真实性：成立。
+   - T24 用真实 start-lan/health/api/rooms，两房 paused=true；
+   - T25/T27 真实脚本/文件；T28 真实 PowerShell 参数/目录检查。
+   - runReviewScript 只在变异测试环境变量存在时换副本；正常验收走 runScript，
+     没有 mock 备份、CLI、服务或 PowerShell 关键环节。
+4) 文档与限制：
+   - 832/23/28、825+7、T1–T22 追加、T21 direct、S6/S8/S14 限制均与实跑一致；
+   - 唯一不实：pwsh7 当前声明（见 must-fix）。
+5) 遗留：无测试进程/端口/临时目录；仓库外副本已删；无仓库外文件引入。
+
+六、Must-fix（唯一：文档 pwsh 声明）
+M-DOC：把“当前 pwsh7.6.9 实测”写成可复现事实，但本机现在没有 pwsh
+  位置：
+    handoff/单元09C-B-成果报告.txt:63
+    handoff/单元09C-B-运行与验收.txt:10
+    handoff/单元09C-B-注意事项.txt:77
+    handoff/单元09C-B-下一阶段交接.txt:72
+  现象：文档写“当前实际 pwsh7.6.9 四项边界冒烟/只读查询能找到 pwsh.exe”；
+  09cbfix-pwsh7-current.txt 只是自述日志。
+  复现（本机）：
+    powershell -NoProfile -Command "Get-Command pwsh -ErrorAction SilentlyContinue"
+    where.exe pwsh
+  实际：均无输出/WHERE_NOT_FOUND；C:\Program Files\PowerShell\7 与常见用户路径
+  均不存在 pwsh.exe；只有 09cbfix-pwsh7-current.txt 自述 CURRENT PowerShell 7.6.9。
+  期望：按工单 F4 写成“pwsh7.6.5 为历史记录，本机当前无 pwsh，未独立复现”；
+  若确实复跑过，给出实际 pwsh.exe 绝对路径 + 命令 + 原始输出，否则不要写成当前实测。
+  影响：不是代码缺陷，但属于交接验证声明不实，必须改文档后才能提交。
+
+七、Should-fix / 测试缺口（不阻塞代码修复）
+S1 T23 脚本只覆盖空/非空/文件 Out，未覆盖“显式 -Out 自身为 junction”的
+   EXISTS/2 优先级；本次手工 A direct junction 已实测，建议补进 T23。
+S2 T21 只覆盖直接 outDir junction；父路径由 T23/T26 覆盖，但脚本层直接 junction
+   与父 junction 的优先级没有一条自动化同时断言；建议补一条。
+S3 S6 真实 ACL 使 cleanup 脚本 failed 非空/exit1 仍无稳定自动化；核心 T20
+   removePath seam 不等于真实 ACL（文档已如实保留）。
+S4 S8 中 force 目标普通文件、state 删除后的在线保护仍无本轮专门自动化；
+   T24 只覆盖两房 -All/paused；文档已如实保留。
+S5 S14 仍只有一次 2s health 请求；restore.ps1 本轮禁止改，文档已如实保留。
+S6 若继续保留 pwsh7 冒烟日志，应同时保留实际 pwsh.exe 路径和命令输出；
+   否则仅标历史。
+S7 T24/T25/T27 的 `runReviewScript` 有环境变量覆盖 seam；正常验收不设置，
+   但建议在 CI 明确禁止这两个环境变量，避免误跑副本。
+S8 `assertNoReparsePointInPath` 直接 outDir 的错误文案是“父路径 <outDir>”；
+   虽有“outDir 不能...”子串，语义可再精确为“outDir/父路径”。
+S9 显式 Out 是 dangling symlink 时 Test-Path 可能 false，最终由核心判
+   INVALID/1 而非脚本 EXISTS/2；当前不是规格明确场景，建议文档/测试覆盖边界。
+
+八、Nits / 残留风险
+- 核心 assert 与 mkdir 之间仍有理论 TOCTOU 窗口；规格要求是创建前检查，未要求
+  handle 级安全；本地威胁模型下可接受。
+- 大小写/8.3 短路径按规格不拒绝；未发现写穿。
+- 恢复多房仍非跨房原子；文档已说明。
+- 统一 `-Json` 一行、BOM、PS5.1 正常；A–D 实测。
+- 09cb E2E 的 65139/0903/3638 未在本机重复；本次独立用 19200/0599/9913 通过。
+- 生产数据规模、物理断电、手机真机未验证。
+
+九、文档核对结论
+- 832/23/28/825+7：与实跑一致。
+- T1–T22 只追加：git diff 一致。
+- T21 direct 限定、S6/S8/S14 限制、restore.ps1/common/CLI 零改动：一致。
+- 退出码与消息：A/B/C/D 与脚本一致。
+- README 备份节：显式 Out 不存在、父路径拒链接、cleanup 缺目录、state -Port
+  均已写；与实现一致。
+- 唯一不实：pwsh7 当前声明（M-DOC）。
+
+十、结论
+代码/测试/修复项：PASS，可提交；整单：需修复（仅 M-DOC 文档声明）。
+M1 父路径写穿、M2 已存在 Out、F6 cleanup 缺目录均已闭环；A–D、MUT1–3、
+T21/T24/T25/T27/T28 与 832 全量均通过。修掉 pwsh 声明后即可提交。
+
+十一、清理声明
+- 只使用随机端口 19200 与临时目录；未碰 apps/server/data、8000；
+- 服务、探针、副本、临时目录已清理；无 1920x/8000 监听、无 http.ts/cloudflared；
+- 未改源码/测试/脚本/README/交接，未 commit；本报告为新增复核文件。

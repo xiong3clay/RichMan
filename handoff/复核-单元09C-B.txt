@@ -1,0 +1,278 @@
+RichMan 单元 09C-B 备份/恢复/清理脚本 独立复核
+================================================
+复核员：Qoder（只读复核；未改源码/测试/脚本/README/交接，未 commit）
+日期：2026-11-08
+基线 HEAD：ab85732；改动全部在工作区（4 修改 + 3 新增脚本 + 4 份 09C-B 交接未跟踪）
+复核对象：
+  - handoff/单元09C-B-备份恢复清理脚本.txt（唯一规格）
+  - handoff/单元09C-B-{成果报告,运行与验收,下一阶段交接,注意事项}.txt
+  - handoff/复核-单元09C-A.txt 第十节（S1–S6）
+  - git diff ab85732 → 工作区；scripts/{backup,restore,cleanup}.ps1
+
+结论：需修复
+  核心 F0-1/F0-2/F0-4/F0-5、A/B/C/D/F/G/H 与 5 组变异均通过；
+  但发现两个必须修复的写入口/契约缺陷：
+  M1 outDir 的父目录是 junction/symlink 时仍写穿（F0-3 明确禁止）；
+  M2 显式 -Out 指向已存在空目录时被接受并写入（规格 backup.ps1 行为 3/F0-6
+     要求脚本层不复用已存在空目录）。
+  另有若干测试缺口与文档/证据不实，列为 should-fix/nit；不是新的数据损坏。
+
+一、独立执行结果（自己跑的，不引用被复核方日志）
+1) corepack pnpm -s vitest run apps/server/tests/backup.test.ts
+   Test Files 1 passed (1)；Tests 22 passed (22)；Duration 4.15s；EXIT 0
+2) corepack pnpm -s vitest run apps/server/tests/scripts.test.ts
+   Test Files 1 passed (1)；Tests 22 passed (22)；Duration 100.61s；EXIT 0
+   （真实 Windows PowerShell 5.1；PATH 含 System32\WindowsPowerShell\v1.0）
+3) corepack pnpm -s test
+   Test Files 66 passed (66)；Tests 825 passed (825)；Duration 99.11s；EXIT 0
+   825 = 原 813 + 12 新增；原 813 未减少。
+4) corepack pnpm -s typecheck → TSC_EXIT=0（无诊断）
+5) corepack pnpm -s build → BUILD_EXIT=0；141 modules；built in 221ms
+6) git diff --stat：
+   README.md 27+；backup.ts 72；backup.test.ts 66；scripts.test.ts 131+；
+   新增 scripts/backup.ps1、restore.ps1、cleanup.ps1 及四份 09C-B 交接；
+   没有 file-store/atomic/其它服务端、packages、apps/web、依赖、09B 脚本/common 改动。
+7) git diff -U0 的测试 hunks：
+   backup.test.ts 仅以 `import { ... symlink ... }` 和 T18–T22 追加；
+   scripts.test.ts 仅在 T1–T15 之后追加 T16–T22；T1–T15、T1–T17 断言没有被改写。
+
+二、F0/S1–S5 与规格逐项
+F0-1（S1）cleanup 失败可见：PASS
+- backup.ts 新增 failed[]；四类 catch 逐项记录，不中断，不抛出。
+- T20 用 hooks.removePath 注入 logs/server-24.log EACCES：
+  failed 长度 1、group=logs、path 正确、message 含 EACCES；其它项继续删除。
+- 另用 ACL deny delete 真实制造 cleanup.ps1 删除失败：
+  EXIT=1；stdout 一行 JSON：
+  {"ok":false,"script":"cleanup",...,"failed":[{"group":"logs",...,
+   "message":"EPERM: ... unlink ..."}]}
+  日志文件仍在。F0-1 真实落地。
+F0-2（S2）写后回滚：PASS
+- restoreRoom 增加 hooks.afterWrite；没有跳过任何原校验。
+- T18 注入 INJECTED_AFTER_WRITE：RESTORE_VERIFY_FAILED、旧 snapshot 还原、
+  rooms 只有原 code、无半成品/多余 restore-keep。
+- T19 注入 afterWrite+rollback：details.rollbackError/keptPath、message 含
+  “回滚旧档失败”和保留路径；目标半成品不存在。
+- 生产脚本不传 hooks；回滚缺省仍 rename。
+F0-3（S3）outDir 链接：部分 PASS，M1 未完成
+- 直接 outDir junction：T21 PASS；生产 backup.ps1 也 exit 1
+  BACKUP_OUT_INVALID，目标目录零写入。
+- 但**父目录 junction** 下新建 child 并未拒绝且写穿（见 M1）。
+F0-4（S4）空备份：PASS
+- verifyBackup 对 manifest.rooms=[] 返回 ok=false，problem
+  “manifest.rooms 为空（空备份不可用于恢复）”；T22 PASS。
+F0-5（S5）dryRun 计数：PASS
+- CleanupResult 增加 wouldRemove；T20 断言 dryRun wouldRemove tmp/logs/backups/corrupt；
+- 我另用 script 的四类临时目录实测：
+  EXIT=0，removed 四类均 0，wouldRemove {tmp:1,logs:2,backups:1,corrupt:1}，
+  所有文件仍在。
+F0-6 文档/nit：部分 PASS；M2 与文档冲突
+- 注意事项已写 force 普通文件、audit 不复校验、空 Out 风险；
+- 但脚本实际仍接受显式已存在空 Out（M2），与规格“脚本层一律新建/不得复用”冲突。
+
+三、A–H 独立对抗（临时目录/随机端口，不碰 apps/server/data 与 8000）
+A. 运行中恢复：PASS
+  start-lan -Port 19100 -DataDir <temp>，创建 0972/4391。
+  backup.ps1 -Out "<temp>/out 演练" -Json → exit 0，stdout 一行：
+  {"ok":true,"script":"backup","out":"...out 演练","rooms":2,"skipped":0,"pruned":0}
+  运行中 restore.ps1 -Room 0972 -Port 19100 -Json：
+  EXIT=2，{"ok":false,"script":"restore","code":"SERVICE_RUNNING",...}
+  snapshot sha256 前后一致；无 restore-keep-*。
+  把 run/server.json 改成坏 JSON 后，再 restore 同 -Port：
+  EXIT=2，code=SERVICE_RUNNING；坏状态与 snapshot 均未改；恢复原 state 后 stop 成功。
+B. -All 成功路径：PASS
+  stop 后删除两房目录，restore.ps1 -All -Port 19100 -Json：
+  EXIT=0，restored=[0972,4391]，两个 keptPath=null，pausedHint=true。
+  重启 /health：rooms=2；/api/rooms：
+  [{"roomCode":"0972","state":"LOBBY","paused":true,...},
+   {"roomCode":"4391","state":"LOBBY","paused":true,...}]
+  随后 stop 成功。
+C. 坏 manifest / All+Room：PASS
+  manifest.backupFormatVersion=99，restore.ps1 -All：
+  EXIT=1，{"ok":false,"script":"restore","code":"MANIFEST_INVALID",
+  "message":"backupFormatVersion 必须为 1",...}
+  -All 与 -Room 同时给：
+  EXIT=1，code=BAD_ARGUMENT，message 明确只指定一种。
+D. 目标存在/force/普通文件：PASS
+  无 -Force：EXIT=2，code=RESTORE_TARGET_EXISTS，目标 snapshot sha256 不变，无 keep。
+  -Force：EXIT=0，restored[0].keptPath 指向
+  rooms/restore-keep-20261107-183124-0972，旧档保留。
+  force 目标是普通文件：EXIT=0；旧文件被 rename 为
+  rooms/restore-keep-20261107-183315-0972（普通文件），target 随后成为目录并有
+  snapshot.json；旧文件内容 OLD-FILE-CONTENT 保留。后续恢复不会因“文件变目录”
+  自动失败；同秒第二次 force 的同名 keep 冲突风险已在注意事项说明。
+E. outDir 链接：直接 PASS，父目录 FAIL（M1）
+  直接 outDir junction：
+    backup.ps1 -Out <direct-link> -Json → EXIT=1
+    {"ok":false,"script":"backup","code":"BACKUP_OUT_INVALID",
+     "message":"outDir 不能是符号链接/junction：..."}
+    链接目标目录 entries 为空（零写入）。
+  父目录 junction：
+    New-Item -ItemType Junction parent-link -> parent-target
+    backup.ps1 -Out <parent-link>\child -Json
+    EXIT=0
+    {"ok":true,"script":"backup",...,"rooms":2,...}
+    parent-target 下出现 child/manifest.json、child/rooms/...（实际写穿）。
+  这是 M1；T21 只测了直接 outDir，不覆盖父目录。
+F. cleanup：PASS
+  DryRun（四类真实文件）：
+    EXIT=0，removed={tmp:0,logs:0,backups:0,corrupt:0}，
+    wouldRemove={tmp:1,logs:2,backups:1,corrupt:1}，文件全部仍在。
+  真实删除失败（ACL deny D）：
+    EXIT=1，stdout 一行 JSON，failed 含 group=logs、path、EPERM；文件仍在；
+    其它可删项不受阻。
+G. 三脚本 BOM/参数/JSON/退出码：PASS（有测试缺口）
+  三文件均 EF BB BF、首行 [CmdletBinding()]。
+  backup/restore/cleanup 的正常 -Json 输出均恰好一行；警告走 stderr。
+  -Nope：三脚本均 exit 1，stderr 是 PowerShell 参数错误，无脚本堆栈。
+  非空 -Out：backup.ps1 EXIT=2，code=BACKUP_OUT_EXISTS，keep.txt 不变。
+  但 T16–T22 没有自动化覆盖 BACKUP_OUT_EXISTS 的脚本 exit 2（见 should-fix）。
+H. -Keep prune：PASS
+  parent 下 keep.txt/other-dir/file.txt 与 richman-backup-a/b；
+  用 -Keep 1 依次创建 a/b：第二次输出 pruned=1，a 被删，b 保留；
+  keep.txt 与 other-dir 均保留。prune 只作用于 out 父目录的 richman-backup-*，
+  不误删普通文件/目录。
+
+四、隐私
+- 构造带 players/sessions 的快照（tokenDigest/recoveryDigest）并 withAudit 备份：
+  {"hasTokenKey":false,"hasSessionTokenKey":false,"hasRecoveryCodeKey":false,
+   "hasTokenDigest":true,"hasRecoveryDigest":true,
+   "sourceRoot":"D:\\...\\privacy\\data",
+   "manifestKeys":["backupFormatVersion","createdAt","sourceRoot","roomCount","rooms","skipped"],
+   "auditFiles":["snapshot.json"]}
+- 备份 snapshot 只含摘要，无原始 token/恢复码；manifest.sourceRoot 是绝对本机路径
+  （规格要求，注意事项已提示对外诊断需脱敏）。隐私约束符合规格。
+
+五、变异结果（仓库外副本；逐组还原并核对 sha256）
+副本基线：backup.test.ts 22/22 绿。
+| 变异 | 删除/改动 | 变红测试 | 失败摘要 | 还原 sha256 |
+|---|---|---|---|---|
+| M1 | cleanupData 的 failed() 改为 no-op | T20 | expected [] to deeply equal [{group:logs,...}]（backup.test.ts:522） | backup.ts 2cbb799f...（还原一致） |
+| M2 | 去掉 restoreRoom 的 afterWrite 调用 | T18 | promise resolved instead of rejecting（backup.test.ts:537） | backup.ts 2cbb799f...（还原一致） |
+| M3 | 去掉 outDir 的 symlink lstat 拒绝 | T21 | expected BACKUP_OUT_INVALID, got BACKUP_OUT_EXISTS（backup.test.ts:558-565） | backup.ts 2cbb799f...（还原一致） |
+| M4 | 去掉 restore.ps1 的 health 检查 | T17 | expected code SERVICE_RUNNING, got RESTORE_TARGET_EXISTS（scripts.test.ts:540/550） | restore.ps1 79e6ac3a...（还原一致） |
+| M5 | 删除 cleanup.ps1 的 UTF-8 BOM | T22 | Buffer[91,67,109] != Buffer[239,187,191]（scripts.test.ts:612） | cleanup.ps1 933d5dfa...（还原一致） |
+五组都真实变红；未出现“删掉后仍绿”。但以下路径没有测试覆盖，若删掉相关实现，现有 22 条不会红：
+  - backup.ps1 的 BACKUP_OUT_EXISTS 映射（T16 不测已存在 Out）；
+  - -All 成功恢复（T19 只测 -All 坏 manifest）；
+  - -All + -Room 冲突（手工测过，无自动化）；
+  - -Keep prune（手工测过，无自动化）；
+  - 父目录 junction / 显式空 Out（手工复现，无自动化）；
+  - restore.ps1/cleanup.ps1 未知参数（T22 只测 backup）；
+  - 脚本层 cleanup failed 非空（T21 只断言数组结构，真实 EACCES 在核心 T20）；
+  - force 普通文件、两房 -All paused、state 删除后的服务保护（手工测过）。
+这些是 should-fix 测试缺口，不是伪造成功。
+
+六、Must-fix（带文件:行号、现象、复现、期望、实际）
+M1 outDir 父目录 junction 写穿
+  位置：
+    apps/server/src/storage/backup.ts:242-263（只 lstat 最终 outDir；245/261）
+    scripts/backup.ps1:31-40（显式/默认 Out 均未检查父路径）
+  现象：outDir 最终组件不是链接，但父目录是 junction；mkdir 后写穿链接目标。
+  复现：
+    New-Item -ItemType Junction -Path <parent-link> -Target <parent-target>
+    powershell -File scripts/backup.ps1 -DataDir <data> -Out <parent-link>\child -Json
+  期望：拒绝（BACKUP_OUT_INVALID/非 0），parent-target 零写入。
+  实际：EXIT=0，out=<parent-link>\child，parent-target 出现 child/manifest.json、
+        child/rooms/0972、child/rooms/4391。
+  为什么是必须：F0-3 明确“outDir 不存在时先创建再校验（或先 realpath 父目录），
+  不得写穿”；这是写入口绕过，不是普通测试缺口。
+  修复建议：创建前对 outDir 的父目录 realpath/lstat 校验，拒绝任一 reparse
+  point；或创建后 realpath 必须等于用户路径解析结果，否则拒绝并清理自己创建的
+  child；backup.ps1 默认 Out 的 <data>/backups 也走同一检查。补父目录 junction 测试。
+
+M2 显式已存在空 Out 被接受
+  位置：
+    scripts/backup.ps1:31-40（未检查显式 Out 是否存在）
+    apps/server/src/storage/backup.ts:245-254（核心为兼容允许空目录）
+  现象：显式 -Out 指向已存在空目录时，backup.ps1 不拒绝，CLI 成功写入。
+  复现：
+    New-Item -ItemType Directory <empty-out>
+    powershell -File scripts/backup.ps1 -DataDir <data> -Out <empty-out> -Json
+  期望：按规格 backup.ps1 行为 3 / F0-6 “不允许复用已存在空目录，脚本层一律新建
+        outDir 规避”；应拒绝（BACKUP_OUT_EXISTS exit 2 或明确的 BAD_ARGUMENT），
+        不写入。
+  实际：EXIT=0，{"ok":true,...,"out":"...empty-out","rooms":2,...}；
+        empty-out 下生成 manifest.json、rooms/0972、rooms/4391。
+  为什么是必须：脚本契约与规格直接冲突；复用空目录后中途失败会留下部分 room
+  文件，正是 F0-6 要规避的风险。
+  修复建议：backup.ps1 在调用 CLI 前对显式 $Out 做 Test-Path；存在即
+  Fail-Backup BACKUP_OUT_EXISTS 2；默认 Out 仍保证全新。补 T23/测试。
+  说明：直接 outDir 为 junction 的行为已正确（T21/production），不要因修 M2
+  而退化为允许链接。
+
+七、Should-fix（测试缺口与边界）
+S1 BACKUP_OUT_EXISTS 脚本退出码无自动化：T16 只创建新 Out；T19 只测 restore
+   target exists；建议加 backup.ps1 -Out 非空 → exit 2/J JSON 的 T23。
+S2 -All 成功路径无自动化：T19 只测 -All 坏 manifest；本次手工两房 -All、
+   paused=true、keptPath=null 均 PASS，但无回归测试。
+S3 -All + -Room 冲突无自动化：本次手工 exit1/BAD_ARGUMENT PASS；建议断言。
+S4 父目录 junction / 显式空 Out 无自动化：T21 只测直接 outDir junction；
+   M1/M2 均靠手工发现。
+S5 -Keep prune 无自动化：本次手工 parent 里无关文件/目录保留、旧 backup 被删
+   PASS；建议测试。
+S6 脚本层 cleanup failed 非空无自动化：T21 只断言 failed 是数组；真实 EACCES
+   由核心 T20 hooks 覆盖；建议用 ACL/注入把 cleanup.ps1 failed 非空、exit1 落测试。
+S7 restore.ps1/cleanup.ps1 未知参数无自动化：T22 只测 backup.ps1；本次手工三脚本
+   均 exit1、无脚本堆栈。
+S8 force 普通文件、两房 -All paused、state 删除后的服务保护均只有手工证据；
+   建议补进 T16–T22 或单独脚本测试。
+S9 restore.ps1 服务保护在 state 缺失/坏且未传 -Port 时只能探 8000；若服务实际在
+   自定义端口，用户必须显式 -Port。规格的 -Port 回退如此，但应在 README/错误
+   信息中强调，避免“删掉 state + 忘传 Port”绕过在线保护。
+S10 pwsh 7.6.5 的交接声明：当前本机 `Get-Command pwsh` 不存在，09cb-pwsh7.txt
+   只有被复核方记录，无法独立复跑。请把 pwsh7 冒烟标成“历史记录/未独立复现”或
+   安装后重跑；不要把仅日志当成本机已验证。
+S11 文档仍把“显式已存在空 Out 交 CLI、空目录兼容”写成兼容行为
+   （成果报告:35、运行与验收:72、注意事项:12）；修 M2 后需同步为“脚本拒绝已有
+   Out，默认生成全新目录”。
+S12 文档对 outDir 链接只说“outDir 不能是链接”，未说明父目录 junction；
+   修 M1 后需补一句“任一父路径为 reparse point 也拒绝”。
+S13 文档说 T21 只测直接 junction；应补父目录测试的说明，避免读者误以为
+   F0-3 已全覆盖。
+S14 `restore.ps1` 的 health 检查只有一次 2s 请求；繁忙服务可能暂时不回，存在
+   极小窗口；建议至少 Status/read state 判 running 为准（当前 running 状态已拒绝），
+   或文档说明。属于低风险 should/nit。
+
+八、Nits / 遗留风险
+- cleanup.ps1 对不存在的数据目录返回 exit0/零计数（backup.ps1 有 DATA_DIR_MISSING），
+  用户可能误以为清理成功；可考虑 DATA_DIR_MISSING。
+- -All 多房不是跨房原子；中途失败前面房间已恢复，文档已说明。
+- force 目标普通文件会变成 restore-keep-* 文件而不是目录，文档已说明。
+- backDir 只读跟随链接是规格允许；不要把这条改成写入口逻辑。
+- manifest.sourceRoot 是绝对本机路径，规格要求；对公网/工单展示需脱敏。
+- 恢复后 audit 不复制后复校验、audit缺行不重建、restore-keep-* 不自动清理；
+  文档已说明。
+- logs/backups/corrupt 单项删除失败现在有 failed；good。
+- 真实生产数据规模、物理断电、手机真机未验证。
+- 09cb E2E 记录 56734/9074 未在本机重复同一组 URL；本次独立用 19100 两房 E2E 通过。
+
+九、交接文档核对（逐条指正）
+- 数字：22/22、22/22、825、813+12 均与我的实跑一致；耗时不同（我 4.15/100.61/
+  99.11/221ms vs 交接 4.57/97.15/101.19/351ms）是不同运行，不判不实。
+- T1–T15/T1–T17：git diff 只有 import + 追加；旧断言未改，PASS。
+- `BACKUP_OUT_EXISTS` 交接写 exit2：生产脚本实际是 exit2（见 G），但**无自动化**；
+  交接应明确“test gap”，不要写成已由 T16 覆盖。
+- `-All` 成功：交接 E2E 只展示一房；本次两房 -All/Paused 通过，但 T16–T22
+  **没有 -All 成功测试**，交接“新增测试清单”不应暗示已自动化覆盖。
+- `-All + -Room` 冲突：交接未声称有测试；本次手工通过，应补。
+- 父目录 junction：交接只写“outDir 不能是链接”，未提父路径；实际写穿，属新 must。
+- 显式空 Out：交接（成果报告:35、运行:72、注意事项:12）如实写了“兼容/风险”，
+  但与规格“不得复用”冲突；修代码后同步改文。
+- pwsh7.6.5：交接写冒烟；当前本机无 pwsh，只有 09cb-pwsh7.txt；标为历史/未独立复现。
+- 隐私：备份仅摘要、sourceRoot 绝对路径；与交接一致。
+- `T21` 交接写“junction输出被拒且目标零写入”：直接 outDir 成立；父目录不成立，
+  需把测试名/描述限定为“直接 outDir junction”。
+- 09C-A S1–S5：S1 failed、S2 回滚、S4 空 manifest、S5 dryRun 均闭环；
+  S3 仅直接链接闭环，父路径未闭环（M1）。
+
+十、结论
+需修复：
+  1) M1 父目录 junction 写穿（安全/写入口）；
+  2) M2 显式空 Out 复用（脚本契约/F0-6 风险）。
+其余功能、A/B/C/D/F/G/H、隐私、22+22/825 与 5 组变异均通过；修完 M1/M2 并补
+对应测试后可提交。测试缺口与 pwsh 声明按 should-fix 处理。
+
+十一、清理声明
+- 复核只用随机端口 19100/19101 与临时目录；未碰 apps/server/data、8000；
+- 所有服务/临时目录已停止清理；richman-09cb-probe、richman-09cb-mut 已删除；
+- 未改源码/测试/脚本/README/交接，未 commit；本报告为新增复核文件。

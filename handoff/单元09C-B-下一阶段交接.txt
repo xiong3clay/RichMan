@@ -1,0 +1,94 @@
+单元09C-B 下一阶段交接（给09C-C / 09C-D）
+================================================================
+日期：2026-11-08
+本轮唯一工单：handoff/单元09C-B-复核修复.txt；原09C-B规格与Qoder报告只读保留。
+接口说明以本轮工作区为对象；最终测试数、命令退出码、端到端实测与当前HEAD见成果报告/运行与验收。
+本轮不commit，由Lead复核后统一提交；未改默认apps/server/data，不用8000端口做演练。
+
+一、入口与职责
+apps/server/src/storage/backup.ts：备份/校验/恢复/清理核心，继续复用validateSnapshot。
+apps/server/src/storage/backup-cli.ts：既有CLI不改，stdout一行JSON；三个脚本统一调用该CLI。
+scripts/backup.ps1：Resolve-DataDir；默认生成全新richman-backup-<时间戳>目录；显式-Out存在即拒绝exit2；映射CLI创建结果。
+scripts/restore.ps1：先检查进程归属与health，拒绝在线恢复；verify后按code逐房恢复；提示重启后由房主继续。
+scripts/cleanup.ps1：缺DataDir报DATA_DIR_MISSING/exit1；保留策略参数、dryRun计数、失败展示；不自行rm数字房间目录。
+三个脚本均dot-source既有richman-common.ps1，不另写09B的进程归属/目录解析规则。
+
+二、核心增量接口
+BackupErrorCode含BACKUP_OUT_INVALID；createBackup在mkdir前逐级lstat已存在路径前缀，
+拒绝outDir自身或任一父路径的symlink/junction，零写入；直接检查和创建后复检仍保留。
+核心已存在空outDir兼容行为不变，但脚本层显式Out存在均拒绝，不能再称脚本支持复用空目录。
+读取方backupDir仍允许跟随链接。空manifest（rooms=[]）由verifyBackup返回ok=false/problems。
+CleanupResult新增failed:[{group,path,message}]、wouldRemove:{tmp,logs,backups,corrupt}；
+原tmpFilesRemoved/logsRemoved/backupsRemoved/corruptRemoved保持兼容。
+cleanupData options可传hooks.removePath，仅为测试seam；生产默认真实fs.rm，候选/保留逻辑不变。
+restoreRoom options可传hooks.afterWrite（写后复校验之前）、hooks.rollback（回滚失败注入）；
+生产不传，不放松原校验。回滚失败details给出rollbackError与keptPath，避免只见原错误。
+具体类型签名及新增测试断言以backup.ts/backup.test.ts为准，seam不是脚本参数或公网API。
+
+三、脚本契约
+backup：DataDir、Out、Keep（默认0不prune）、WithAudit、Json。
+restore：DataDir、Backup、Room[]或All（二选一）、Force、Port（默认从run状态再回退8000）、Json。
+cleanup：DataDir、KeepLogs=20、KeepBackups=10、KeepCorrupt=5、TmpHours=24、DryRun、Json。
+Json输出stdout单行；0成功，1参数/校验/运行失败或部分清理失败，2需人工：显式输出路径已存在（含空目录）/目标存在/服务运行。
+运行中恢复判定是“归属进程running 或 health明确是RichMan”，任一成立即SERVICE_RUNNING、exit 2，先于任何写入。
+多房恢复逐个提交，失败即停并报告已完成列表，不承诺整份备份跨房间原子恢复。
+run/server.json缺失/损坏且未给-Port时只探8000，自定义端口必须显式-Port；health仅一次2s请求。
+归属状态running仍拒绝，不靠单次health成功才保护；状态不可用且探针暂时失败的低风险窗口仍需人工停服确认。
+
+四、不可回退的不变量
+1. 备份只复制完整snapshot字节；manifest最后写；不写原文凭证，不重建字段。
+2. 恢复必须先verify；未force且目标已存在时不得改动；force先保留旧档，写后失败回滚。
+3. 只读backupDir链接可跟随；outDir及任一父路径为reparse point必须在创建前拒绝，不能写穿；空备份不能恢复。
+4. cleanup删除失败必须可见；一项失败不停止其它项，也不能伪装全部成功。
+5. dryRun不删除，wouldRemove是拟删除数；removed数组为空。tmpFilesRemoved保留旧dryRun计数兼容，
+   UI/脚本不可把它标成已经删除。正式清理wouldRemove为0。
+6. cleanup不删除正常房间、run状态、restore-keep-*。用户保留目录只能人工或未来明确策略清理。
+7. 恢复快照不改paused；服务启动后paused=true、online=false，必须房主继续，不自动追赶旧deadline。
+8. 服务运行时恢复必须先拒绝，不可通过目标不存在绕过，也不可先写再检查。
+9. 脚本显式-Out必须不存在，文件/目录/空目录/非空目录均BACKUP_OUT_EXISTS、exit2；默认命名换名逻辑保留。
+10. cleanup缺数据目录必须DATA_DIR_MISSING、exit1；已有空目录无可清理项仍成功，不能混为同一种情况。
+11. 本轮只追加核心T23与脚本T23–T28，保持原两份T1–T22原文；不削弱旧825条，最新条数/耗时看真实成果报告。
+
+五、复核修复（M1/M2）与新增覆盖
+M1原父目录junction写穿由核心逐级前缀lstat修复；核心T23和脚本T26分别核父链接目标零写入。
+原T21只测“直接outDir junction”，不能把它描述成已覆盖任意父路径。
+M2原显式空Out复用由脚本入口拒绝；T23同时覆盖空/非空Out，保留原内容且不生成manifest。
+新增T24补两房-All升序恢复、keptPath=null及重启paused；T25补All+Room冲突；
+T27补Keep1只prune匹配旧备份、保留无关文件/目录；T28补restore/cleanup未知参数与cleanup缺目录。
+每条红灯/绿灯证据和最终命令输出由成果报告/运行与验收记录；本文件不把预期数字写成实测。
+
+六、给09C-C的输入
+下一任务按计划处理BET_SETTLED按audience拆分，不能以备份原始审计格式为由扩大网络事件可见范围。
+backup snapshot/audit留在服务端私有目录，不是客户端视图。若后续事件格式变化，仍需保留现有
+snapshot校验、审计大小/sha256清单与既有隐私约束；不得在本单元脚本里添加事件规则判定。
+
+七、给09C-D的输入
+LICENSE/CHANGELOG/版本记录应使用Lead验收后的实际提交与最终测试数，不能把未提交工作区当已发布版本。
+README本轮只修“备份、恢复与清理（Windows）”一节；其它段落和旧当前状态/测试数字没有擅自重写。
+发布说明可列：三个Windows脚本、运行中恢复保护、删除失败可观测、dryRun四类计数、回滚故障测试、
+outDir及父路径拒链接、显式Out已有即拒、cleanup缺目录报错及空备份拒绝。
+实际PS5.1实测与端到端输出以运行与验收为证据。
+09cb-pwsh7.txt仅为上一轮pwsh7.6.5历史记录，本轮未独立复现该旧版本，不能沿用为本轮实测。
+本机当前未安装pwsh（where.exe/Test-Path均未找到），09cbfix-pwsh7-current.txt的自述结果未复现；
+若后来安装并独立复跑，须给出pwsh.exe路径与原始输出，并以本轮新日志及运行与验收为准。
+
+八、仍缺的能力与边界
+未做定时备份、加密、云上传、day-2长期保留/restore-keep自动清理、多机协调或跨房间原子恢复。
+force普通文件会先保留该文件再建房间目录；恢复后只复校验snapshot，audit不做复制后再次校验。
+核心库复用已有空outDir中途失败可能残留部分文件；仅限库调用者/测试，脚本显式Out已强制拒绝已有路径。
+测试缺口仍保留：S6真实ACL导致脚本cleanup.failed非空/exit1尚未稳定自动化（核心seam覆盖不等同于真实ACL）；
+S8的force普通文件/state删除后的保护尚未专门自动化，两房-All/paused已列入新增T24；
+S14单次health探针的繁忙/超时窗口仍未自动化，restore.ps1本轮禁止改，不宣称已增加重试。
+manifest/sourceRoot与身份摘要属私密资料；不得公网/上传/聊天外传。
+物理断电、大型审计/生产规模、真人手机验收不由本轮自动化或临时端口恢复演示替代。
+
+【本轮PowerShell证据纠偏】
+09cb-pwsh7.txt仅是上轮7.6.5历史记录，本轮没有独立复现该旧版本，不可当作本轮验收。
+09cbfix-pwsh7-current.txt自述7.6.9四项边界结果，但本机where.exe pwsh（exit 1）与
+Test-Path 'C:\Program Files\PowerShell\7\pwsh.exe'（False）均找不到pwsh，未能复现；
+该日志不作为本轮证据。正式脚本回归使用真实Windows PowerShell 5.1（28/28）。
+【本轮最终验证补记】
+核心23/23、脚本28/28、全量66文件832条（原825+新增7）通过；typecheck/build退出0。
+具体命令/耗时/日志与七条红灯、变异、绿灯证据见成果报告/运行与验收。
+手工父junction零写入、已有空Out拒2、Keep1只删旧备份、两房All重启paused均通过；
+随机65139、房间0903/3638，服务和临时目录已回收。不commit；S6/S8/S14限制仍保留。

@@ -1,0 +1,124 @@
+单元09C-B 成果报告：复核修复（M1/M2）
+================================================================
+日期：2026-11-08；唯一工单：handoff/单元09C-B-复核修复.txt。
+工单标注旧HEAD ab85732；本轮开工实测HEAD dbeaa9a；保留此前未提交09C-B实现，不reset、不commit。
+原Qoder复核与原09C-B规格只读不改；本轮仅修F1–F6，旧825用例不削弱。
+状态：F1–F6均完成自动化与指定手工验收；核心23/23、脚本28/28、全量66文件832条全绿；typecheck/build exit0。
+
+一、改动文件与作用域
+本轮改backup.ts（仅F1）、backup.test.ts（只追加T23）、scripts.test.ts（只追加T23–T28），
+scripts/backup.ps1、cleanup.ps1、README备份节，以及四份09C-B交接。
+没有修改backup-cli.ts、file-store.ts、atomic.ts、其它server文件、packages、web、协议、依赖、
+09B四脚本、common或restore.ps1；没有碰默认apps/server/data或8000端口。
+对开工前文件逐字保存于09cbfix-baseline-*.txt；证明旧T1–T22和受禁文件不变以最终scope日志为准。
+
+二、复核修复（M1/M2）
+M1：原实现只检查最终Out，父路径junction下的child会写穿。
+F1新增私有assertNoReparsePointInPath，path.resolve后从文件系统根逐级lstat已存在前缀；
+命中链接立即BACKUP_OUT_INVALID，message同时含原T21所需子串及“父路径 ”+命中路径；
+ENOENT即停、其它错误抛出；在任何mkdir/writeFileAtomic之前调用，不按大小写/短路径比较拒绝。
+直接outDir旧检查、创建后复检保留；核心已有空Out兼容不变。
+对应：核心T23 create_refuses_parent_junction、脚本T26 backup_script_parent_junction_refused。
+原T21仅验证“直接outDir junction”，不能将其说成覆盖任意父路径。
+M2：原脚本显式已有空Out会复用。
+F2在显式路径GetFullPath后Test-Path，普通文件/空目录/非空目录均BACKUP_OUT_EXISTS/exit2，零写入；
+默认时间戳+while换名不变。核心兼容已有空目录仅限库内/测试，脚本不再复用。
+对应：脚本T23 backup_script_refuses_existing_out。
+错误码优先级：显式Out本身已存在（含直接junction）先由脚本EXISTS/2拒绝；
+父junction下不存在的child进入核心后INVALID/1；核心直接链接调用仍INVALID。
+F6：cleanup缺数据目录DATA_DIR_MISSING/exit1；存在但无清理项仍exit0/零计数。
+对应：T28 script_arg_errors。
+
+三、测试清单与红灯/绿灯证据
+核心新增1条：
+T23 create_refuses_parent_junction：真实junction，核心拒绝，message含具体父路径，target目录仍空。
+09cbfix-core-red.txt：旧实现实际返回成功（promise resolved），1 failed；
+09cbfix-core-green.txt及09cbfix-backup-final.txt：原22+新增1全部通过，23/23，最终4.26s，exit0。
+
+脚本新增6条（原T1–T22完整前缀保留）：
+T23 backup_script_refuses_existing_out：显式空/非空Out均exit2/JSON单行，原内容不变且无manifest。
+T24 restore_all_success：0042/7506真实FileRoomStore+一次备份，真实启动/停止/删房/All恢复/重启，
+    升序两条keptPath=null，health.rooms=2，两个paused=true，finally停服释放端口。
+T25 restore_all_and_room_conflict：All+Room BAD_ARGUMENT/1，原快照字节与keep区域不变。
+T26 backup_script_parent_junction_refused：真实父junction下child，exit1/INVALID，message父路径，target空。
+T27 backup_script_keep_prunes_only_matching：Keep1两次备份，旧a消失、b保留、pruned1，keep.txt/other-dir不动。
+T28 script_arg_errors：restore/cleanup未知参数exit1且无运行堆栈，cleanup缺目录DATA_DIR_MISSING/1。
+
+脚本baseline：09cbfix-scripts-red.txt，T23/T26/T28三条红（旧行为均实际exit0）；
+T24/T25/T27是原已实现行为，baseline绿，不能为红灯篡改正确生产代码。
+已用原样临时副本先验证T24/T25/T27 3/3绿（25.67s），再仅删相应功能：
+T24删-All展开→restored=[]，同名测试红（13.18s）；
+T25删互斥guard→实际RESTORE_TARGET_EXISTS/exit2而非BAD_ARGUMENT/1，红（6.87s）；
+T27删--keep传参→pruned0而非1，红（3.22s）。三个mutant均真实exit1。
+仓库restore/common未改，临时副本/服务已回收；早期包装开关加引号造成的绑定错误未计为有效红灯。
+汇总09cbfix-mutations.txt及对应09cbfix-mutation-*.txt。
+正常新增T23–T28 6/6绿（32.22s），09cbfix-scripts-new-green.txt；
+T28最后加强stdout+stderr无运行栈的断言，已在root最终28/28及832/832中通过。
+
+四、实现/证据纪律与文档纠偏
+只追加新测试，不改变旧断言；没有mock备份/CLI/PS/服务，临时副本变异仅供验证测试敏感性。
+禁止的restore/CLI/common原仓库文件不变；变异只在随机临时目录，原样副本先绿后删功能测红。
+README仅改备份节，明确显式空Out不可复用、父路径拒链接、只读backupDir允许跟随、state缺坏需Port。
+四份交接均同步当前事实，历史825/旧耗时不冒充本轮实测。
+09cb-pwsh7.txt仅为旧7.6.5历史，未独立复现；09cbfix-pwsh7-current.txt自述“7.6.9四项边界冒烟”，
+但本轮复核用where.exe pwsh（exit 1、无输出）与Test-Path 'C:\Program Files\PowerShell\7\pwsh.exe'（False）
+均找不到pwsh，无法复现，只能视为未独立验证的历史记录，不作为本轮证据；正式回归为真实PS5.1。
+Qoder复核M-DOC指四份交接把pwsh7.6.9写成“当前实测”；Lead已按上述实际探测结果把四处声明全部降级为历史/未复现，未改代码与测试。
+
+五、手工四项（最终版本真实PS5.1，均按预期）
+随机65139，临时根 C:\Users\连俊杰\AppData\Local\Temp\richman-09cbfix-manual-v4R8bT；
+数据目录含中文空格，创建0903/3638两个房间。未用默认data/8000。
+1. parent-link→parent-target；backup -Out parent-link/child：exit1/BACKUP_OUT_INVALID，
+   message含“outDir 不能是符号链接/junction：父路径 ...parent-link”，targetEntries=[]，无child。
+2. 显式exists-empty Out：exit2/BACKUP_OUT_EXISTS，entries=[]，未生成manifest。
+3. Keep1先a后b：两次exit0，第二次pruned=1；a消失、b保留，父目录只剩keep.txt/other-dir/b，
+   keep.txt和other-dir/file.txt内容不变。
+4. 停服→删两房→restore -All -Port 65139：exit0，restored=[0903,3638]、keptPath均null；
+   重启health.rooms=2，两个paused=true；最后stop exit0，两个服务pid5156/14504均退出、临时根已回收。
+原始逐步命令/exit/JSON：09cbfix-manual-final.txt；演练程序留作09cbfix-manual-runner.txt。
+
+六、未处理的should-fix/限制（按工单保留）
+S6：真实ACL使cleanup脚本failed非空/exit1仍没有稳定自动化；核心removePath EACCES seam不等于真实ACL。
+S8：两房All/paused已新增T24；force普通文件与state删除后的保护仍未专门自动化，不能称全闭环。
+S14：health仍只有一次2s请求；归属状态running仍拒绝，state不可用且单探针失败存在低风险窗口。
+state缺失/损坏又省略Port只探8000；自定义端口必须显式Port，本轮从未用8000做演练。
+本轮不改restore.ps1，不增加探针重试。未验证生产规模/物理断电/手机弱网；未新增定时/加密/云上传。
+
+七、最终真实命令输出
+$ corepack pnpm -s vitest run apps/server/tests/backup.test.ts
+ Test Files 1 passed (1)
+ Tests 23 passed (23)
+ Start at 15:39:57
+ Duration 4.26s
+ exit=0
+$ corepack pnpm -s vitest run apps/server/tests/scripts.test.ts
+ Test Files 1 passed (1)
+ Tests 28 passed (28)
+ Start at 15:43:02
+ Duration 121.20s
+ exit=0
+$ corepack pnpm -s test
+ Test Files 66 passed (66)
+ Tests 832 passed (832)
+ Start at 15:45:16
+ Duration 126.33s
+ exit=0
+$ corepack pnpm -s typecheck
+ 无诊断，exit=0
+$ corepack pnpm -s build
+ vite v8.3.5 building client environment for production...
+ ✓ 141 modules transformed.
+ ✓ built in 306ms
+ exit=0
+旧825+本轮7=832，无跳过/削弱旧断言；最终完整输出：
+artifacts/test-logs/09cbfix-{backup,scripts,test,typecheck,build}-final.txt。
+每条新测试：核心T23见core-red与backup-final；脚本T23/T26/T28见scripts-red与scripts-final；
+脚本T24/T25/T27见mutation-对应文件与scripts-final。最终28条均含原22条与新6条。
+本轮工单无未完成项；S6/S8/S14等授权保留限制见第六节，不宣称额外能力已完成。
+
+八、独立复核与范围证据
+artifacts/test-logs/09cbfix-review.txt：F1/F2/F6当前实现、错误码与文档限定范围无剩余阻塞。
+09cbfix-scope-final.txt：两份旧T1–T22精确字节前缀true，backup移除F1后等于本轮开工版本，
+restore.ps1与原Qoder报告/原规格/本轮工单均字节不变；README备份节外不变、两脚本BOM保留。
+本轮仅上述10文件增量，不包含工作区原已有但本轮禁止修改的restore.ps1。
+本轮未commit；实际HEAD仍dbeaa9a，未改依赖或进入09C-C。
