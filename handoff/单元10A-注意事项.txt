@@ -1,0 +1,70 @@
+单元10A 注意事项
+日期：2026-11-08
+
+一、上轮T11纠正（必须保留，本轮未改金额语义）
+旧版10A T11写成了「ACTION同意时余额不足→INSUFFICIENT_FUNDS且请求保持PENDING」，与方案V1.3.3第199行及现有web正确契约冲突。
+用户在执行中将唯一规格更新至d91a9da，并明确纠正：
+已过格式校验、因余额业务条件失败的同意应返回ok:true，请求置FAILED，发LOAN_REQUEST_CLOSED(status=FAILED)。
+不转账、不建合同；ACTION借款人提交时已用掉行动，失败答复不得再finishSeatAction；其他PENDING保持。
+TAX沿用原FAILED收口，不改自救；格式/伪造/越权仍是命令拒绝，不改真实请求。
+上轮已删除错误加入的ACTION INSUFFICIENT_FUNDS分支，重写新T11并真实先红后绿，本轮保持。
+apps/web/tests/guided-integration.test.ts:89及所有前端文件原样保留。以后不要把FAILED状态当成错误码，也不要因ok:true就显示已转账。
+第一次全量862绿/1红的日志10a-full-before-spec-correction.txt是纠正前历史记录，不是最终验收。
+
+二、不可回退的D6语义
+ACTION每次合法请求提交立即消耗行动并前进；同一借款人最多一个PENDING，出借人可有多个incoming。
+pendingRequestId只服务TAX；不要为了旧server门禁重新设置ACTION全局指针或恢复全桌等待。
+同意/拒绝/取消/单笔超时不结束当前席行动；取消不退行动。
+全席已行动不等于ACTION结束：仍有PENDING必须保持ACTION/current=null、最早请求deadline；全部答复/过期后才BETTING。
+有下一席则照常选座，不得恢复旧全桌等待；enterBetting过期循环只是兜底，不能靠它立刻消灭最后席的新请求。
+无转账事件就不能显示转账成功。
+同一借款人重复请求的私有模块码DUPLICATE_PENDING_REQUEST仍映射既有公开INVALID_ACTION；本轮不改共享协议。
+
+三、旧快照风险已修复
+normalize旧ACTION pointer补借款人acted并清pointer；其他当前席不应被重置。
+迁移本身必须+1 version，否则服务器会丢弃它；T17覆盖系统tick、失败命令与重复tick幂等。
+resume迁移后只选下一未acted席，不空等60秒；全席已行动但有PENDING时，deadline必须取续期后的最早请求截止。
+T19覆盖standard145000/fast120000；提前tick不动，到截止才过期并BETTING；不能恢复为deadline=null造成无timer永久PENDING。
+请求续期45/20秒与行动60/30秒分开，不能用请求时间压短当前席窗口；不追赶旧deadline造成连跳。
+
+四、上轮服务端最小适配（本轮未改）
+上轮用户明确扩展授权：只改command-queue.ts的ACCEPT/REFUSE校验，ACTION不要求pointer，TAX保持pointer要求。
+保留ID信封/请求状态/轮次/出借人归属/阶段/期限门禁与旧错误码；不在网络层实现余额逻辑。
+新增4条d6-requests回归，含非当前席接受一次/重复原回执/新ID再接受过期/越权/拒绝/TAX错pointer保护。
+
+五、旧断言改动清单
+本轮仅round等待断言、T7、T19三处按修订语义变化，完整旧→新/行号在成果报告第五节；保留旧资金/身份/单次入账意图。
+新增T20–T22，证明最后席可被同意、无人答复到期、46000→47000逐笔等待；拒绝/取消/FAILED也会结束最后等待。
+以下是上轮历史适配，本轮未改这些服务端文件或resume.test.ts：
+核心：engine-round三处旧全桌等待/取消pointer预期；resume两种timer模式的ACTION窗口。
+服务器：session三处ID来源；review06-resume ACTION窗口与请求定位；crash-recovery:78加强version屏障。
+详细逐条旧→新→原因、精确文件行与名称在成果报告第五节；原资金/身份/越权/单次入账断言保持。
+唯一T11撤销的是上轮按错误规格新写的断言，不是删改原web契约；本轮未修改金额语义或前端实现/测试。
+
+六、变异与测试证据
+本轮全量69文件866条通过、exit0（142.04s）；typecheck/build均exit0（141 modules，438ms）。
+MUT5去等待→T20/T21/T22三红（Lead无bail复跑另含T7/T19，共5红）；MUT6取最晚→T22红（Lead无bail复跑另含T7，共2红），收到47000而应46000，均exit1且AssertionError。
+MUT1→T1红，MUT2→T1/T2红，MUT3→T3红；旧MUT4仅删enterBetting兜底实跑22绿/exit0，属新正常路径等价变异。
+不能沿用上轮MUT4红结论；Lead 已在规格第五节标记旧 MUT4 作废（等价变异 22 绿），兜底没有删除，此项如实记录不冒充通过。
+源码restored=true，SHA256=58969316c6fe2bdd9453d14be8f75a7e043ccbc30ff07329dee6647f22e1e910；还原后12文件177条core通过、exit0。
+变异一定还原后才能交接；MUT2要同时写回pointer与恢复阻塞，单加死分支不是有效探针。
+本轮输出以artifacts/test-logs/10a-tail-*为准；旧10a-*保留作上轮历史，不能代替本轮证据。
+不要使用旧版T11红灯前/历史中间绿灯代替最终修正规格的验证。
+
+七、未做项与边界
+未改views字段、private-loans纯模块、共享协议、SNAPSHOT_SCHEMA_VERSION、依赖或脚本；实现提交 a8016c2。
+未触碰apps/server/data或8000；没有手机/真人测试。
+10B多请求UI与文案不在本轮。
+仍有当前行动席时，独立请求过期广播可能延后至下一命令/行动tick；本轮未改此服务端调度策略。
+尾部current=null等待和重启恢复已有最早请求deadline，现有scheduler可被唤醒；不能再声称尾部也无timer。
+当前席期间的调度适配留后续决策，不能缩短其行动窗口规避。
+
+八、Qoder 复核处置（2026-11-08）
+Qoder 结论可提交，无 must-fix；S1–S5 处理如下，均不改变 10A 代码语义。
+S1 MUT4：规格已标作废；删 enterBetting 兜底是新正常路径等价变异（22 绿），兜底保留，不得为旧断言恢复“进 BETTING 时仍有 PENDING”。
+S2 调度边界：有当前席时请求过期广播可能晚到该席 tick；不阻塞发布（不会转账/建合同，尾部等待仍用最早 PENDING deadline）。
+   10B/11 跟踪：UI 必须按 request.deadlineMs 显示，deadline 过后不得显示可同意；若改 scheduler 只能取“当前席行动截止 vs 最早请求截止”的较早者，不得缩短行动窗口。
+S3 排序：接受“到达顺序即稳定顺序”，已写入规格第六节；不承诺 requestId 字典序，10B 若依赖 tie-break 再显式排序。
+S4 状态：handoff/项目当前状态.txt 已更新 10A 完成摘要。
+S5 借款人收款超 MAX：归类为金额上限合法性校验，保留 INVALID_AMOUNT + 请求 PENDING，不属 R05 的出借人余额不足；
+   本单元不改既有契约，若未来要改为 FAILED 需单独立项并同步前端/协议。

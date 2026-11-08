@@ -1,0 +1,130 @@
+单元10A 成果报告：D6 多请求，语义 A
+日期：2026-11-08
+依据：handoff/单元10A-D6多请求引擎.txt，含 d91a9da 的T11纠正及本轮Lead修订的阶段末等待规则/T20–T22。
+起始 HEAD：d89bb8eb08afc8231666e0430019caea62d7bf12；执行中用户更新规格至 d91a9da74e7ab0c8aa8b1b52b11f601f1ccd744b。
+本轮续修基线为d91a9da上的上轮未提交实现（863条）；Lead对阶段末规则的未提交规格修订保留原样。
+实现提交 a8016c2（含上轮未提交的 command-queue 最小适配与 4 处服务端旧断言适配、本轮 engine 修复与两份核心测试）；四份交接随 docs 提交。
+
+一、结果
+ACTION 请求成功提交即消耗借款人行动，下一位继续；请求独立计时，出借人可同时收到多个请求并在非其回合答复。
+取消不退行动，答复/取消/单笔过期不结束当前席行动；有下一席时照常选座，不受请求影响。
+全席已行动仍有PENDING时保持ACTION/current=null，deadline取最早请求；逐笔答复/到期后重算，全部收口才进BETTING。
+余额不足按更新后的 T11 返回 ok:true，只将被同意的请求置 FAILED 并发关闭事件，不转账、不建合同，其他请求保持 PENDING。
+旧 ACTION 等待指针迁移会补记借款人已行动、清指针，并计入版本；恢复不会空等一整段行动窗口。
+本轮最终验证：pnpm -s test 为69文件866条全绿、exit0、142.04s；pnpm typecheck exit0；pnpm -s build exit0（141 modules，438ms）。
+MUT5/MUT6均触发指定测试红灯；还原后全core12文件177条全绿、exit0、1.46s。原863条保留，本轮新增T20–T22三条。
+
+二、10A累计改动与入口（本轮只改1–3项及四份交接，其余均是上轮保留项）
+1. packages/game-core/src/engine.ts:68：pendingRequestId 注释明确仅供 TAX 自救。
+   :158、:197、:262、:266：迁移旧 ACTION 指针；迁移自身计入 applyCommand/advanceSystem 的版本变化。
+   :217、:239：每笔ACTION请求续时45/20秒，当前行动另续60/30秒；无当前席的尾部等待取续期后最早请求截止。
+   :335：新增earliestPendingRequestDeadline纯函数，仅看PENDING，供恢复和系统推进共用。
+   :398、:410：独立扫描过期后，若无下一席但有请求则等待最早deadline；仅deadline变化时标changed，重复tick幂等。
+   :985：ACTION 请求独立截止，成功后立即 finishSeatAction；TAX 保留原指针与截止。
+   :1110、:1121、:1324：答复不耗行动，ACTION取消不要求全局指针且不退行动，移除旧全桌等待门禁。
+   enterBetting:559 的逐笔过期兜底保留，正常调用时已无PENDING；accept仍走原FAILED收口路径。
+2. packages/game-core/tests/engine-requests.test.ts:1：共新增22条；本轮改T7/T19并新增T20–T22，原资金/隐私/TAX断言保持。
+3. packages/game-core/tests/engine-round.test.ts:83：本轮改END后的尾部等待断言并加45000真实到期检查；取消等上轮适配保持。
+4. packages/game-core/tests/resume.test.ts:114：标准/快速 ACTION 恢复窗口适配，TAX 原值保持。
+5. apps/server/src/rooms/command-queue.ts:154：仅 TAX 要求 pendingRequestId 匹配。
+6. apps/server/tests/d6-requests.test.ts:1：新增4条真实引擎+服务器命令处理器回归。
+7. apps/server/tests/session.test.ts:112、:221、:341：三处 ACTION 请求ID来源适配。
+8. apps/server/tests/review06-resume.test.ts:21、:40：ACTION 恢复断言适配，TAX 值保持。
+9. apps/server/tests/crash-recovery.test.ts:78：读取提交后快照时增加准确版本屏障。
+10. 四份 handoff/单元10A-{成果报告,运行与验收,下一阶段交接,注意事项}.txt。
+未改 views.ts、private-loans.ts、协议、快照schema、依赖、脚本、前端目录；未访问默认数据或8000端口。
+
+三、必测对应（均在 engine-requests.test.ts）
+T1 two_borrowers_one_lender（55行）：两人向同一出借人提交，依次耗行动，两个请求共存、入站视图两条。
+T2 off_turn_accept（76行）：由真实连续请求构造牌桌；非当前出借人接受一次、当前席/已行动/窗口保持，重复同意不转账。
+T3 current_lender_accept（97行）：当前出借人接受后仍有行动，明确 END_ACTION 才前进。
+T4 refuse_keeps_action（113行）：只拒绝一条，另一条仍待办，不改金币或当前行动。
+T5 cancel_no_refund（125行）：提交后取消不退行动，不结束别人行动，借款人不能重新行动。
+T6 expire_one_only（143行）：45秒 tick只过期一条，55秒请求和当前席窗口保持。
+T7 action_end_waits_for_requests（156行）：全席完成仍ACTION/current=null、两笔PENDING，deadline45000；再到55000逐笔过期，最后才BETTING。
+   等待tick状态/事件全等，资金/合同不变；两个独立过期事件仍完整检查。
+T8 duplicate_borrower（184行）：重复借款请求被既有内部重复规则拒绝，不耗行动；公开码沿用 INVALID_ACTION。
+T9 tax_rescue_unchanged（193行）：税后负余额→请求等待→同意→自救成功，原TAX计时/指针语义保持。
+T10 migrate_legacy_action_pointer（212行）：旧全局等待迁移，借款人行动用掉、指针清除、下一位继续；重复tick幂等。
+T11 accept_money_guards（226行）：余额不足 ok+FAILED、关闭事件、无转账/合同、不耗另一席行动、另一笔仍PENDING；重复同意已结束。
+    同时保留借款人余额上限拒绝与正常资金守恒检查。
+T12 resume_all_pending（252行）：所有ACTION请求独立续期，保留当前/已行动座位与原输入。
+T13 request_view_privacy（264行）：出借人两条、借款人仅本人一条、第三人无请求/私人金额；事件仍按参与者过滤。
+T14 expired_accept（278行）：迟到同意仅过期目标，不消耗当前席行动。
+T15 late_submit_full_request_window（288行）：行动第50秒提交，仍给完整45秒请求与下一席60秒行动。
+T16 migrate_does_not_reset_other_seat（300行）：旧指针不重置其他当前席/截止。
+T17 migration_is_versioned（317行）：纯迁移也+1版本，拒绝命令不丢迁移，重复tick不再+1。
+T18 resume_legacy_pointer（332行）：恢复旧快照立即选下一席，45秒请求与60秒行动独立，不重做结算。
+T19 resume_legacy_last_seat（348行）：全席已行动仍有请求，恢复后deadline145000/120000（standard/fast）；到时才过期进BETTING。
+   保留迁移/acted/输入不变/无开奖检查；恢复后提前tick与过期后重复tick均幂等。
+T20 last_seat_request_can_be_accepted（376行）：两人局p1结束、p2请求后仍可由p1同意，正确转账建合同后BETTING。
+   从同一等待态另验证REFUSE/CANCEL/余额不足FAILED收口后也进BETTING且不转账。
+T21 last_seat_request_expires（406行）：同场景46000前不变，到46000才EXPIRED、发事件并BETTING。
+T22 tail_requests_use_earliest_deadline（421行）：三人局p2/p3在1000/2000提交，deadline46000→47000，逐笔收口；两次等待tick状态/事件不变。
+
+四、上轮服务端最小适配（本轮未改）
+上轮唯一服务端实现变化：command-queue.ts 的 ACCEPT/REFUSE 类别校验将 pointer 条件收窄到 TAX。
+保留 requestId 信封一致性、缺失ID、PENDING、createdRound、指定出借人、阶段与deadline校验及原错误码；无金额规则复制。
+新增 d6-requests.test.ts 四条：
+40行「D6 ACTION pending=null 的非当前出借人同意，重发只转一次且新命令不能重复同意」。
+62行「D6 ACTION pending=null 仍只允许指定出借人回应」。
+70行「D6 ACTION 非当前出借人拒绝只关闭所选请求并保留当前行动窗口」。
+81行「D6 TAX 自救仍拒绝不属于当前 pendingRequestId 的请求回应」。
+受影响的 d6-requests/commands/session/review06-resume/crash-recovery：5文件68条真实通过；日志10a-server-green.txt。
+
+五、旧断言改动清单（没有删测试或减条数）
+1. engine-round.test.ts:83：上轮已将旧「等待答复整桌阻塞」改为「提交即用掉行动，下一席可行动」。
+   上轮pointer非空→null、行动窗口45s→60s及独立请求45s断言保留。
+   本轮仅将p2 END_ACTION后立刻BETTING+EXPIRED改为ACTION/current=null/PENDING/deadline45000；再advanceSystem到45000才BETTING+EXPIRED。
+   p1再次END原INVALID_ACTION→NOT_YOUR_TURN；独立接受分支原有本金/双方余额/合同断言全保留，并增加当前席/acted/deadline不变。
+2. engine-round.test.ts 原418/429，现435/444：上轮取消测试改名明确「提交时前进」，请求pointer req-1→null；
+   增加提交时current=2/acted=[1]、取消后acted/window不变；迟到同意REQUEST_EXPIRED、不转账断言保持。
+3. engine-round.test.ts 原477，现496：上轮第三人取消后pointer req-1→null；UNAUTHORIZED/PENDING/版本不变均保持。
+4. resume.test.ts 原123–126，现123–129：标准/快速 ACTION pointer pending→null；
+   行动窗口145000/120000→160000/130000，请求deadline仍145000/120000；增加current/acted保持。
+   TAX仍pointer=pending、窗口145000/120000、danger160000/145000；接受成功/资金/合同检查保持。
+5. session.test.ts 原112/219/337，现112/221/341：三个 ACTION 场景从 pendingRequestId 取ID→查p1的PENDING请求。
+   原 refresh_same_seat、ack_lost_retry、command_error_money_strings 的身份/去重/锁注/账目/错误金额断言不变。
+6. review06-resume.test.ts 原21/39–42，现21/40–46：ACTION pointer非空→null；恢复ACTION deadline +45000→+60000。
+   另查本人PENDING请求，仍断言其deadline +45000；用具体ID接受，当前席/acted/资金/合同检查保持；TAX原值保持。
+7. crash-recovery.test.ts:78：旧 currentSeatId===2 && paused===false → 原条件再加 version===stateNow.game.version。
+   因请求提交已到p2，队列中原先就有答复前current2快照；准确版本屏障消除取旧快照，不放宽任何断言。
+   此问题真实出现于crash_before_rename:80（67通过/1失败），修正后含before/after rename全部通过。
+8. 上轮T11按用户修正：删除错误版 INSUFFICIENT_FUNDS+保持PENDING 断言，改为 ok+FAILED，增加逐笔隔离/事件/重试检查。
+   apps/web/tests/guided-integration.test.ts:89 原契约测试完全未改。
+9. 本轮T7：旧全席行动完立即BETTING/两笔EXPIRED→阶段末保留两笔PENDING，45000只过期第一笔、55000第二笔才BETTING；无资金/合同/逐笔事件断言保持。
+10. 本轮T19：旧恢复后deadline=null、下一tick立刻BETTING→续期后的最早请求deadline，提前tick不动、到时才收口。
+    加standard/fast两个模式，不删除原旧指针迁移、已行动记录、资金、输入不变与无重复开奖意图。
+以上是本轮仅有的三处旧断言语义调整；没有删除测试或修改服务端断言。
+
+六、红绿与变异证据
+日志目录：artifacts/test-logs/（gitignore，不进入交付提交）。
+新核心初版14条：10 failed/4 passed；新增T15/T16：2 failed；迁移复核T17/T18：2 failed、T19：1 failed；均为正确业务断言失败。
+新服务器4条：3 failed/1 passed，见10a-server-red.txt；修改guard后通过。
+更正T11：10a-corrected-t11-red.txt确实收到错误INSUFFICIENT_FUNDS；移除分支后13文件184条通过。
+纠正前第一次全量：69文件，862通过/1失败（错误T11与正确旧web契约冲突）；保留10a-full-before-spec-correction.txt。
+首次typecheck发现新增T19的GameState/EngineState类型标注问题，已补强制类型并通过；保留10a-typecheck-red.txt。
+本轮TDD：10a-tail-round-red.txt为1失败；10a-tail-red.txt为5失败/17通过（T7/T20/T21/T22提前BETTING，T19无deadline）。
+实现后10a-tail-core-green.txt：12文件177条通过、exit0。
+本轮变异真实结果（10a-tail-mutations-summary.txt，逐次完整输出10a-tail-MUT*.txt）：
+MUT1→T1红：1 failed/21 skipped，exit1；MUT2→T1/T2红：2 failed/20 skipped，exit1；MUT3→T3红：1 failed/21 skipped，exit1。
+MUT4旧定义仅删enterBetting兜底：22 passed，exit0，是新版正常路径等价变异；没有伪报红灯，兜底源码保留。
+MUT5去掉尾部等待直接enterBetting→T20/T21/T22必红：Codex记录3 failed/19 skipped，Lead无bail独立复跑5 failed（T7/T19/T20/T21/T22），exit1，均是期望ACTION收到BETTING。
+MUT6最早截止min改max→T22必红：Codex记录1 failed/21 skipped，Lead无bail独立复跑2 failed（T7/T22），exit1，期望46000收到47000。
+变异runner exit0，restored=true，SHA256=58969316c6fe2bdd9453d14be8f75a7e043ccbc30ff07329dee6647f22e1e910。
+还原后10a-tail-core-restored.txt为12文件177条通过；交付engine.ts与全量验证时字节一致。
+旧MUT4删除enterBetting兜底在新正常调用路径中属于等价变异；旧版T7红只是上轮历史，不能冒充本轮红灯。
+MUT2必须配套写回ACTION pointer并恢复runSystem阻塞，不能仅插入永远不会触发的if制造等价变异。
+
+七、复核与未做项
+独立agent只读复核本轮引擎增量及测试，确认无下一席时取最早截止、有下一席不阻塞、恢复续期与版本幂等，无阻塞。
+另由独立agent复核四份交接的旧语义残留；本轮前后hash核验服务器五文件、前端契约测试、协议及Lead规格均未变化（10a-tail-scope-final.txt）。
+10B向导/多请求列表/文案未做；本轮没有手机或真人验收。
+有当前席时scheduler仍按其行动deadlineAt唤醒，独立请求过期广播可能延后至下一命令/行动tick；本轮不改该调度策略。
+全席已行动的尾部等待已设置最早请求deadline，恢复同样有deadline，现有scheduler可按它唤醒；不得把此修复回退成deadline=null。
+旧MUT4「删兜底应使T7红」已由 Lead 在规格第五节标记作废（2026-11-08）：新正常路径下删除 enterBetting 兜底为等价变异，实测 22 绿/exit0；兜底保留作防御，不再作为红探针。MUT5/MUT6 本轮要求已实际验证。
+
+八、Qoder 独立复核（2026-11-08）
+Qoder 只读复核 handoff/复核-单元10A.txt 结论“可提交”，无 must-fix；独立复跑 69 文件/866 条（117.07s）、typecheck/build 0，
+MUT1–MUT6 实际结果与交接一致（MUT4 为等价变异 22 绿）。S1 旧 MUT4 映射已由 Lead 在规格标记作废；S2 当前席期间请求过期广播延后交 10B/11；
+S3 incoming 按到达顺序已写入规格；S4 项目状态已更新；S5 借款人收款超 MAX 保留 INVALID_AMOUNT+PENDING，另立单元评估。

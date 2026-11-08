@@ -1,6 +1,6 @@
 RichMan 项目当前状态
 更新日期：2026-11-08
-更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复；07A/07B/07C 由 Trae 实现，Qoder 三轮复核，Lead 验收；08A/08B/08C 由 Trae 实现并完成复核修复；09A 已提交 eeec8ca，第四轮测试补强已提交 bb7c2f2（交接 1ebdbe0，Qoder 复核 PASS）；09B 已提交 6491fe9（文档 39dc1b9），Qoder 复核 FAIL(M1/M2)；第五/六轮修复 bcb9aae、文档 71e099a，Qoder 第六轮验证 code PASS、文档硬伤已改并提交 59c00f0；09C-B 规格已写（handoff/单元09C-B-备份恢复清理脚本.txt，含 Qoder S1–S6 补强）；09C-A 由 Trae 实现、Lead 验收并提交 2bd84cd，Qoder 复核判可提交（66 文件/813 条）；09C-B 已提交 70b18a0（Qoder 两轮复核：M1/M2 修复后 code PASS，文档 M-DOC 已改）；09C-C 已提交 7c8fd7d，Qoder 复核可提交（无 must-fix，S1 文档计数已改）；09C-D 已提交 839c3c6（0.9.0 LICENSE/CHANGELOG/README，typecheck/build 0）；09D 起服时发现 /health 仍硬编码 0.0.0，已改为 0.9.0 并加测试（66 文件/835 条），待提交）
+更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复；07A/07B/07C 由 Trae 实现，Qoder 三轮复核，Lead 验收；08A/08B/08C 由 Trae 实现并完成复核修复；09A 已提交 eeec8ca，第四轮测试补强已提交 bb7c2f2（交接 1ebdbe0，Qoder 复核 PASS）；09B 已提交 6491fe9（文档 39dc1b9），Qoder 复核 FAIL(M1/M2)；第五/六轮修复 bcb9aae、文档 71e099a，Qoder 第六轮验证 code PASS、文档硬伤已改并提交 59c00f0；09C-B 规格已写（handoff/单元09C-B-备份恢复清理脚本.txt，含 Qoder S1–S6 补强）；09C-A 由 Trae 实现、Lead 验收并提交 2bd84cd，Qoder 复核判可提交（66 文件/813 条）；09C-B 已提交 70b18a0（Qoder 两轮复核：M1/M2 修复后 code PASS，文档 M-DOC 已改）；09C-C 已提交 7c8fd7d，Qoder 复核可提交（无 must-fix，S1 文档计数已改）；09C-D 已提交 839c3c6（0.9.0 LICENSE/CHANGELOG/README，typecheck/build 0）；09D 起服时发现 /health 仍硬编码 0.0.0，已改为 0.9.0 并加测试（66 文件/835 条，已提交 d07e13d）；单元 10A D6 多请求引擎已实现并提交 a8016c2，Qoder 只读复核可提交（无 must-fix，S1–S5 已处置），69 文件/866 条）
 
 【版本】
 方案版本：V1.3.3（V1.3.2 + 引导式界面 + 连接实测）
@@ -9,8 +9,8 @@ RichMan 项目当前状态
 游戏版本：开发版 0.9.0（未发布，目标 V1.0；1.0.0 门槛：09D 真机矩阵 + 单元 10 D6 + 发布包）
 
 【进度与范围】
-已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（已提交 eeec8ca，第四轮补强 bb7c2f2，交接 1ebdbe0）、09B（首版 6491fe9/39dc1b9；第五、六轮复核修复已提交 bcb9aae，文档 71e099a）、09C-A（实现 2bd84cd，规格 c522bb4，Qoder 复核可提交）、09C-B（实现 70b18a0，Qoder 复核 M1/M2 修复后 code PASS）、09C-C（实现 7c8fd7d，Qoder 复核可提交）、09C-D（发布文档 0.9.0，839c3c6；/health 版本号修复待提交）。
-当前子任务：09D 真机发布验收矩阵（用户按清单操作、Lead 记录；清单已写 handoff/单元09D-真机发布矩阵.txt，D01–D20，2885 字符，待用户执行）；08C 背景音乐已换成三首外部曲目轮播（已提交 e23191c/a1aa986）；单元 10A D6 多请求引擎规格已写（handoff/单元10A-D6多请求引擎.txt，语义 A），等 Codex 实现。09C-D 已完成：仓库进入开发版 0.9.0，MIT LICENSE、CHANGELOG、README 总览与五处 package.json 版本号已提交 839c3c6。
+已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（已提交 eeec8ca，第四轮补强 bb7c2f2，交接 1ebdbe0）、09B（首版 6491fe9/39dc1b9；第五、六轮复核修复已提交 bcb9aae，文档 71e099a）、09C-A（实现 2bd84cd，规格 c522bb4，Qoder 复核可提交）、09C-B（实现 70b18a0，Qoder 复核 M1/M2 修复后 code PASS）、09C-C（实现 7c8fd7d，Qoder 复核可提交）、09C-D（发布文档 0.9.0，839c3c6；/health 版本号修复 d07e13d）、10A（D6 多请求引擎/阶段末等待，实现 a8016c2，Qoder 复核可提交）。
+当前子任务：10B 多请求界面与文案（规格待写）；09D 真机发布验收矩阵（用户按清单操作、Lead 记录；清单已写 handoff/单元09D-真机发布矩阵.txt，D01–D20，2885 字符，待用户执行）；08C 背景音乐已换成三首外部曲目轮播（已提交 e23191c/a1aa986）；单元 10A D6 多请求引擎已实现并提交 a8016c2，语义 A（提交即消耗行动、牌桌继续、阶段末按最早请求截止逐笔收口），Qoder 复核无 must-fix。09C-D 已完成：仓库进入开发版 0.9.0，MIT LICENSE、CHANGELOG、README 总览与五处 package.json 版本号已提交 839c3c6。
 09C-B 完成（70b18a0）：backup.ps1/restore.ps1/cleanup.ps1 + README 备份节 + 09C-A S1/S2 补强；
 Qoder 首轮 M1（父路径 junction 写穿）/M2（显式已存在空 Out）已修复，复验 code PASS，M-DOC（pwsh7 未复现声明）由 Lead 改文档。
 09C 拆分：A 核心库与 CLI（已提交 2bd84cd）→ B PowerShell 包装与备份节（已提交 70b18a0）→
@@ -54,8 +54,8 @@ start-tunnel 打印 https://catalogs-organize-listings-garage.trycloudflare.com�
      终局名单与本人破产说明；只改 apps/web，BET_SETTLED 只取本人条目。
 06 起会话与命令去重已落盘（apps/server/data，RICHMAN_DATA_DIR 可覆盖），服务重启后房间恢复为暂停态，房主 resume_game 继续。
 
-【测试与构建（2026-11-08 BGM 替换与 Range 支持后实测）】
-pnpm -s test    67 文件 / 840 条（835 + 音频/静态新增 5 条：audio 31、static 2），TEST_EXIT=0
+【测试与构建（2026-11-08 单元10A 提交后实测）】
+pnpm -s test    69 文件 / 866 条（10A 新增 26：engine-requests 22、d6-requests 4），TEST_EXIT=0
 pnpm typecheck  TSC_EXIT=0
 pnpm -s build   BUILD_EXIT=0（index--JyM_5JG.css 18.07kB、index-CoBDshf7.js 426.08kB，
                 141 modules；dist/audio 为 3 mp3 + CREDITS.txt + 5 wav，无 bgm-loop.wav）
@@ -342,7 +342,7 @@ https://diego-rotary-inclusive-hughes.trycloudflare.com（2026-11-06 21:5x 重�
   以上已提交 d07e13d（http.ts + security.test.ts）。
 - 09D 清单：handoff/单元09D-真机发布矩阵.txt（D01–D20，P0/P1，含第二台电脑、10 人、Android/iPhone、蜂窝隧道、断网 30s、锁屏 1min、
   服务重启+继续游戏、恢复码换 token 旧连接拒绝、销毁房间、多局资源释放、备份恢复；含记录表/失败模板/通过判据/D6 关系）。
-- 下一单元：09D 真机矩阵（用户执行、Lead 记录）→ 单元 10 D6 语义 A（发布阻断，Codex）→ 单元 11 稳定性演练 → 单元 12 发布包。
+- 下一单元：10A D6 已提交 a8016c2（Qoder 复核可提交）→ 10B 多请求界面与文案（Trae）→ 09D 真机矩阵（用户执行、Lead 记录）→ 单元 11 稳定性演练 → 单元 12 发布包。
 【08C 背景音乐替换（2026-11-08）】
 - 用户 m04863：「A，另外你写的音乐太难听了，你还是去网上找三个轻松有趣的音乐轮流循环播放吧。我们不做商业化盈利，不用担心侵权问题」。
   A 同时确认单元 10 D6 采用语义 A（提交请求即消耗行动、牌桌继续、出借人可同时收多个、阶段末统一收口）。
@@ -353,3 +353,16 @@ https://diego-rotary-inclusive-hughes.trycloudflare.com（2026-11-06 21:5x 重�
 - http.ts 增加 .mp3/.wav/.txt MIME 与单区间 Range（206/416、accept-ranges、content-range），新增 static.test.ts 2 条。
 - 验证：67 文件/840 条、TSC/BUILD 0；音频 31 条、静态 2 条；构建产物 426.08kB。
 - 待用户真机听感（尤其 iPhone 切歌后能否继续播放）。
+
+【10A D6 多请求交付与复核（2026-11-08）】
+- 实现 a8016c2（10 文件 +679/−60）：engine.ts 语义 A + 阶段末等待；command-queue 仅 TAX 要求 pendingRequestId；
+  新增 engine-requests.test.ts 22 条、d6-requests.test.ts 4 条；旧测试仅授权位置适配。
+- 语义：ACTION 提交请求即 finishSeatAction；同一借款人最多 1 PENDING、出借人可多个 incoming；
+  同意/拒绝/取消不计出借人行动；全席已行动仍有 PENDING 时保持 ACTION/current=null/deadline=最早请求截止，
+  逐笔同意/拒绝/取消/过期，全部收口才 BETTING；最后一位请求有完整 45/20 秒窗口。
+- 旧 ACTION pendingRequestId 快照迁移：补 acted、清指针、version+1、重复 tick 幂等；resume 请求 45/20 秒、当前席 60/30 秒。
+- T11：出借人余额不足的同意 ok:true + 请求 FAILED + LOAN_REQUEST_CLOSED，不转账/不建合同；前端契约测试未改。
+- 验证：69 文件/866 条、typecheck 0、build 0（141 modules，index--JyM_5JG.css 18.07kB、index-CoBDshf7.js 426.08kB，318ms）。
+- Qoder 复核 handoff/复核-单元10A.txt 判可提交、无 must-fix；S1 MUT4 作废（等价变异 22 绿）、S2 scheduler 边界交 10B/11、
+  S3 incoming 按到达顺序已写入规格、S4 状态已更新、S5 借款人收款超 MAX 归为金额上限校验（保留 INVALID_AMOUNT + PENDING，另立单元再改）。
+- 已知边界：有当前行动席时，请求过期广播可能延后到该席 tick；不会转账/建合同，尾部等待仍按最早 PENDING deadline。10B 必须按 request.deadlineMs 显示、过期后不得显示可同意。

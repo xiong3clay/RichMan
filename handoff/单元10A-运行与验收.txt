@@ -1,0 +1,91 @@
+单元10A 运行与验收
+日期：2026-11-08；依据d91a9da的T11纠正及Lead本轮修订的阶段末等待、T7/T19/T20–T22规则。
+
+一、环境与范围
+Windows，Windows PowerShell 5.1（本机未安装 pwsh），Node v24.18.0，本机pnpm 11.7.0，Vitest 5.0.5，Vite 8.3.5。
+工作区 D:\Lianjunjie\biancheng\RichMan。未安装依赖、实现提交 a8016c2、不启动8000、不使用apps/server/data。
+真实WS/崩溃测试使用既有临时目录与随机端口。本轮仅改引擎与相关核心测试，不改服务端/前端；保留上轮未提交改动。
+未进行手机/真人操作；本轮主验收为纯引擎及全量自动化。
+corepack曾因缓存缺失/registry ENOTFOUND未能启动，改用已安装pnpm；这不计作业务红灯。
+
+二、真实执行命令
+1. pnpm -s exec vitest run packages/game-core
+   Test Files 12 passed (12)，Tests 177 passed (177)，Duration 1.46s，EXIT_CODE=0。
+   本轮变异还原后于19:40:05执行；日志 artifacts/test-logs/10a-tail-core-restored.txt。
+2. pnpm -s vitest run apps/server/tests/d6-requests.test.ts apps/server/tests/commands.test.ts apps/server/tests/session.test.ts apps/server/tests/review06-resume.test.ts apps/server/tests/crash-recovery.test.ts
+   Test Files 5 passed (5)，Tests 68 passed (68)，Duration 3.49s，EXIT_CODE=0。
+   日志 artifacts/test-logs/10a-server-green.txt（上轮历史定向结果；本轮未重跑此定向命令，所有server测试由全量覆盖）。
+3. pnpm -s exec vitest run packages/game-core apps/web/tests/guided-integration.test.ts --reporter=dot
+   Test Files 13 passed (13)，Tests 184 passed (184)，Duration 5.35s，exit0。
+   日志 artifacts/test-logs/10a-corrected-t11-green.txt（上轮历史纠正T11结果）；本轮web仍原样，由全量覆盖。
+4. pnpm -s test
+   Test Files 69 passed (69)，Tests 866 passed (866)，Start at 19:35:56，Duration 142.04s，EXIT_CODE=0。
+   原863条保留，本轮增加3条（10A累计22核心+4服务器）；日志 artifacts/test-logs/10a-tail-full.txt。
+5. pnpm typecheck
+   $ tsc --noEmit -p tsconfig.json
+   EXIT_CODE=0；日志 artifacts/test-logs/10a-tail-typecheck.txt。
+6. pnpm -s build
+   vite v8.3.5 building client environment for production...
+   ✓ 141 modules transformed.
+   apps/web/dist/index.html 0.49 kB (gzip 0.31 kB)
+   apps/web/dist/assets/index--JyM_5JG.css 18.07 kB (gzip 4.10 kB)
+   apps/web/dist/assets/index-CoBDshf7.js 426.08 kB (gzip 125.30 kB)
+   ✓ built in 438ms
+   EXIT_CODE=0；日志 artifacts/test-logs/10a-tail-build.txt。
+pnpm命令的真实标准输出/错误输出均通过Tee-Object写入日志；不是echo成功。
+
+三、变异探针复现
+runner：artifacts/test-logs/10a-tail-mutations-runner.txt（Node脚本，以Get-Content -Raw -Encoding UTF8 ... | node -运行）。
+依次变异engine.ts，再直接执行真实vitest；有效行为变异检查exit1且AssertionError，原MUT4等价变异如实记录exit0；finally逐字节还原并校验SHA256。
+MUT1 删除ACTION提交后的finishSeatAction：T1 two_borrowers_one_lender必须红。
+MUT2 配套将ACTION提交后的pendingRequestId写回，并在ACTION runSystem按指针break：T1/T2必须红。
+MUT3 在closeRequestWindow非rescue分支调用finishSeatAction：T3 current_lender_accept必须红。
+MUT4旧定义去除enterBetting兜底：新规则保证调用时已无PENDING，属等价变异，实跑22 passed，exit0；不能沿用上轮T7红结论。
+MUT5 去掉无下一席时的PENDING等待guard：T20/T21/T22必红；Codex记录3 failed/19 skipped，Lead无bail复跑5 failed（T7/T19/T20/T21/T22），exit1。
+MUT6 最早截止改取最晚：T22必红；Codex记录1 failed/21 skipped，Lead无bail复跑2 failed（T7/T22），exit1（收到47000，期望46000）。
+MUT1 1 failed/21 skipped；MUT2 2 failed/20 skipped；MUT3 1 failed/21 skipped，三者均exit1。
+runner成功exit0；restored=true，最终SHA256=58969316c6fe2bdd9453d14be8f75a7e043ccbc30ff07329dee6647f22e1e910。
+还原后重跑第二节第1条，12文件177条全绿、exit0。
+逐次输出10a-tail-MUT1/2/3/5/6.txt与10a-tail-MUT4-equivalent.txt；汇总10a-tail-mutations-summary.txt。
+变异还原后重新运行全core，不能把变异时的失败算成最终失败或留下变异源码。
+
+四、关键场景与测试入口
+engine-requests.test.ts T1–T22对应规格和补充边界；本轮改T7/T19，新增T20/T21/T22。
+完整名称、文件行号与验证内容见同目录单元10A-成果报告.txt第三节。
+两个借款人依次提交→current为第三席、出借人incoming两条；非当前出借人接受/拒绝→current/deadline不变。
+借款人取消→行动仍已用掉；有下一席仍立即选座；全席END且仍有请求→ACTION/current=null，先45000再55000逐笔到期后BETTING。
+两人局p1 END→p2最后请求→46000前可被p1同意；无人答复到46000才EXPIRED进入BETTING。
+三人局p2在1000请求、p3在2000请求→截止46000；第一笔过期后下一截止47000，再全部收口。
+旧ACTION+pointer快照→借款人已acted、pointer清空；恢复→请求45/20秒、当前席60/30秒。
+全席已acted且仍PENDING的恢复deadline是145000/120000，提前tick保持，到期才BETTING；迁移不会漏掉version。
+金额不足→ok:true + FAILED关闭事件，无账目变化，其他请求不变；不是INSUFFICIENT_FUNDS。
+
+五、上轮服务端最小适配（本轮未改）
+command-queue.ts:154只将pointer条件限制到TAX；原请求归属/轮次/期限/错误码保持。
+d6-requests.test.ts四条分别验证非回合同意与去重、越权拒绝、非回合拒绝、TAX错pointer保护。
+不在服务器层重算余额，不修改协议、不改scheduler。
+
+六、旧断言改动清单
+本轮仅三处：round原END后立即BETTING→先ACTION等待到45000；T7全席已行动仍等两笔请求逐笔到期；T19恢复尾部deadline改最早续期截止。
+原余额/合同/越权/acted/事件/输入不变/幂等断言保留且加强；无请求时立即BETTING的旧测试未改。
+以下为上轮历史适配，本轮保持原样：
+engine-round三处：阻塞改为提交后下一席、取消不退行动、第三人取消后ACTION pointer=null。
+resume标准/快速ACTION：请求45/20秒与行动60/30秒分开；TAX原值保留。
+session三处：从具体PENDING请求取ID。
+review06-resume ACTION：空pointer、独立60秒行动窗口，请求45秒并仍能实际转账。
+crash-recovery:78：增加已落盘version匹配以免取到旧快照。
+逐条原断言→新断言→原因见成果报告第五节；没有删除场景，web测试完全未改。
+
+七、验收中遇到的真实失败
+先写新测试：核心10红/4绿，额外时限2红，迁移复核2红+1红；服务器3红/1绿。
+首次服务器整组曾受sandbox loopback EACCES影响，权限环境复跑后只剩旧快照谓词1红；加强谓词后68绿。
+首次全量862绿/1红是旧错误T11引起的web契约冲突；用户修正规格后按TDD移除错误分支，保留日志。
+T11纠正必须写入注意事项，避免以后把FAILED请求状态误解为命令错误。
+本轮新增红灯：10a-tail-round-red.txt为1 failed；10a-tail-red.txt为5 failed/17 passed，均为本轮两项根因的真实断言失败。
+本轮实现后core12文件177条绿；全量866条绿；未发生需要修改服务端断言的失败。
+
+八、Lead 提交前复跑与 Qoder 复核
+Lead 2026-11-08 20:10 复跑：69 文件/866 条、126.28s、exit0；typecheck exit0；build exit0（141 modules、318ms，
+index--JyM_5JG.css 18.07kB、index-CoBDshf7.js 426.08kB）。
+Qoder 独立复跑：69 文件/866 条、117.07s、exit0；typecheck/build exit0；MUT1–MUT6 与交接一致（MUT4 为等价变异 22 绿）。
+复核报告 handoff/复核-单元10A.txt。实现提交 a8016c2；本交接随 docs 提交。

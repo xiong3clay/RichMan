@@ -1,0 +1,209 @@
+RichMan 单元 10A D6 多请求（语义 A）独立复核
+================================================
+复核员：Qoder（只读复核；未改实现/测试/协议/交接，未 commit）
+日期：2026-11-08
+工作区：D:\Lianjunjie\biancheng\RichMan
+代码基线：d91a9da（10A 实现未提交；handoff/单元10A-D6多请求引擎.txt 亦为工作区修订）
+复核范围：
+- packages/game-core/src/engine.ts（工作区改动）
+- packages/game-core/tests/engine-requests.test.ts（新增，22 条）
+- packages/game-core/tests/engine-round.test.ts、resume.test.ts（旧测试适配）
+- apps/server/src/rooms/command-queue.ts（上轮授权的最小服务端适配）
+- apps/server/tests/d6-requests.test.ts（新增，4 条）
+- apps/server/tests/session.test.ts、review06-resume.test.ts、crash-recovery.test.ts（旧测试适配）
+- handoff/单元10A-{成果报告,运行与验收,下一阶段交接,注意事项}.txt
+
+结论：可提交。
+  must-fix：无。
+  should-fix：4 项（MUT4 规格映射过期、生产调度边界 b、视图排序严格性、项目状态文件未更新）；
+  待确认 1 项（借款人余额上限是否属于 R05 的“余额等业务条件”）；
+  测试补强建议 2 项（T3 借款/还款分支、若干服务端/WEB 边界）。
+
+一、独立执行结果（自己跑，不引用交接数字）
+1) corepack pnpm -s test
+   Test Files 69 passed (69)
+   Tests 866 passed (866)
+   Duration 117.07s，exit 0。
+   （交接记录 142.04s 属机器环境差异；条数/结果一致。）
+2) corepack pnpm -s typecheck && corepack pnpm -s build
+   typecheck 无输出、exit 0；build：✓ 141 modules transformed，built in 308ms，EXIT=0。
+3) corepack pnpm -s exec vitest run packages/game-core
+   12 files / 177 tests passed，exit 0。
+4) corepack pnpm -s exec vitest run packages/game-core/tests/engine-requests.test.ts apps/server/tests/d6-requests.test.ts
+   2 files / 26 tests passed，exit 0。
+5) 基线算术：当前 866 条 − 新增 22 条核心 − 新增 4 条服务端 = 840 条旧测试，与规格基线一致；
+   未发现旧测试被删除或条数减少。
+
+二、must-fix（无）
+未发现会导致资金错误、永久卡桌、隐私泄露或验收项不成立的 must-fix。
+以下 should-fix 均为文档/已知边界/覆盖率问题，不阻塞本单元代码提交。
+
+三、should-fix
+
+S1. 规格 MUT4 的定义已与新语义不相容（文档/验收映射，不是代码缺陷）
+   位置：handoff/单元10A-D6多请求引擎.txt:79；实现兜底在 engine.ts:559-567。
+   实际：删除 enterBetting 的逐笔 EXPIRED 兜底后，engine-requests.test.ts 为 22 passed / exit 0（我独立复跑），
+   与交接“MUT4 旧定义属等价变异、22 绿”一致；规格仍写“MUT4 阶段末不清 PENDING → T7 应红”。
+   原因：新正常路径在进入 enterBetting 前已由 runSystem 的逐笔过期/T20-T22 等待逻辑收口，
+   enterBetting 兜底不再被 PENDING 状态触达；T7 已不可能因删除兜底而红。
+   建议：Lead 更新 MUT4 的验收映射（例如把“阶段末仍有 PENDING 直接 enterBetting”定义为 MUT5 的语义），
+   或明确标注旧 MUT4 作废；不要为了迎合旧 MUT4 恢复“进入 BETTING 时才有 PENDING”的行为。
+   复现命令：删除 engine.ts:561-566 后
+   corepack pnpm -s exec vitest run packages/game-core/tests/engine-requests.test.ts
+   结果：22 passed；还原后 SHA256 见第六节。
+
+S2. 生产调度边界 b：有当前行动席时，请求过期事件可能推迟到该席行动 tick
+   位置：engine.ts:407-425（有 currentSeatId 时 deadlineAt 取行动窗口）；
+   apps/server/src/rooms/scheduler.ts:50,69,118-122（只按 state.deadlineAt 唤醒）；
+   apps/server/src/ws.ts:344（恢复后 schedule）。
+   现象：当前席行动窗口为 60/30 秒，请求时限为 45/20 秒。若当前席一直不操作，
+   LOAN_REQUEST_EXPIRED 可能晚 15/10 秒才产生；在请求 deadline 之后、下个 tick 之前，
+   请求在快照里仍显示 PENDING（但接受/拒绝已被 command-queue.ts:160 以 REQUEST_EXPIRED 拒绝，
+   engine.ts:1051-1055 也会二次校验并置 EXPIRED）。
+   判断：不构成 10A 发布阻塞。理由：
+   - 不会在截止后转账/建合同（网络层与引擎双重校验）；
+   - 阶段结束/T20-T22 尾部等待均把 deadlineAt 设为最早 PENDING deadline（engine.ts:407-421），
+     不会把 PENDING 带进 BETTING；
+   - 本单元范围明确不改 apps/server 调度；四份交接均已披露。
+   建议：10B/11 评估 scheduler 同时考虑“最早 PENDING 请求 deadline”和当前席行动 deadline 的较早者，
+   但不得缩短当前席完整行动窗口；在此之前 UI 应按 request.deadlineMs 显示倒计时并在 0 后提示“已截止待系统收口”，
+   不能显示“可继续同意”。
+   未写服务端计时器级自动化测试（见“未覆盖”）。
+
+S3. 视图排序未按规格字面显式排序（低风险）
+   位置：packages/game-core/src/views.ts:189-191（incomingRequests 直接 filter 数组）；
+   engine.ts:1021（append）、engine.ts:1376-1377（replaceRequest 用 map 保序）。
+   实际：正常路径下数组顺序 = 创建顺序，稳定且 T13 通过；但没有按 createdAtMs 升序、
+   requestId 次序的显式排序/平局规则。若两个请求 createdAtMs 相同且 requestId 非字典序，
+   顺序为命令到达顺序而非 requestId 次序。
+   建议：若 10B 依赖规格的 tie-break，在 views 中加稳定排序（createdAtMs 升序，再 requestId）；
+   若接受“到达顺序即稳定顺序”，请 Lead 在规格中明确。此项非阻塞。
+
+S4. handoff/项目当前状态.txt 未更新（流程）
+   位置：handoff/项目当前状态.txt:13，仍写“单元 10A D6 多请求引擎规格已写……等 Codex 实现”。
+   AGENTS.md 第 5 节要求每单元更新项目当前状态；本次四份交接已写，但状态文件仍是开工前内容。
+   建议：提交 10A 前由 Lead 更新为“10A 实现完成、复核可提交、866 条/未 commit”等最新摘要。
+   不属于源码缺陷。
+
+S5.（待确认，不阻塞）借款人余额上限溢出仍返回 INVALID_AMOUNT + 请求保持 PENDING
+   位置：packages/game-core/src/private-loans.ts:277-279；T11 的 capped 分支 engine-requests.test.ts:241-244。
+   现状：出借人余额不足 → FAILED（符合 d91a9da 的 T11）；但借款人收款后超过 MAX_MONEY_CENTS → 抛 INVALID_AMOUNT，
+   请求保持 PENDING、不转账、不建合同。
+   R05 原文“已过格式校验的同意若因余额等业务条件失败，请求设 FAILED”若把“借款人余额上限”也算“余额等业务条件”，
+   则此处与规格字面不一致；若把上限视为格式/金额合法性校验，则现状成立。
+   说明：该行为是既有实现，不是 10A 新引入；apps/web/tests/guided-integration.test.ts:89 只覆盖出借人余额不足。
+   建议：请 Lead 明确归类；若需要改成 FAILED，应另立单元并同步前端/协议契约，不能夹带进 10A。
+
+四、两个指定边界的判断（用户点名）
+A) resumeFromPause 时 ACTION + currentSeatId=null + 无 PENDING → deadlineAt=null，是否会造成无法唤醒的等待？
+   判断：不构成发布阻塞，也不是可达的引擎状态。
+   - 引擎所有正常转换中，全席已 acted 且无 PENDING 会在同一次 applyCommand/advanceSystem 内进入 BETTING
+     （engine.ts:407-421）；旧 ACTION 指针迁移后若仍有 PENDING，resume 会续期并把 deadlineAt 设为最早请求截止
+     （engine.ts:234-239，T19）；只有旧指针指向不存在/已关闭请求的损坏快照才可能留下这种组合。
+   - 即使加载到这种状态，scheduler 对 deadlineAt=null 不是“永不唤醒”：schedule 会以 0ms 触发
+     （scheduler.ts:50,69,119），advanceDue 在 deadlineMs=null 时仍调用 advanceSystem（scheduler.ts:85-97），
+     引擎会走 enterBetting。因此不会永久卡死。
+   - 建议（非必须）：在 resumeFromPause 末尾加防御性检查：ACTION && currentSeatId===null && 无 PENDING 时直接
+     enterBetting，或在文档中保留“这种状态只能由损坏快照产生”的说明。当前交接已写明“只有全席已acted且无PENDING
+     时才可保持 deadline=null 让下一系统 tick 进BETTING”，方向正确。
+
+B) 有当前行动席时，独立请求过期可能被推迟到该席行动 tick，是否发布阻塞？
+   判断：不阻塞发布（理由见 S2），但必须作为 10B/11 的跟踪项，不能让 UI 把过期请求继续显示为可同意。
+   引擎在真实 tick 到来时会逐笔置 EXPIRED 并发事件（engine.ts:399-405）；接受/拒绝在截止后均被拒绝，
+   不会产生资金或合同。
+
+五、已验证项（逐项对照规格）
+1. ACTION 提交请求立即消耗行动：
+   engine.ts:1003-1004（ACTION 请求截止独立取 now+requestSec，不再 min 当前行动窗口）；
+   engine.ts:1021-1025（append/TAX 才写 pendingRequestId）；engine.ts:1033（ACTION finishSeatAction）。
+   T1（两人依次提交后 currentSeat 前进、acted [1,2]、两请求 PENDING、incoming=2）、T15（第 50 秒提交仍得完整 45 秒）。
+2. 同一借款人最多一个 PENDING：
+   private-loans.ts:204-210；engine.ts:999-1001（requestId 重复也拒绝）。
+   T8 验证 DUPLICATE_PENDING_REQUEST 内部原因被拒且不消耗当前行动（公开码沿用 INVALID_ACTION，交接已说明）。
+3. pendingRequestId 仅 TAX：
+   engine.ts:69 注释、engine.ts:1022-1024（仅 TAX 写）、engine.ts:1324-1330（ACTION assertTurn 不再看指针）；
+   command-queue.ts:153-160 仅 TAX 要求 pointer 匹配。
+   T9（TAX 自救指针/窗口不变）、d6 第 4 条（TAX 错 pointer 仍 REQUEST_EXPIRED）。
+4. 同意/拒绝不消耗出借人行动、不改 currentSeat/deadline：
+   engine.ts:1036-1086、1088-1104；closeRequestWindow 仅清指针（engine.ts:1110-1115）。
+   T2（非当前出借人同意：转账一次、current/acted/deadline 不变、重复同意不转账）、
+   T3（当前出借人同意后仍可 END_ACTION，之后才前进）、T4（拒绝只关闭一条，另一条仍在）。
+   MUT3（在 closeRequestWindow 的 ACTION 分支调用 finishSeatAction）使 T2/T3/T4/T11 红，证明测试覆盖该行为。
+5. 取消不退行动、不结束别人行动：
+   engine.ts:1121-1161（ACTION 不要求 pendingRequestId，不 finishSeatAction）。
+   T5（取消后 acted 仍 [1]、不能重新行动、牌桌继续）、T20（最后一位取消后进入 BETTING 且不转账）。
+6. 单笔过期只影响该请求：
+   engine.ts:399-405（逐笔扫描 PENDING）；T6（45000 只过期 req-a，current/deadline/另一请求不变）、
+   T14（迟到的同意只把目标置 EXPIRED，不消耗当前席）。
+7. 阶段末等待与逐笔收口：
+   engine.ts:407-421（nextSeat 为空且仍有 PENDING 时 setDeadline(最早)，break；全部收口后才 enterBetting）；
+   engine.ts:559-567（兜底）。
+   T7（45000→55000 逐笔，最后才 BETTING）、T20（两人局最后一位请求可被同意/拒绝/取消/FAILED 后进入 BETTING）、
+   T21（46000 前不变，46000 才 EXPIRED+BETTING）、T22（3 人 46000→47000，只过期到期的那笔）。
+   MUT5（删尾部等待 guard）使 T7/T19/T20/T21/T22 红；MUT6（最早改最晚）使 T7/T22 红，均独立复现。
+8. 旧 ACTION pendingRequestId 迁移：
+   engine.ts:262-296（补 borrower acted、必要时清 current/deadline、清 pointer）；
+   engine.ts:158/197（迁移本身计入 changed → version+1）。
+   T10（迁移+下一位继续，重复 tick 幂等）、T16（不重置其他 currentSeat/deadline）、
+   T17（纯迁移也 +1；失败命令不丢迁移；重复 tick 不再 +1）、T18（resume 旧指针立即选下一席）。
+9. resume 续期：
+   engine.ts:217-252：当前席 actionSec（60/30），所有 PENDING 请求 requestSec（45/20），
+   currentSeatId=null 且仍有 PENDING 时 deadlineAt=最早续期截止；不重置 acted。
+   T12（标准模式全部续期+当前席/acted 保持）、T18、T19（standard 145000 / fast 120000，提前 tick 不动，到时收口）；
+   resume.test.ts 的 standard/fast 两种 timer 模式均覆盖。
+10. T11 出借人余额不足：
+    private-loans.ts:266-273 返回 FAILED；engine.ts:1069-1085 用原路径 replace+LOAN_REQUEST_CLOSED，
+    不转账、不建合同；T11 验 ok:true/FAILED/事件/无负数/另一条 PENDING 不变；T20 poor 分支验证最后席位。
+    apps/web/tests/guided-integration.test.ts:89 未被修改，全量测试通过（该文件行内容为“ACCEPT余额不足是真实ok+FAILED…”）。
+11. 视图与隐私：
+    views.ts:186-191 未改；pendingRequest 仅本人 PENDING、incomingRequests 仅本人作为出借人的 PENDING 数组；
+    T13 验出借人两条、借款人仅本人、第三人无请求 ID/无金额；LOAN_REQUESTED 仅参与者可见。
+12. 服务端 command-queue 最小适配：
+    diff 仅 command-queue.ts:154-155 将 pointer 条件收窄到 TAX；保留 request 存在/PENDING/createdRound/
+    指定出借人/允许阶段/未到期/requestId 信封一致性与原错误码。
+    d6-requests.test.ts 4 条：ACTION 非当前出借人同意且重复只转一次、新命令不能再接受、越权 ACCEPT 被拒、
+    非当前出借人 REFUSE 只关所选并保留窗口、TAX 错 pointer 仍拒绝；26 条定向全绿。
+13. 旧测试改动范围：
+    只改授权位置：engine-round.test.ts（阻塞语义/取消 pointer）、resume.test.ts（ACTION 窗口）、
+    session.test.ts（三处请求 ID 来源）、review06-resume.test.ts（ACTION 窗口/请求定位）、
+    crash-recovery.test.ts（增加落盘 version 屏障）。
+    逐条比对未删测试/未减弱资金、身份、去重、锁注、错误金额断言；当前 866 条 ≥ 840，新增测试全部保留。
+14. 范围/不变式：
+    git diff 未触及 packages/shared、apps/web、views.ts、private-loans.ts、SNAPSHOT_SCHEMA_VERSION、依赖、脚本；
+    T11 金额守恒、T2/T11 转账额、T20 拒绝/取消/FAILED 不转账均有断言；阶段末无 PENDING 由 T7/T19/T20/T21/T22 覆盖。
+
+六、变异探针结果（全部在仓库外备份、跑后立即逐字节还原）
+最终还原 SHA256：58969316c6fe2bdd9453d14be8f75a7e043ccbc30ff07329dee6647f22e1e910
+（与交接声明一致；最后一次还原后 core 12 文件/177 条全绿，git diff 无额外变化。）
+- MUT1 删除 engine.ts:1033 的 ACTION finishSeatAction
+  结果：8 failed / 14 passed；失败含 T1/T2/T3/T5/T15/T20/T21/T22；T1 必红。
+- MUT2 写回 ACTION pendingRequestId 并在 runSystem ACTION 按指针 break
+  结果：8 failed / 14 passed；失败含 T1/T2/T3/T5/T15/T20/T21/T22；T1/T2 必红。
+- MUT3 在 closeRequestWindow 的 ACTION 分支调用 finishSeatAction
+  结果：4 failed / 18 passed；失败含 T2/T3/T4/T11；T3 必红。
+- MUT4 删除 enterBetting 的逐笔 EXPIRED 兜底
+  结果：22 passed / exit 0（等价变异，见 S1；规格旧的“应使 T7 红”已不适用）。
+- MUT5 删除“currentSeatId=null 且仍有 PENDING 时等待最早 deadline”的 guard
+  结果：5 failed / 17 passed；失败：T7/T19/T20/T21/T22；T20/T21/T22 必红。
+- MUT6 earliestPendingRequestDeadline 的 Math.min 改 Math.max
+  结果：2 failed / 20 passed；失败：T7/T22；T22 收到 47000 而期望 46000。
+
+七、未覆盖/未验证项
+- 未做 10B UI/语言文案/多请求列表/倒计时联动；本单元按约定只到引擎/视图边界。
+- 未做手机/真人操作；未启动 8000；未访问 apps/server/data。
+- 未写生产 scheduler 级自动化测试来复现边界 b；S2 的判断来自 scheduler.ts/engine.ts 代码路径与定向测试。
+- 未在真实磁盘快照上走 manager.load + resume 的旧指针迁移（T10/T18 为引擎级；crash-recovery/review06 覆盖服务器恢复但非旧 ACTION 指针夹具）。
+- 未覆盖 createdAtMs 相同/请求 ID 非字典序时的 incomingRequests 顺序；未覆盖第三人对 LOAN_REQUEST_CLOSED 的可见性（该事件不含金额）。
+- d6-requests 未覆盖非出借人 REFUSE 的越权分支、ACTION 取消的服务端路径、过期同意走网络层（仅引擎 T14）。
+- T3 未实际执行“同意后继续借款/还款”，只验 END_ACTION；代码路径已放开（assertTurn 只校验当前席），但建议补 T3b。
+- 未做长跑/随机多请求压力测试；未做跨轮残留 PENDING 的专门测试（正常路径由 enterBetting 兜底，T7/T19/T20-T22 已覆盖本轮可达路径）。
+
+八、复核结论与提交建议
+可提交。代码满足 d91a9da 的语义 A、T11 修正及 T20-T22 阶段末等待要求；
+全量 866 条、core 177 条、typecheck/build 均通过；MUT1–MUT6 的实际结果与交接披露一致（MUT4 为等价变异）。
+提交前建议：
+1) 更新 handoff/项目当前状态.txt（S4）；
+2) 由 Lead 修订 MUT4 的旧验收映射（S1）；
+3) 把边界 b 的 scheduler 处理排入 10B/11，并在 10B 明确“请求 deadline 已过但状态仍 PENDING”的文案（S2）；
+4) 视需要补 T3 借款/还款分支与视图排序/服务端取消测试（S3、测试补强）。
+本复核未改实现/测试/协议/交接，未 commit。

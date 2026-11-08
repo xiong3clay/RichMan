@@ -1,0 +1,71 @@
+单元10A 下一阶段交接
+日期：2026-11-08；采用D6语义A、d91a9da修正T11及本轮Lead的阶段末等待修订。
+
+一、入口与数据流
+packages/game-core/src/engine.ts仍是唯一规则入口：applyCommand/advanceSystem/resumeFromPause；不访问socket、文件或系统时钟。
+ACTION发请求：createLoanRequest验证→append→LOAN_REQUESTED→finishSeatAction→runSystem选下一席。
+ACTION答复：按requestId处理具体请求；不要求当前座位，不结束任何当前行动；借款人在提交时已经acted。
+取消不退行动；每个系统tick独立过期到时请求。
+ACTION/current=null先nextSeat：有下一席照常行动；无下一席但有PENDING则等最早截止，全部答复/过期后才BETTING。
+enterBetting逐条EXPIRED仅保留作兜底，正常调用时应已无PENDING；最后一位提交的请求不能瞬间过期。
+TAX仍通过pendingRequestId绑定等待窗口，closeRequestWindow恢复dangerDeadlineMs。
+余额不足时纯acceptLoanRequest返回FAILED，engine按原路径替换目标并发LOAN_REQUEST_CLOSED；命令ok:true。
+
+二、旧快照与恢复
+未改SNAPSHOT_SCHEMA_VERSION，无新协议字段、无views字段新增。
+ACTION旧pendingRequestId在normalize时迁移：找到对应借款人补acted；若仍是其current则清current和旧window；清pointer。
+迁移自身计入version，避免服务器按同版本丢弃迁移；applyCommand/advanceSystem重复进入幂等。
+resumeFromPause给所有PENDING请求完整requestSec，给当前席完整actionSec；不重置acted，不补算停服期间计息/开奖/税。
+迁移后无current时只nextSeat选座，不调用runSystem；全席已acted且仍有PENDING时取续期后的最早请求deadline，现有scheduler才能唤醒。
+只有全席已acted且无PENDING时才可保持deadline=null让下一系统tick进BETTING；不能将仍有请求的等待态恢复成无截止。
+decodeSnapshot不作新schema转换；必须经引擎入口/恢复入口使用旧ACTION状态，不应由外层自行改acted或金额。
+
+三、10B可直接依赖的视图
+finance.pendingRequest：仅本人作为借款人的PENDING。
+finance.incomingRequests：仅本人作为出借人的PENDING数组，可同时多条，现有append次序稳定。
+每条自带deadlineMs；不要拿全局deadlineAt作为请求倒计时。
+需要显示「本次行动已用掉」、逐条答复、剩余N个请求；答复成功不能说出借人的行动已结束。
+ok:true并不保证转账成功：看PRIVATE_LOAN_ACCEPTED或LOAN_REQUEST_CLOSED.status。
+FAILED/REFUSED/CANCELLED/EXPIRED均不可显示「已转账」，更不能误报为合同已成立。
+原web的guided-integration.test.ts:89是正确的余额不足ok+FAILED/不转账/失败通知契约，禁止为错误T11改掉。
+
+四、上轮服务端最小适配（本轮未改）
+上轮用户授权仅改command-queue.ts ACCEPT/REFUSE类别校验：ACTION无pointer要求，TAX仍必须匹配。
+保留请求存在/PENDING/当前轮/指定出借人/允许阶段/未到期、requestId信封一致性与原错误码。
+所有金额与重复转账仍归engine及既有幂等表；没有增加服务端规则副本。
+新增d6-requests.test.ts四条覆盖off-turn accept、重发/重复接受、越权、off-turn refuse及TAX指针约束。
+session/review06-resume/crash-recovery的适配全是同语义ID/窗口/准确版本同步，不变更协议。
+
+五、旧断言改动清单
+本轮：engine-round:83结束最后一席后先ACTION/current=null/PENDING/deadline45000，再真tick到45000才BETTING/EXPIRED。
+T7:156改为45000→55000逐笔等待；T19:348改为恢复请求截止145000/120000，到时才收口；原资金/事件/迁移/输入不变检查保持。
+新增T20:376最后一位可被同意（并验证拒绝/取消/FAILED关闭），T21:406无人答复到期，T22:421三人46000→47000。
+以下上轮历史适配保持原状；其中服务端文件与resume.test.ts本轮未改：
+engine-round：旧等待阻塞改为提交前进；取消后的pointer改null但保留越权/账目/迟到拒绝。
+resume：ACTION行动60/30秒、请求45/20秒，TAX等待关系保持。
+session原112/219/337：查本人PENDING请求ID，原身份恢复/单次入账/锁注场景保持。
+review06-resume：ACTION窗口60000，请求45000；TAX原45000/danger60000。
+crash-recovery:78：等待current2且unpaused且version等于刚读的磁盘提交版本；防止误取答复前快照。
+详细旧→新、文件:行、原因与测试名称见成果报告第五节。
+
+六、验证与回退
+10A累计新增22核心+4服务器测试；本轮由863增加3条到866，无旧测试删除或减条数。
+最终全量69文件866条全绿（142.04s），typecheck/build均exit0（141 modules，438ms）。
+MUT5→T20/T21/T22红（Lead无bail复跑含T7/T19共5红），MUT6→T22红（Lead无bail复跑含T7共2红）；旧MUT1/2/3仍分别使T1、T1/T2、T3红。
+旧MUT4仅删兜底在新正常路径等价，实跑22绿、exit0；Lead 已在规格第五节标记旧 MUT4 作废，兜底保留，不得为旧断言恢复“进 BETTING 时仍有 PENDING”。
+还原SHA256=58969316c6fe2bdd9453d14be8f75a7e043ccbc30ff07329dee6647f22e1e910；还原后core12文件177条全绿。
+本轮未改server/web/协议；hash核验见10a-tail-scope-final.txt。日志以artifacts/test-logs/10a-tail-*为本轮最终证据。
+起始代码d89bb8e，规格后更新至d91a9da，实现提交 a8016c2；不要用git reset回退用户更新的规格。
+要回退本轮实现请按成果报告文件清单审查diff，特别保留用户对T11的修正及未修改的web测试。
+
+七、后续边界
+仍有当前行动席时，独立请求过期广播可能延后到下一命令/行动tick；本轮未改scheduler。
+全席已acted的尾部等待已将deadlineAt设为最早请求截止，逐笔重算；恢复也如此，不能再说尾部没有timer。
+本轮未改任何服务端文件；后续若评估当前席期间的最早请求调度，仍必须保留该席完整行动窗口。
+10B界面、真机矩阵、单元11稳定性不在本轮；本轮没有手机/真人验收记录。
+
+八、提交与 Qoder 复核
+实现提交 a8016c2；Qoder 复核 handoff/复核-单元10A.txt 判可提交、无 must-fix。
+10B 必须：按 request.deadlineMs 显示倒计时；deadline 过后不得继续显示“可同意”，应提示已截止待系统收口。
+当前席期间请求过期广播可能延后，若 10B/11 改 scheduler，只能取“当前席行动截止 vs 最早 PENDING 请求截止”的较早者，不得缩短当前席完整行动窗口。
+旧 MUT4 已作废，勿为它恢复“进入 BETTING 时仍有 PENDING”。
