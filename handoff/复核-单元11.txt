@@ -1,0 +1,282 @@
+RichMan 单元 11 稳定性与故障演练 独立复核
+================================================
+复核员：Qoder（只读复核；未改实现/测试/协议/交接，未 commit）
+日期：2026-11-08
+工作区：D:\Lianjunjie\biancheng\RichMan
+代码基线：HEAD 8bb3fb4（规格）；实现全部未提交。
+
+一、结论
+可提交。
+未发现 must-fix。两处 engine 修复是真 bug 且修法正确；11A 的两条十人终局、I1–I13、chaos、
+重放、规模和 11B 的真实 WS/恢复码/真实 SIGKILL 演练均有实质证据。全量独立复跑
+73 文件 / 893 条通过，typecheck/build/diff-check 均通过。
+需要后续补强的主要是测试强度（T3 只要求一个种子终局、T6 destroyed 允许 close 或通知二选一、
+T9/T10 的旧连接命令是 fire-and-forget、I12 缺少 bet player 存在性检查），列在第三、六节；
+不阻塞本轮代码提交。
+
+二、must-fix 列表
+无。
+（未发现会造成资金错误、卡桌、假恢复/假胜负、错误信用/贷款资格或测试直接放行已知生产缺陷的 must-fix。）
+
+三、should-fix 列表
+S1–S4 为建议在提交前/后续补强的 should-fix；N1–N3 为 nit（不要求本单元提交前处理）。
+
+S1 T3 只断言“至少一个种子到 GAME_OVER”，没有要求三个种子都终局
+   位置：packages/game-core/tests/endurance.test.ts:263-269（`runs.some(... GAME_OVER)`）；
+         循环上限 1500 步在 chaos 内，达到上限不会 fail（endurance.test.ts:221-243）。
+   实测：本机三颗种子 11/12/13 都到 GAME_OVER（步数 548/444/567，轮 21），但这是运行结果，
+         测试本身即使两颗种子在第 1500 步停住，只要一颗结束且不违反不变量仍会绿。
+   规格允许“至少一个种子进入 GAME_OVER”的后备（若 1500 步内没有则降级），因此不是违规；
+   但报告声称三颗种子均终局，建议测试也断言
+   `runs.every(d => d.state.phase === "GAME_OVER")`，或为未终局种子显式记录/断言 round≥8，
+   避免“实际很好、门禁不看”的落差。
+   复现建议：把 `some` 临时改成 `every` 后当前应仍绿；若把 chaos 的 limit 设为 300，测试是否
+   应红由 Lead 决定（规格允许后备）。这属于测试强度，不判 must-fix。
+
+S2 T6/T7 的 destroyed() 接受“close 4002 或 room_destroyed”任一项，弱于 07C 的双条件契约
+   位置：apps/server/tests/stability.test.ts:91-94（每 peer 只要 closeCode===4002 或 history
+         有 room_destroyed 之一即通过）；07C 契约与既有测试在
+         apps/server/tests/destroy-room.test.ts:74-88：每个连接既收到 room_destroyed，又被 4002 关闭。
+   现状：T6/T7 的 health/rooms 归零能抓“没有断开”的一半，但不能抓“断开但没发 room_destroyed”
+         的一半；如果服务端未来漏发通知但正确 close，T6/T7 仍绿（07C D1 会红，故产品契约整体仍有人守）。
+   建议：destroyed() 改为同时断言 `notice && closeCode===4002`（并校验 roomCode/byPlayerId），
+         或明确写“通知由 07C 守、本测试只守资源释放”，避免报告/测试口径不一致。
+
+S3 T9/T10 的“旧连接不能改状态”证据不是确定性的命令拒绝
+   位置：apps/server/tests/stability.test.ts:159-197（T9）与 :199-227（T10）。
+   T9：只让 winner 发 `BORROW_BANK amountCents=0` 得到 INVALID_AMOUNT 和一张新 snapshot
+       （:179-184），没有让 winner 发一条合法成功命令；loser 的 `race-stale` 是 fire-and-forget
+       （:187），随后直接比较磁盘 game bytes（:190）与 health（:191）。
+   T10：旧连接 `stale-end` 也是 fire-and-forget（:205）；poll 接受
+       `REPLACED` **或** `NOT_JOINED`（:206），之后用 game bytes/version 证明未变。
+   已证明的部分：一份 session/一个 token/health 物理连接数（:167-177、:189-196）、旧 token
+   UNAUTHORIZED（rejectToken，:98-105、:203）、旧 socket 被 4001/REPLACED 或断开；
+   不是“只读握手消息”。
+   未确定的部分：没有 await 旧命令的 command_result/error 后再读盘；若处理是异步或竞态，
+   game bytes 读取可能早于命令处理，测试会假绿。
+   建议：发送 stale 命令后 await `command_result`（必须 REPLACED/NOT_JOINED 或明确断连），
+         再 await 一次 snapshot/health 屏障，然后比较 bytes/version；T10 对“被顶替旧连接”
+         优先断言 REPLACED/4001，不要把 NOT_JOINED 与 REPLACED 混为同一契约（3.2 的确允许旧连接
+         继续发命令得到 NOT_JOINED，但应与 REPLACED/4001 分开断言，避免报告说“收到 REPLACED”而
+         实际接受 NOT_JOINED）。
+
+S4 T5 的 512KiB/400 条上限没有接近阈值，且 I12 有轻微漏检
+   位置：T5 在 packages/game-core/tests/endurance.test.ts:290-306；I12 在 endurance.test.ts:90-93。
+   T5 实测 S2 1613 bytes/0 records，chaos13 28869/123；两者远低于 512KiB/400；报告已诚实声明
+         “不声称压满上限”。这满足规格的“小于”验收，但不能证明接近容量边界的序列化/快照行为；
+         建议补一条构造性压力用例（例如历史记录接近 400 条）或把报告中的结论保持为“远低于上限”。
+   I12 只检查 bet 的 betCents/guess/leverage 和 DEFAULTED 杠杆，不检查 `state.bets` 的 playerId
+         是否存在于 players，也不检查 bet 是否只在 alive 玩家上；I1–I13 的 I1/I2 不覆盖 bets。
+         这是不变量检查的漏检；建议加
+         `expect(state.players.some(p => p.playerId === playerId)).toBe(true)`。
+   不判 must-fix：实际引擎路径和 T3 的随机命令未触发该缺陷，且 I12 的其他字段已覆盖规格所列字段。
+
+N1（nit）T11 的预期金额公式把“p1/p2 的初始余额”和 3 人常量写死，脚本/规则调整时会脆
+   位置：apps/server/tests/stability.test.ts:298-302（最终金额 `10_500 + ...`）。
+   当前测试用真实 wire 建立请求/接受/银行借款，确实得到 [10500,10500,10000]，且最终用实际
+   BET_SETTLED.drawResult 推导，不调用生产 settle helper，独立性是合格的；但若未来初始金币、
+   利率或借款金额改变，公式需同步维护。建议从 killed.game.players 读取起始余额并用 bet 记录
+   计算 expected（仍不调用生产结算），减少硬编码。
+
+N2（nit）文档/测试的 T10 口径需对齐（见第六节）
+   位置：handoff/单元11-成果报告.txt:62 与 apps/server/tests/stability.test.ts:206。
+   报告说“顶替旧连接 REPLACED/4001”，测试 poll 接受 `NOT_JOINED` 作为同组通过条件；
+   spec 3.2 确实允许“被顶替后的旧连接继续发命令”出现 NOT_JOINED，但报告/测试应写成
+   “REPLACED/4001 或（旧连接继续发命令时）NOT_JOINED”，否则读者会误以为测试证明了 REPLACED。
+
+N3（nit）旧 scripts T24 的 freePort→start 存在 TOCTOU 端口竞争
+   位置：apps/server/tests/scripts.test.ts:664（freePort 后另起脚本进程）；我首次并行跑定向
+   stability 时它报 58289 被占用，单独重跑全量无问题。该风险早于单元 11，但新增的 stability
+   测试增加了并行端口 churn；可考虑在该测试内重试一次端口选择或串行化 scripts/stability。
+   不影响本轮代码正确性，列为 nit。
+
+四、A/B/C/D 逐条判定
+
+A1 PASS（engine 的信用修复是真 bug，修法正确）
+   事实：
+   - 原代码（HEAD 8bb3fb4 的 engine.ts:702）在 bankruptPlayer 内无条件
+     `player.credit = CREDIT.DEFAULTED`。规则 R04（handoff/规则决策表.txt:39-42）把 DEFAULTED
+     定义为银行违约后的永久失信；R09（同文件 :71-73）只说“未结清银行贷款全部 DEFAULTED”，
+     没有银行欠款时不应凭空生成失信记录。
+   - 现修复在 engine.ts:709-712：只有 `defaultOutstandingBankLoans` 之后确实存在该玩家
+     status==="DEFAULTED" 的银行记录才设 credit DEFAULTED；`defaultOutstandingBankLoans`
+     只把 ACTIVE 转 DEFAULTED（packages/game-core/src/tax.ts:29-37），不造假贷款。
+   - 反向探针：临时恢复无条件赋值后，T1 在 step=362/TAX/round18/version362 报
+     I3 default requires bank record（p1 BANKRUPT、credit DEFAULTED、bankLoans=[]），与交接
+     报告一致；恢复修复后 T1 通过。
+   - 死人不影响银行额度：普通人贷款入口 bank.ts:120-131 要求 credit==="GOOD" 且 gold>0；
+     破产者 cents=0，且不能成为当前座位；views.ts:124-127 的 bankBorrowLimitCents 也因
+     cents<=0 返回 0；银行/私人借款对象只取 alive（privateLenderOptions，steps.ts:213-218）。
+   - 非银行违约的破产者保留 GOOD 是 R04/R09 的预期组合；终局 UI 会显示“已破产 + 信用良好”，
+     不是金额/资格错误。若产品希望统一显示“破产即失信”，那是规则/文案决策，不是本修复可顺手改的。
+   结论：真 bug，修法正确；没有错误保留借款资格。
+
+A2 PASS（从 actedSeats 移除破产座位是正确的一致性修复）
+   事实：
+   - `bankruptPlayer` 在 engine.ts:702 只过滤本次破产座位；其余座位不变。
+   - 全部 actedSeats 消费点已核：
+     * nextSeat（engine.ts:654-657）先过滤 alive，再排除 actedSeats；死人本来就不会被选中；
+     * finishSeatAction（engine.ts:660-667）只处理 currentSeat，不会复活死人；
+     * enterAction（engine.ts:552）、settleBetting 的下一轮重置（engine.ts:646）、
+       finishTax（engine.ts:723-753）都会重置 actedSeats；
+     * 存档校验 file-store.ts:63 要求 actedSeats 无重复且都属于 alive；
+     * ws 快照 views 仅展示该数组，不参与税/结算。
+   - 税收队列不使用 actedSeats：TAX 开始用 taxDueSeats（tax.ts:5-12）生成 taxSeats，
+     engine.ts:499-516 用 taxIndex 逐座扣税；中途破产只影响 danger 玩家，taxIndex/其他座位不变；
+     结束由 finishTax 判胜负并重置 actedSeats（engine.ts:723-753）。
+   - 反向探针：去掉该过滤后，T3 在 step=413/TAX/round15/version341 报 I8 acted alive
+     （acted 含已破产 p7，alive 列表无 p7）；恢复后 T3 通过。原 bug 真实存在。
+   结论：不会跳过税收、不会让某轮提前结束、不会漏其他座位；修复范围最小正确。
+
+B1 PASS（I1–I13 基本不是自证，I9/I10/I13 有独立断言）
+   - I9（endurance.test.ts:76-82）检查 loanId 唯一、borrower 存在、remaining/paid≥0、
+     REPAID=>remaining 0、DEFAULTED=>remaining>0；不是“把实现抄一遍”。
+   - I10（:83-89）检查 lender≠borrower、双方存在、remaining≥0、状态枚举、ACTIVE>0/REPAID=0；
+     对 FROZEN/BAD_DEBT 只校验状态与 remaining≥0（规格 I10 没有要求其 remaining>0），
+     因此它不证明“冻结金额精确保留”；这是 coverage 边界而非恒真断言。
+   - I13（:102-105）在 GAME_OVER 时要求 alive≤1 且 winner 精确对应唯一存活者；独立于重放。
+   - I3/I8 正是本轮修复点，反向探针会红（见 E）；不是恒真。
+   - 小缺口：I3 只有“DEFAULTED⇒有 DEFAULTED 银行记录”的单向；没有“DEFAULTED 银行记录⇒
+     credit DEFAULTED”的反向断言；I12 缺 bet playerId 存在性（见 S4）。
+
+B2 PASS（按规格：some 足够；但覆盖不足，见 S1）
+   T3 只要求 one/some 种子到 GAME_OVER；达到 1500 步上限不会 fail。实际三颗种子均终局，
+   但门禁没有强制全部终局。规格允许后备，故列 should-fix，不判 must-fix。
+
+B3 PASS（有真实上限断言，但不是容量极限证明）
+   T5 实际跑 S2 终态 1613 bytes/0 records，并额外跑 chaos13 28869 bytes/123 records
+   （endurance.test.ts:290-306）；断言 <512KiB/<400 条，且整文件 afterAll <20s（:306-310）。
+   它没有接近阈值，报告已说明“不是容量极限测试”；满足规格字面上限，但不是强容量证明。
+   S4 的 I12 漏检与 T5 无关，单列。
+
+B4 PASS（按规格：close/room_destroyed 二选一满足；但弱于 07C，见 S2）
+   见 S2；07C D1（destroy-room.test.ts:74-88）仍独立守住“通知 + 4002”，因此不是产品回归；
+   但 T6/T7 自身不能证明完整契约，尤其不能证明 room_destroyed 一定发出。
+
+B5 PARTIAL（证明身份/健康/最终盘面；旧命令拒绝未确定性等待，见 S3）
+   证据：
+   - T9（stability.test.ts:159-197）：一份 session/一个 token/health 2（:167-177、:189-196）
+     是实打实的；winner 的 invalid BORROW_BANK 得到 INVALID_AMOUNT 和新 snapshot（:179-184）；
+     但 loser 的命令 fire-and-forget（:187），game bytes 读取（:190）没有等待其 command_result。
+   - T10（:199-227）：旧 token rejectToken 得到 UNAUTHORIZED（:203），旧 socket 的 stale-end
+     也是 fire-and-forget（:205）；poll 接受 REPLACED 或 NOT_JOINED（:206），game bytes/version
+     不变（:205-209）。这证明旧 token 不能认证，且最终盘面未变，但不是“等待旧命令被拒后再证明”。
+     若服务端异步处理/竞态，测试可能早读盘而假绿；另外把 NOT_JOINED 与 REPLACED 混为一组，
+     弱于报告“收到 REPLACED/4001”的表述（spec 3.2 允许旧连接命令 NOT_JOINED，但应分项断言）。
+   建议见 S3；不判 must-fix，因为现有 session replace/recover 测试（session.test.ts:128-158）
+   已覆盖 replace/REPLACED/旧 token 不可用，且服务端 handle 对 replaced 连接先 return。
+
+B6 PASS（T11 是真实 SIGKILL，非空账务，期望金额独立）
+   - stability.test.ts:229-315：真实 fork recovery-worker、execArgv ["--import","tsx"]、
+     SIGKILL、重启、真实 WS 认证；kill 点磁盘 snapshot phase=BETTING、bets p1/p2、余额
+     [10500,10500,10000]、bankLoans/privateLoans/requests 各 1；不是空局/初始状态（:262-270）。
+   - 恢复后三人的 WS 快照核对 paused/version/eventSeq/phase/round/余额/锁注（:270-282）；
+     再认证事务写盘，完整 game 深相等与 JSON bytes 相等（:284-287）；房主 resume 后 version+1、
+     GAME_RESUMED 首事件（:288-292）；p3 最后锁注后 round2、settlements 恰好 1（:293-303）。
+   - 最终期望金额用实际 BET_SETTLED.drawResult 推导，不调用生产 settleBet（:304-310），
+     独立性合格；hardcode 起算余额是 N1 的 nit。
+   结论：kill 确在落盘后、非空状态，恢复逐字段一致；这是本轮最强证据。
+
+C1 PASS：旧 881 条没有断言修改/删除
+   - 除本报外，git status 只有 engine.ts 修改、项目当前状态修改、4 份 handoff、2 个新测试；
+     没有任何旧测试文件 diff；git diff --stat 只有 engine 5 行（4 增 1 删）。
+   - 全量独立复跑 73 文件/893 条（881 旧 + 12 新），旧测试条数未减少。
+
+C2 PASS：新增 12 条，名称与数量可核
+   - endurance.test.ts 6 条（T1/T2/T3/T4/T12/T5；T12 是额外的合法拒绝/恢复探针）；
+     stability.test.ts 6 条（T6–T11）；全量 893 = 881 + 12。
+   - 新增测试不使用 fake timers；时间/开奖均由 Driver 注入；stability 使用真实 WS/HTTP/子进程；
+     T11 使用临时目录/port0，不碰默认数据/8000。
+
+D1 PASS：没有测试改生产默认、碰 apps/server/data 或 8000
+   - stability harness 用 mkdtemp、port0、临时 FileRoomStore；security 仅通过既有测试配置
+     `resumeBurst:50/createRoomBurst:20/joinBurst:20` 注入（stability.test.ts:31-47），
+     不修改 DEFAULT_SECURITY_LIMITS 或生产文件。
+   - T11 子进程 RICHMAN_DATA_DIR 指向临时目录；T6/T7/T8 全部临时目录。
+   - 我的复核未访问 apps/server/data 或 8000；全量中的旧 scripts test 使用随机空闲端口。
+   - 说明：首次全量唯一失败是 apps/server/tests/scripts.test.ts T24 报 58289 被占用；原因是
+     我在同一时间另跑定向 stability 进程占了该随机端口。隔离重跑 73/893 全绿；
+     这是复核环境并发，不是本轮代码失败。旧 scripts T24 的 freePort→start 存在 TOCTOU 竞争，
+     可作为后续稳定性 nicety，不属单元 11 生产逻辑。
+
+D2 PASS：D1/D2 范围与旧测试完整性
+   - 旧 881 条没有减少；只有新增测试文件和 engine 修复；未改 apps/web、wire、协议、schema、
+     依赖、脚本、scheduler、CSS。
+   - 新测试的服务端配置覆盖是测试夹具注入，不是生产默认。
+
+E 独立复跑与变异
+   见第五节，所有 D 项真实执行。
+
+五、独立复跑的测试与变异结果
+
+1) corepack pnpm -s test（单独运行，不与其它测试并行）
+   Test Files  73 passed (73)
+        Tests  893 passed (893)
+   Duration 133.95s，exit 0。
+   （首次并行复核时 T24 端口冲突 1 failed/892 passed，隔离重跑全绿；见 D1 说明。）
+
+2) corepack pnpm -s typecheck
+   无诊断，exit 0。
+
+3) corepack pnpm -s build
+   ✓ 143 modules transformed
+   apps/web/dist/assets/index-Cs5Nm0o4.js 427.55 kB（gzip 125.70 kB）
+   built in 677ms，exit 0（交接记录 286ms 为不同环境耗时）。
+
+4) git diff --check → exit 0；除本报外，git status 只含本轮 engine.ts、项目当前状态、4 handoff、2 新测试。
+
+5) 定向：
+   corepack pnpm -s vitest run packages/game-core/tests/endurance.test.ts --reporter=verbose
+     6 passed，exit 0；S1=373步/18轮/542 events/0 alive/winner null；
+     S2=312步/15轮/453 events/1 alive/p1；chaos 11/12/13 分别 548/444/567 步、21轮，
+     均 GAME_OVER；未到期失败深比较 121/49/122 次；S2 1613 bytes/0 records；
+     chaos13 28869 bytes/123 records；文件 elapsedMs=2142。
+   corepack pnpm -s vitest run apps/server/tests/stability.test.ts --reporter=dot
+     6 passed，exit 0；T11 打印 killedVersion7/allGameFieldsEqual true/resumedVersion8/
+     bankLoans1/privateLoans1/requests1/finalRound2/settlements1。
+   最终还原后再跑 12 条：2 files / 12 tests passed，exit 0。
+
+6) 变异（每组只改一处，跑后立即逐字节还原；engine/ws hash 均校验回原值）
+   - MUT1：engine.ts 的 `s.requests = [...s.requests, request]` 后追加同 borrower、不同
+     requestId 的第二条 PENDING；endurance T3 红：
+     `I11 one PENDING per borrower step=3 phase=ACTION round=1 version=2`，
+     Tests 1 failed / 5 skipped，exit1。
+   - MUT2：handleBorrowBank 读 amount 后先 `player.cents -= 1` 再抛错；T3 红：
+     `failure atomicity step=2 phase=ACTION round=1 version=1`，
+     Tests 1 failed / 5 skipped，exit1。
+   - MUT3：删 ws bind 内 `previous.ws.close(4001,"REPLACED")`；T9 红：
+     health 实际 `{connections:4,rooms:1}`，期望 `{connections:2,rooms:1}`，
+     Tests 1 failed / 5 skipped，exit1。
+   - MUT4：跳过 destroy 的 notifyAndCloseDestroyedPeers；T6/T7 红：
+     Tests 2 failed / 4 skipped，exit1。
+   - 还原 hash：engine `cdf932a62180078b876378571ca3addea01a554fc10b49955931b1d5b4c5122c`；
+     ws `aa739eeee87e16c0f039ecbd578f7de2880ecf59a944d0934fbdc77828537c6e`。
+   - 额外反向探针（验证 A1/A2 修复确实对应原 bug，不是测试自证）：
+     * 恢复 credit 无条件赋值：T1 step362/TAX/round18/version362 报 I3，失败；
+     * 删除 actedSeats 过滤：T3 step413/TAX/round15/version341 报 I8，失败；
+     两者还原后 hash 均为 cdf932a6...。
+
+六、文档真实性（F）
+- 四份交接的测试数字与实测一致：S1/S2/chaos 步数轮次、T5 的 1613/0 与 28869/123、
+  T11 的 version7→7→8、bankLoans/privateLoans/requests 各 1、settlements 1、旧 881+新 12=893，
+  我独立复跑均得到同一量级/同一具体值（耗时因环境不同：我 133.95s，交接 138.07s）。
+- 修复清单 engine.ts:702/710 与代码一致；两处反向探针均红，说明不是事后编造。
+- MUT1–MUT4 红条名称与数量与交接一致；reduction hash 与交接一致。
+- “旧 881 原样”与 git status 一致；没有旧测试文件 diff。
+- 需注意的一处措辞：成果报告 :62 说 T10“顶替旧连接 REPLACED/4001”，但 stability.test.ts:206
+  的 poll 也接受 NOT_JOINED；spec 3.2 允许旧连接继续发命令 NOT_JOINED，故不构成硬性错误，
+  但建议文档/测试把“REPLACED/4001”和“旧连接命令 NOT_JOINED”分开写，见 S3/N2。
+- “PowerShell 5.1 / 本机无 pwsh7”与用户已修正版本一致；未发现声称 pwsh7.6.9 的残留。
+- 四份交接之间无互相矛盾的计数；项目当前状态写了未 commit/待复核，符合实际。
+
+七、未覆盖/已知边界（补充）
+- 没有真机、360px、真实 ACL、音频安全区、09A F18、09C-B S6/S8/S14 的验证（规格明确排除）。
+- T11 只覆盖 SIGKILL 一次与单一 BETTING 场景；未覆盖崩溃在 INTEREST/BANK_DUE/TAX/ACTION 的每种点位。
+- T9/T10 未做“旧命令异步延迟后到达”的确定性竞态测试（见 S3）。
+- T5 未在接近 400 条/512KiB 的边界做构造性测试；I12 未检查 bet playerId 存在性（S4）。
+- 没有真实等待 45 秒下注超时的服务器演练；按规格走全员锁注。
+- 本次复核没有修改源码/测试，没有 commit；所有临时变异均逐字节还原，最终 engine/ws SHA256
+  与交接一致。
+
+复核结论：可提交。建议至少补 S1 的“三颗种子都终局”断言、S2 的“notice+4002 双条件”、
+S3 的旧命令 await/错误码分项断言；这些是测试强度改进，不影响当前代码与 893 条基线。

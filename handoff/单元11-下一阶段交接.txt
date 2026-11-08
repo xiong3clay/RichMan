@@ -1,0 +1,58 @@
+单元11 下一阶段交接
+日期2026-11-08；唯一规格含8bb3fb4错误码契约；不commit。
+新增12条（11A6/11B6），旧881条未修改。
+最终全量：73文件/893条全绿（881旧+12新）；Lead补强后168.69s（Codex原跑138.07s），exit0，未超过180s目标。
+corepack pnpm -s typecheck exit0；build exit0（143 modules，286ms）；git diff --check exit0。
+
+一、入口与数据流
+endurance.test.ts内Driver仅用createInitialState/applyCommand/advanceSystem/resumeFromPause，时间/随机注入。
+每步独立I1–I13、输入纯度、失败未到期原子性，超deadline允许先系统推进；每次成功非终局进度要求version增加，events逐项连续。
+两个十人脚本都到GAME_OVER：S1第18轮全员破产/winnernull，S2第15轮p1唯一胜者；seed11/12/13均第21轮结束。
+稳定性文件测试内使用临时FileRoomStore+startServer(port0)与真实Peer，不直接manager注入或造状态。
+T6真实十人只推进完整锁注并结算一轮；十人走完整终局由11A负责，别把T6一轮写成长局终局证明。
+T11真实fork/tsx worker、SIGKILL、三位真实token重认证，让恢复内存通过身份事务再次落盘后与kill点完整game比较。
+kill夹具先WS建立bank/private/request各1条、余额不同、两笔非零锁注；version7→7→resume8，之后第三人锁注只结算一次进round2。
+
+二、生产修复清单
+engine.ts:702，bankruptPlayer去掉本次破产座位的actedSeats；T4 seed12 step451/round15 I8真实红。
+engine.ts:710，仅确有本人DEFAULTED银行贷款才赋DEFAULTED信用；T1 step362/round18 bankLoans=[]却失信的I3红。
+原永久失信不恢复，无贷款破产仍保留GOOD；不合成贷款、不改金额/税收/债务结算。
+生产diff仅4新增/1删除，旧测试未改；server生产未改。
+不得为过测试恢复无条件credit=DEFAULTED，也不得允许deadseat继续出现在actedSeats。
+
+三、测试与变异索引
+endurance: T1无胜者、T2唯一胜者/双跑、T3三个混沌种子、T4重放、T5真实终态规模、T12合法拒绝/恢复补充；共6。
+stability: T6十人全流程一轮/销毁、T7十二生命周期、T8混合凭证十人风暴、T9恢复码双竞争、T10旧token拒绝、T11真实kill/恢复；共6。
+T12不是绕过turn门禁证明底层duplicate guard，报告其实际用途；I11的输出约束由T3和MUT1证明。
+MUT1单点生产append第二同borrower请求→T3 I11红；MUT2抛错前改金币→T3失败原子性红。
+MUT3单删旧连接close→T9 health4≠2红；MUT4跳过销毁通知/断开→T6/T7红。
+全部单点即还原；engine SHA256 cdf932a62180078b876378571ca3addea01a554fc10b49955931b1d5b4c5122c，
+ws SHA256 aa739eeee87e16c0f039ecbd578f7de2880ecf59a944d0934fbdc77828537c6e，前后相等。
+真实输出artifacts/test-logs/11-*.txt、11a-*.txt、11b-*.txt；汇总11-mutations-summary.txt与11-restored-green.txt。
+
+四、协议与不可回退点
+没有协议版本/schema/依赖/规则数值变化；不需数据迁移。
+冻结错误码：旧/无效token resume为UNAUTHORIZED，顶替旧连接REPLACED+4001，未join/resume命令NOT_JOINED。
+sessionToken恢复不换token；recoveryCode是长期凭证，可重复使用但每次换token，最终唯一当前连接/有效token；不要强制“只有一次握手成功”。
+10B请求卡只渲染首条与pendingCount，数组不前端重排；债务中心仍可显示本人全部incoming；deadline用request.deadlineMs，所有过期按钮/handler守卫保持。
+10A金额超MAX的S5边界保持原样，未借本轮变更；D6尾部等待最早deadline不回退。
+
+五、测试自证防范与限制
+固定脚本终局、每步不变量独立于重放一致性；三个种子不是穷尽证明。
+T3固定真实前缀保证失败/银行/私人请求路径非空；每种命令覆盖计数可查运行日志。
+T9先drain握手snapshot再校验新snapshot，health核物理连接释放，而不只核身份摘要。
+T11重新持久化加载内存，非“旧盘对旧盘”；非空借贷、不同余额、非零锁注避免空表假强度。
+规模S2为1613字符/0条，另chaos金融史28869字符/123条；未证明极限容量，只覆盖规格阈值下的真实长局。
+演练夹具将resume/create/join burst设50/20/20，不修改生产默认；限流正确性靠既有security测试。
+连接释放变异不等于堆分析或所有定时器泄漏证明；未真实等待45秒下注超时，按规格只走全员锁注。
+
+六、后续入口与未验收项
+本轮自动化已覆盖两种十人终局与真实kill逐字段一致；发现两处engine一致性bug已修，旧测试无削弱。
+09D真机/真实ACL、F18无可控同步catch、S6/S8/S14、安全区/音频、05B清单按Lead决定保留；未擅自为测试加生产缝。
+后续：提交本轮feat+docs→09D真机矩阵→单元12发布包。Qoder只读复核已完成，结论可提交、无must-fix。
+本轮未提交；8bb3fb4是Lead规格提交，不能把它当本轮实现提交，也不要用reset抹掉用户规格更新。
+
+七、Qoder 复核后的补强（Lead 已做，条数不变）
+T3 现在用 runs.every 要求种子11/12/13全部GAME_OVER；T6/T7 的destroyed()要求room_destroyed与4002同时成立。
+I12 增加下注playerId必须存在且alive；T9/T10 先等 error REPLACED + closeCode 4001 + readyState CLOSED 再读盘，删除fire-and-forget旧命令。
+定向12条4.32s（另次4.74s）、全量893条168.69s、typecheck/build 0。仍未覆盖“命令在关闭前已在途”的极端竞态与T5容量上限，后续若要更强需单独设计。

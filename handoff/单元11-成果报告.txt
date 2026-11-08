@@ -1,0 +1,93 @@
+单元11 成果报告：11A引擎长局 / 11B稳定性与故障演练
+日期：2026-11-08；实现：Codex；不commit。
+唯一依据：单元11-稳定性与故障演练.txt，含用户提交8bb3fb4冻结的错误码契约。
+开工HEAD ae334a90ed2aa3c3191249afb8ea5d566b7a8396，执行中Lead修正规格至8bb3fb47a3f503a49f760c95bb5d9e69ad6584b5。
+原881条测试未删除、未修改旧测试。新增12条（核心6+服务端6）。
+最终全量：73文件/893条全绿（881旧+12新），Lead补强后168.69s，exit0；Codex原跑138.07s见11-full.txt。
+corepack pnpm -s typecheck：exit0；corepack pnpm -s build：exit0，143 modules，286ms。
+
+一、四个问题的明确回答
+1. 十人局确实走到GAME_OVER，两种终局均覆盖。
+   T1/S1：第18轮，0人存活、winnerId=null，373步（含终局不可变探针），542个事件。
+   T2/S2：第15轮，仅p1存活且金币>0，312步，453个事件；连续两遍终态JSON完全相同。
+   轮数仅断言10..40区间，没有写死18或15。每步经公开引擎入口后检查I1–I13。
+   chaos种子11/12/13均在第21轮GAME_OVER，无须启用“仅round≥8”的后备验收。
+2. 真实kill后恢复逐字段一致；发现两个生产bug，均有先红证据并最小修复。
+   T11真实fork recovery-worker、execArgv=["--import","tsx"]、SIGKILL、重启；3人、BETTING、2笔非零锁注。
+   通过真实WS先建1笔银行贷款、1笔私人合同、1条ACCEPTED请求；余额[10500,10500,10000]，避免空表/初始余额自证。
+   kill点version7，加载后仍7；认证事务将加载后的内存重新落盘，完整game深相等且JSON字节相等。
+   三位WS私有快照也核对金币/阶段/版本/锁注；房主resume后version8、首事件GAME_RESUMED；第三人锁注后第2轮、仅结算一次。
+   最终非零输赢按真实drawResult独立计算，未调用生产settleBet充当预期。
+3. 新增12条；最终总数/耗时见本报告首部；类型检查/构建均0。
+   11A独立文件6条/2.47s，测试体总2005ms；S2 JSON1613字符/0记录，另测真实chaos13金融史28869字符/123记录，均低于512KiB/400记录。
+4. 自证薄弱点及处理：
+   重放一致不能单独证明正确，另对每步独立检查身份、金额、债务、请求、阶段、版本/事件、胜负；固定脚本断言具体终局。
+   随机可能避开失败/请求，T3加真实命令前缀（超额银行拒绝→私人请求→同意→银行借款），并断言覆盖计数非零。
+   原盘重读不是内存恢复证明；T11认证事务重新导出内存落盘，且使用非空账务与真实WS私有视图交叉验证。
+   T9旧握手快照可能冒充命令反馈，已先消费认证快照，命令后要求新的snapshot且计数+1。
+   S2没有金融记录会让规模断言空真，另测真实123条金融历史；仍不声称测到接近512KiB/400记录上限。
+
+二、变更文件
+packages/game-core/tests/endurance.test.ts：新文件，6条；测试内Driver、mulberry32、独立I1–I13检查器。
+apps/server/tests/stability.test.ts：新文件，6条；真实WS、临时FileRoomStore、port0、真实子进程kill。
+packages/game-core/src/engine.ts:702、:710：仅破产收口两处最小一致性修复，详见下节。
+handoff/单元11-{成果报告,运行与验收,下一阶段交接,注意事项}.txt；项目当前状态同步最新摘要，保留10B不可回退点。
+未改server生产代码、shared/协议、规则数值、snapshot schema、依赖、脚本或前端；未碰默认data、8000或真实run状态。
+
+三、修复清单（先红后修）
+B1 engine.ts:710：bankruptPlayer原先无条件把credit改DEFAULTED，S1无借贷玩家因此凭空“银行失信”。
+复现：T1 step362/TAX/round18/version362，p1 BANKRUPT、credit DEFAULTED、bankLoans=[]，违反I3。
+T2同样在step302/round15复现；T3还覆盖本人贷款已还清但因税破产的同类缺口。
+改法：defaultOutstandingBankLoans之后，只有存在该玩家DEFAULTED银行记录才设DEFAULTED；原有永久失信不恢复，不合成贷款。
+理由：R09只规定未结清银行贷款转DEFAULTED；没有银行违约记录不应新增银行失信标记。
+B2 engine.ts:702：bankruptPlayer未移除该座位的actedSeats，TAX期间留下已破产座位，违反I8。
+复现：T4 seed12 step451/TAX/round15/version356，p7破产仍在actedSeats。
+改法：仅过滤本次破产座位，不重置其他座位或改变税收/余额/债务结算。
+初始11A六条5失败/1通过，11a-initial-red.txt；修复后6条通过，11a-green.txt。
+生产最终diff仅4行新增/1行删除，无旧测试断言变更。
+
+四、测试映射
+endurance.test.ts:245 T1 scripted_no_winner：十人无胜者终局、破产/结束事件、GAME_OVER后不可变。
+:254 T2 scripted_unique_winner：十人唯一胜者p1、正余额、S2双跑相同JSON。
+:263 T3 chaos_invariants：种子11/12/13，各1500步上限或GAME_OVER，每步I1–I13、输入纯度、未到期失败原子性。
+  实际步548/444/567；未到期失败原子性检查121/49/122次；借款/请求/答复/还款/催收/拒绝/取消均有实际覆盖记录。
+:271 T4 replay_determinism：seed12重跑state/events/计数一致，不以生产贷款或下注helper计算预期。
+:277 T12 atomicity_and_I11_probe：合法公开入口超额银行请求、重复行动请求拒绝、恢复请求续期/原输入不变。
+  T12第二次请求先被回合门禁拒绝，不能宣称它独立覆盖了private-loans底层重复检查。
+:290 T5 snapshot_scale：S2终态规模，补充有银行/私人/请求历史的chaos13终态，整文件耗时<20s。
+stability.test.ts:106 T6 ten_players_round：十人真实座位/行动/锁注及一次结算，销毁后所有连接与房间归零。
+:125 T7 room_lifecycle_release：12次真实创建/加入/销毁，rooms目录为空、health归零。
+:136 T8 reconnect_storm：十人同时断开并恢复；5个token不轮换、5个恢复码轮换且旧token拒绝，连接10→5→0。
+:159 T9 recovery_race：复用恢复码双并发，最终一份身份/一个有效token/一个当前连接；旧连接必须REPLACED并4001关闭后才读盘，游戏字节不变。
+:199 T10 stale_token_after_rotation：旧token UNAUTHORIZED，未认证命令NOT_JOINED，顶替旧连接REPLACED并4001关闭，不能改状态。
+:229 T11 kill_restart_midgame：非空账务的真实SIGKILL、加载内存完整恢复、暂停与房主续局、最后锁注后结算一次。
+
+五、变异及还原
+runner artifacts/test-logs/11-mutations-runner.txt；汇总11-mutations-summary.txt；每组只改一个生产语句，finally立即还原。
+MUT1 engine请求append单点额外追加同borrower、不同requestId的第二条PENDING；T3的I11在step3/round1/version2红，1失败/5跳过，exit1。
+  这是生产追加故障注入，不是把坏state喂给测试检查器；如实说明：真正重复检查在private-loans，单删它仍被ACTION/TAX门禁挡住，不会谎称删除了engine中的同名检查。
+MUT2 handleBorrowBank读amount后先扣1分；T3 step2未到期失败原子性红，1失败/5跳过，exit1。
+MUT3 单删bind中的previous.ws.close(4001,"REPLACED")；T9红，health实际connections=4而期望2，1失败/5跳过，exit1。
+MUT4 单点跳过notifyAndCloseDestroyedPeers调用；T6/T7均因销毁通知/4002未发生而红，2失败/4跳过，exit1。
+engine前后SHA256均cdf932a62180078b876378571ca3addea01a554fc10b49955931b1d5b4c5122c。
+ws前后SHA256均aa739eeee87e16c0f039ecbd578f7de2880ecf59a944d0934fbdc77828537c6e。
+ws/协议git diff为空；engine只保留B1/B2正式修复。变异后新增12条再跑记录见11-restored-green.txt。
+
+六、规格纠正与边界
+旧T10曾要求NOT_JOINED，新增严格测试实跑1失败/5通过；用户明确沿用既有UNAUTHORIZED并提交8bb3fb4。
+仅修改新增测试，未改session.ts或旧session/persistence测试；顶替错误REPLACED/4001、未认证命令NOT_JOINED保持冻结。
+核心下注金额用number分；规格S1中的"0"属于WS表示，服务端测试仍发规范字符串，不改生产解析。
+服务端演练用既有security配置入口把resumeBurst/createRoomBurst/joinBurst设50/20/20，只隔离资源测试与默认限流；其他默认不改。
+这不证明默认限流会放行十人即时恢复，安全默认策略仍由旧测试验证。
+无fake timers，无manager造状态；时间与开奖结果均注入核心。Date.now仅用于文件粗性能测量。
+未进行09D真机/ACL矩阵；F18、S6/S8/S14、音频安全区、05B清单、10A S5边界保持规格既定处置。
+三固定种子不是穷尽性证明；123条历史也不是容量极限测试。MUT4证明连接释放，未独立证明每种计时器内存泄漏。
+本轮尚未做独立只读复核（Qoder 复核在提交前进行）；本轮无需未完成的生产修复，提交与真人验收不在本轮执行。
+
+七、Qoder 复核结论与 Lead 提交前补强（S1–S4）
+Qoder 独立复跑 73 文件/893 条、typecheck/build/diff-check 全绿；A1/A2 两项 engine 修复经反向探针确认是真 bug；MUT1–MUT4 均真实变红；结论「可提交，无 must-fix」，另提 4 条 should-fix（测试强度）。Lead 已按其中三条可无风险落地的建议补强，测试条数不变（893）：
+S1 T3 由「至少一个种子终局」改为「三个种子都 GAME_OVER」：endurance.test.ts:265 runs.every(...)；三颗种子实际均第21轮终局，门禁从此与该事实一致。
+S2 销毁断言由「room_destroyed 或 4002 二选一」改为「两者都必须成立」：stability.test.ts:91-95，与 07C destroy-room.test.ts:74-88 的双条件契约对齐。
+S3 被顶替旧连接改为确定性断言：T9/T10 先等「error REPLACED 且 closeCode 4001」，再断言 readyState=CLOSED，之后才读盘比较 game bytes；不再发 fire-and-forget 旧命令（socket 已关闭，物理上无法再交付命令）。
+S4 I12 增加下注玩家存在且存活检查：endurance.test.ts:92 playerId 必须对应 alive 玩家，补上 Qoder 指出的漏检；T5 仍远低于 512KiB/400 条，报告继续如实声明「不是容量极限测试」。
+补强后定向：endurance+stability 12/12，4.32s（另次4.74s）；全量 73 文件/893 条，168.69s，exit0；typecheck exit0；build exit0（143 modules，index-Cs5Nm0o4.js 427.55kB、index--JyM_5JG.css 18.07kB）。

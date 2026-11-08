@@ -1,0 +1,76 @@
+单元11 运行与验收
+日期2026-11-08；依据唯一规格及8bb3fb4错误码纠正；不commit。
+新增12条（endurance6、stability6），旧881条原样保留。
+最终全量：73文件/893条全绿（881旧+12新）；Lead按Qoder S1–S4补强后168.69s，exit0（Codex原跑138.07s）。
+
+一、环境
+Windows，Node v24.18.0，pnpm11.7.0，Vitest5.0.5，Vite8.3.5；测试 shell 为 Windows PowerShell 5.1.26100.9711（本机未安装 pwsh 7；where.exe pwsh exit 1，Test-Path 'C:\Program Files\PowerShell\7\pwsh.exe' 为 False，未做 pwsh 实测）。
+在D:\Lianjunjie\biancheng\RichMan执行；PATH前置C:\Windows\System32\WindowsPowerShell\v1.0供既有脚本测试使用。
+corepack使用已存在缓存，无安装或下载：
+$env:COREPACK_HOME='C:\Users\连俊杰\AppData\Local\node\corepack'
+$env:COREPACK_ENABLE_NETWORK='0'
+默认沙箱shell曾长时间无输出；显式powershell.exe/login:false及本地测试权限可运行。
+一次自动审批超时未执行，重试后成功；这不是测试红灯或业务失败，不计成功次数。
+
+二、必跑命令的真实输出
+corepack pnpm -s test
+Test Files 73 passed (73)
+Tests 893 passed (893)
+Start at 23:08:55
+Duration 138.07s (tests 74%, import 16%, transform 9%)
+EXIT_CODE=0
+完整日志 artifacts/test-logs/11-full.txt；较早147.28s全量记录11-full-before-rich-kill.txt是加强T11前的历史。
+corepack pnpm -s typecheck
+EXIT_CODE=0（silent命令无其它输出），日志11-typecheck.txt。
+corepack pnpm -s build
+vite v8.3.5 building client environment for production...
+✓ 143 modules transformed.
+apps/web/dist/index.html 0.49kB gzip0.31kB
+apps/web/dist/assets/index--JyM_5JG.css 18.07kB gzip4.10kB
+apps/web/dist/assets/index-Cs5Nm0o4.js 427.55kB gzip125.70kB
+✓ built in 286ms
+EXIT_CODE=0，日志11-build.txt。
+git diff --check：无输出，exit0，最终证据11-diff-check.txt。
+
+三、定向测试及实测场景
+corepack pnpm -s vitest run packages/game-core/tests/endurance.test.ts --reporter=verbose
+6 passed，exit0，Vitest2.47s，文件测试体2005ms（11a-green.txt）。
+S1：十人第18轮GAME_OVER，alive0/winnernull，373步；S2：第15轮p1唯一胜者，312步；不硬编码轮数。
+seed11/12/13：均第21轮结束，步548/444/567，分别无胜者/p4/p4；未到期失败深比较121/49/122次。
+S2快照1613字符/0记录，真实混沌金融史28869字符/123记录；两者均<512KiB/400记录，整文件<20s。
+Lead补强后复跑：endurance+stability 2 文件/12 条，4.32s（另次4.74s），exit0；T3 现在要求三颗种子全部终局，T6/T7 要求 room_destroyed 与 4002 同时成立，I12 要求下注玩家存活；T9/T10 先等 REPLACED+4001+CLOSED 再读盘。
+corepack pnpm -s vitest run apps/server/tests/stability.test.ts --reporter=verbose
+6 passed，exit0，4.42s（11b-green.txt）；此版本T11已真实kill，后续加强为非空账务，见下一条及最终全量。
+corepack pnpm -s vitest run apps/server/tests/stability.test.ts -t 'T11 kill_restart_midgame' --reporter=verbose
+1 passed/5 skipped，exit0，1.99s（11b-kill-financial-green.txt）。
+[11B SIGKILL] players3，locked2，BETTING，bankLoans1/privateLoans1/requests1；version7→7，allGameFieldsEqual=true；resume8，round2，settlements1。
+实测使用临时目录、0.0.0.0:port0、真实WS/HTTP；未触碰默认数据、8000和真实run/*.json。
+
+四、红灯与最小修复
+初始11A：5 failed/1 passed，11a-initial-red.txt。
+I3无贷款破产却DEFAULTED：T1 step362/round18、T2 step302/round15；I8破产p7仍在acted：T4 step451/round15。
+engine.ts:702过滤本次破产座位，:710仅存在本人DEFAULTED银行记录才设失信；不改钱/税/债务计算、不造假贷款。
+修后六条绿，无旧测试修改。详见成果报告修复清单。
+初始11B：5 passed/1 failed，11b-first.txt，唯一T10期望NOT_JOINED实际UNAUTHORIZED；用户8bb3fb4纠正规格后仅新增断言沿用旧契约。
+
+五、四个变异命令与结果
+Get-Content artifacts/test-logs/11-mutations-runner.txt -Raw -Encoding UTF8 | node -
+runner直接执行真实vitest，每组仅一个生产语句变化，保存完整输出、立即finally还原：
+MUT1 engine append第二同borrower不同ID请求→T3/I11红，1失败/5跳过，exit1，11-MUT1.txt。
+MUT2 handler读金额后先扣1分→T3失败原子性红，1失败/5跳过，exit1，11-MUT2.txt。
+MUT3 去旧socket close→T9红（connections4而应2），1失败/5跳过，exit1，11-MUT3.txt。
+MUT4 去销毁notify/detach/close调用→T6/T7红，2失败/4跳过，exit1，11-MUT4.txt。
+MUT1注入的是生产输出错误，不是删底层检查后再伪造坏输入；真实重复检查被回合/自救门禁遮蔽，详见成果报告。
+还原engine SHA256 cdf932a62180078b876378571ca3addea01a554fc10b49955931b1d5b4c5122c。
+还原ws SHA256 aa739eeee87e16c0f039ecbd578f7de2880ecf59a944d0934fbdc77828537c6e。
+汇总11-mutations-summary.txt；变异后两新文件共12条重跑见11-restored-green.txt。
+
+六、断言来源与已知边界
+每步独立I1–I13和输入纯度检查，失败只在未到旧deadline时要求完整不变；过期允许系统先追赶。
+T9命令前消费认证快照，命令后要求新snapshot数量+1；T11用真实再认证事务导出加载后的内存，再完整对照kill点game与各自WS快照。
+T11借贷非空、余额不同、赌注非零，并按实际drawResult独立算期望金额；不从生产结算helper抄结果。
+T5补非空历史，仍不宣称512KiB容量上限已压满；三个种子不能证明所有输入。
+资源演练security burst=50/20/20经现成配置注入，不改生产默认；此测试不证明默认限流放行十人瞬时重连。
+不使用fake timers、不改manager状态；无真机、真实ACL测试。F18/09C-B缺口/音频安全区/05B/10A S5保持规格既定边界。
+十人真正终局、两种胜负、真实kill逐字段恢复均已自动化；发现的两处engine bug已先红后修，server无生产修复。
+Qoder 复核结论「可提交、无 must-fix」；S1–S4 为测试强度建议，Lead 已补 S1/S2/S3/S4 的落地部分（条数仍893），T5 容量边界与「关闭前命令在途」极端竞态仍如实保留为已知边界。

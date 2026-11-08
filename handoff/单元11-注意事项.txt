@@ -1,0 +1,63 @@
+单元11 注意事项
+日期2026-11-08；不commit；依据唯一规格及用户8bb3fb4纠正。
+新增12条（核心6+服务端6），旧881条未减、未改断言。
+最终全量：73文件/893条全绿（881旧+12新）；Lead按Qoder S1–S4补强后168.69s，exit0（Codex原跑138.07s）。
+typecheck/build均exit0，构建143 modules/286ms；git diff --check exit0。
+
+一、发现的问题与处置
+真实红灯11a-initial-red.txt为5失败/1通过，不是测试预期人为翻转。
+engine.ts:702修actedSeats中残留破产座位；:710修无DEFAULTED银行记录却因破产凭空标失信。
+最小diff4新增/1删除；保留原银行失信永久性、债务、金币与税收规则，不造假银行记录满足I3。
+因此“仅因税收/私人债务破产、从未银行违约”的玩家终局会显示“已破产 + 信用良好”，这是 R04/R09 的预期组合，不是漏改；不要为了统一文案再把 credit 无条件设为 DEFAULTED。
+S1第18轮全员破产/winnernull，S2第15轮p1胜；3混沌种子均第21轮GAME_OVER。
+真实SIGKILL有bank/private/request各1条、非初始余额、两笔非零锁注；kill7→恢复7、完整game一致，resume8后只结算一次。
+服务器生产无修复；身份错误码不是生产bug。
+
+二、错误码与身份冻结契约
+最初11规格误写旧token resume为NOT_JOINED，严格新T10实跑红；用户核对旧测试后提交8bb3fb4纠正。
+现在必须：旧/无效token或recoveryCode认证失败UNAUTHORIZED；顶替连接REPLACED并close4001；未认证发命令NOT_JOINED。
+只改新增测试；不要改session.ts错误码或旧session/persistence测试。
+sessionToken路径不轮换；恢复码长期不换，每次恢复签发新token，旧token作废；两次恢复握手都可能成功，最终只有一个当前连接/有效token。
+不得通过“只允许一次握手”或给测试专属错误码掩盖真实语义。
+
+三、如何避免测试自证
+T1/T2具体胜负与每步I1–I13独立于T4重放一致性；不调用生产金融helper算测试预期。
+失败原子性只在调用前未到旧deadline时要求全state不变；到期系统追赶不能误判为部分写入。
+I3必须查bankLoans DEFAULTED记录；I8查alive座位，不给BANKRUPT豁免。
+T3固定命令前缀强制真实失败/请求/借款，计数必须>0；随机不靠碰运气。
+T9先消费认证快照，真正命令后snapshot数+1，health还检查物理socket释放。
+T11旧盘重读不算内存恢复；真实再认证会从加载内存重写盘，再全game对照，并核每人WS快照。
+T11加入非空银行/私人/请求历史、不同余额和非零锁注；最终金额按实际drawResult独立计算。
+T5不止测空账S2，还测实际123条金融史；仍不声称已压满400条或512KiB。
+固定3种子、2脚本不是对所有输入的形式化证明；该边界已明确保留。
+
+四、变异与还原证据
+MUT1单点engine append追加同borrower不同ID的第二请求，T3/I11 step3红；不是改检查器或造坏测试输入。
+真正重复检查在private-loans，若只删除它，合法ACTION/TAX历史还会被上层门禁挡住；必须诚实写实际生产故障注入方式。
+MUT2借款handler抛错前扣1分，T3 step2失败原子性红。
+MUT3去旧socket close，T9实测connections4而应2；MUT4去销毁notify/detach/close调用，T6/T7都红。
+四组均exit1，红条见11-MUT1/2/3/4.txt；runner finally立即还原，汇总11-mutations-summary.txt。
+engine前后hash cdf932a62180078b876378571ca3addea01a554fc10b49955931b1d5b4c5122c；
+ws前后hash aa739eeee87e16c0f039ecbd578f7de2880ecf59a944d0934fbdc77828537c6e，字节相等。
+不要把临时变异留在生产；ws最终git diff为空，engine只保留两处正式修复；还原后新12条重跑日志11-restored-green.txt。
+
+五、演练环境边界
+所有WS/HTTP服务用临时目录与port0，不碰apps/server/data、8000或真实run/*.json；无fake timers、无manager造状态。
+测试harness经现成配置把resume/create/join burst设50/20/20，以隔离并发资源演练；生产默认与既有安全断言不改。
+这不证明默认限流能放行10个瞬时恢复；也不证明所有堆/定时器泄漏已排除。
+核心betCents传整数number，WS传十进制字符串；不能为了规格示例中的"0"给核心增加字符串解析。
+核心只用注入时间/随机；Date.now只用于本文件<20s粗性能，不能喂引擎。
+PATH补WinPS5.1；离线corepack指已有COREPACK_HOME并禁网络，未安装依赖。默认sandbox shell曾空挂，显式shell可用。
+一次自动审批超时已重试成功，不能当作业务测试失败或伪计通过。
+
+六、未做项
+09A F18、09C-B S6/S8/S14、08B/08C真机安全区/音频、05B、10A S5按唯一规格边界不做。
+不改D6、教程、界面样式、协议/schema/规则数值；10B首请求卡/全部债务中心/请求倒计时与过期handler守卫均保留。
+未进行手机或管理员ACL验收，留09D矩阵；本轮不生成实现提交。
+
+七、Qoder 复核与补强后的测试口径
+Qoder 独立复核结论「可提交、无 must-fix」，四组变异与 A1/A2 反向探针均复现；S1–S4 是测试强度建议，Lead 已补 S1/S2/S3/S4 中可无风险落地的部分，条数仍为893。
+T3 现在要求三个混沌种子全部 GAME_OVER（不再 some）；T6/T7 销毁必须同时收到 room_destroyed 且被 4002 关闭；I12 额外要求下注 playerId 对应存活玩家。
+T9/T10 不再向被顶替连接发 fire-and-forget 命令：先断言 error REPLACED + closeCode 4001 + readyState CLOSED，再读盘比较 game bytes；这比「发了命令但没等结果」更强，但只证明连接已关闭，不模拟「关闭前命令已在途」的极端竞态。
+T5 仍不是容量极限测试，继续按「远低于 512KiB/400 条」表述，不得改写成「已压满上限」。
+复核后全量 73 文件/893 条、168.69s；定向 12 条 4.32s（另次4.74s）；typecheck/build 0。
