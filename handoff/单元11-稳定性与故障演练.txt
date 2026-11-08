@@ -1,0 +1,106 @@
+单元 11 规格：稳定性与故障演练（11A 引擎长局 / 11B 服务端演练）
+
+状态：待实现（Codex）。本文件是唯一规格；与旧交接冲突时以本文件为准。
+工作区：D:\Lianjunjie\biancheng\RichMan
+基线：HEAD 8c01549（10B 已提交），全量 71 文件 / 881 条，typecheck 0、build 0。
+本轮不 commit，不新增依赖，不改规则数值、协议版本、快照 schema。
+
+一、目标
+1. 用可复现的测试证明：10 人局能从开局走到 GAME_OVER，且每一步都不破坏引擎不变量。
+2. 用真实 WebSocket + 真实子进程证明：10 人连接、重连风暴、恢复码并发、真实 kill/重启、房间销毁后资源释放。
+3. 只修测试暴露出的、能给出最小复现的 bug；找不到就只加测试。禁止为了让测试变绿而放宽规则或删旧断言。
+
+二、11A 引擎长局与不变量
+新增 packages/game-core/tests/endurance.test.ts。不得修改 packages/game-core/src/**，除非发现真实 bug（见六）。
+只使用公开入口：createInitialState、applyCommand、advanceSystem、resumeFromPause。
+时间/随机全部注入，不用 fake timers，不读系统时钟。
+
+2.1 固定脚本 driver（测试内 helper，不导出到 src）
+- 10 名玩家 p1..p10，config { timerMode:"fast", privateDebtAffectsBankLoan:false }。
+- 每次 applyCommand 前构造 { protocolVersion:1, gameId, commandId:"c"+n, type, payload }，ctx={ actorId, nowMs, drawResult }。
+- 失败命令（outcome.ok===false）必须断言 state 与调用前 structuredClone 完全相等（失败原子性），然后继续下一步；不得把失败当崩溃。
+- advanceSystem 时 nowMs 取 max(now+1, Date.parse(state.deadlineAt ?? 0))，actorId:"SYSTEM"。
+- 步骤上限 3000；超过即 fail 并打印 phase/round/version/lastEvent。
+
+2.2 两个固定脚本场景
+S1 无借贷、危险即放弃：
+- ACTION：当前座位 END_ACTION；BETTING：所有未锁定者 SUBMIT_BET {betCents:"0",guess:0,leverage:1}；drawResult 固定 0；BANK_DUE：不借钱，advanceSystem 走默认；TAX：dangerSeatId 非空时该座位 RESCUE_GIVE_UP，否则 advanceSystem。
+- 断言：最终 phase=GAME_OVER；alive 数为 0；winnerId===null；round 在 10..40 之间（当前实现约 18）；事件里同时出现 PLAYER_BANKRUPT 与 GAME_OVER；没有任何玩家的 cents 为 NaN。
+S2 固定下注差：
+- 同上，但 BETTING 时每个存活玩家下注 min(100, 本人 coins)，p1 guess 0、其他人 guess 1；drawResult 固定 0；危险时仍放弃。
+- 断言：最终 GAME_OVER、alive 数 1、winnerId 等于唯一存活者（当前实现为 p1，round 约 15）；winner.cents>0。
+- 同一脚本连续跑两遍，终局 state JSON 完全相同 ⇒ 可复现。
+
+2.3 不变量 I1–I12（每步之后检查，失败时输出 step/phase/round/version 与违规对象）
+I1 players.length 恒为 10；playerId 唯一且等于 "p"+seatId；seatId 为 1..10 且唯一。
+I2 每名玩家 credit ∈ {GOOD,DEFAULTED}；status ∈ {ALIVE,DANGER,BANKRUPT}；alive===false ⇔ status==="BANKRUPT"。
+I3 credit==="DEFAULTED" ⇒ 至少存在一条该玩家的 DEFAULTED 银行贷款记录（用 bankLoans 判断，不要只看 credit）。
+I4 cents、betCents、remainingCents、principalCents、paidCents 均为安全整数；|cents| ≤ MAX_MONEY_CENTS。
+I5 round 单调不减，且 ≥1；phase ∈ PHASES；GAME_OVER 之后不再变化。
+I6 本次调用若 version 前进：新 version > 旧 version；eventSeq 单调不减；本次 events 的 seq 从旧 eventSeq+1 起严格连续，且新 eventSeq === 旧 eventSeq + events.length（仅限本测试的无旧指针迁移新局）。
+I7 deadlineAt 为 null 或可 Date.parse 的 ISO；windowDeadlineMs 为 null 或有限整数；二者同为 null 或同为非 null。
+I8 currentSeatId 为 null 或属于 alive 玩家；actedSeats 无重复且都属于 alive 玩家。
+I9 bankLoans：loanId 唯一；borrowerId 存在；remainingCents/paidCents ≥0；status ∈ {ACTIVE,REPAID,DEFAULTED}；status==="REPAID" ⇒ remainingCents===0；DEFAULTED ⇒ remainingCents>0。
+I10 privateLoans：lenderId≠borrowerId 且都存在；remainingCents≥0；status ∈ {ACTIVE,REPAID,FROZEN,BAD_DEBT}；ACTIVE ⇒ remainingCents>0；REPAID ⇒ remainingCents===0。
+I11 requests：requestId 唯一；status ∈ {PENDING,ACCEPTED,REFUSED,CANCELLED,EXPIRED,FAILED}；PENDING ⇒ deadlineMs 为有限正整数且借款人与出借人都 alive；同一 borrowerId 同时最多 1 条 PENDING（D6）。
+I12 bets：phase!=="BETTING" ⇒ bets 为空对象；BETTING 中每笔 betCents≥0、guess∈{0,1}、leverage∈{1,2}，且 credit==="DEFAULTED" 的玩家 leverage 必须为 1。
+I13 GAME_OVER ⇒ alive 数 ≤1；alive 数为 1 ⇒ winnerId 等于该玩家；alive 数为 0 ⇒ winnerId===null。
+
+2.4 混沌测试
+T3 chaos_invariants：
+- 用自带的确定性伪随机（mulberry32 之类，写在测试内，种子 11/12/13），为每个种子跑 1500 步或到 GAME_OVER。
+- ACTION 在当前座位随机从 [END_ACTION, BORROW_BANK(金额=本人 cents 的 25% 且≥1), REQUEST_PRIVATE_LOAN(向随机其他存活玩家, 金额=本人 cents 的 20% 且≥1, rateBps 1000), REPAY_BANK(仅当有 ACTIVE 贷款, 金额=min(remaining, cents)), REPAY_PRIVATE, COLLECT_PRIVATE(仅当有可收合同)] 中选一个；失败则断言原子性并下一条。
+- BETTING：未锁定者随机 betCents∈{0,100,500}（不超过 cents）、guess∈{0,1}、leverage∈{1,2}，drawResult 用种子推进。
+- TAX/BANK_DUE：危险者 50% 放弃、50% 尝试向随机玩家借 500 分；BANK_DUE 50% 还清（若够）否则 advanceSystem。
+- 断言：不抛未捕获异常；I1–I13 全过；version 严格递增（允许 advanceSystem 一次推进多步）。
+- 记录最终 phase 分布（可断言至少一个种子进入 GAME_OVER；若 1500 步内没有，放宽为「至少一个种子 round≥8」并在交接里写原因）。
+T4 replay_determinism：同种子同脚本跑两遍，最终 state JSON 完全一致。
+
+2.5 规模与性能
+T5 snapshot_scale：取 S2 终局 state，JSON.stringify(state).length < 512*1024；bankLoans+privateLoans+requests 总条数 < 400；测试总耗时（本文件全部）< 20s。
+不引入性能基准框架，只用 expect(Date.now()-t0).toBeLessThan(20000) 这种粗判，并在交接里记录实际耗时。
+
+三、11B 服务端演练
+新增 apps/server/tests/stability.test.ts。全部使用 diskHarness 或 fork 子进程 + 临时目录，端口 0，不读不写 apps/server/data，不碰 8000 端口与真实 run/*.json。
+不得直接调用 manager 造假来绕过 WS；断言必须来自真实客户端消息、/health 或磁盘快照。
+
+3.1 10 人连接与资源
+T6 ten_players_round：POST /api/rooms 建房，10 个 Peer 依次 join/ready，房主 start；断言 10 个 joined 的 seatId 为 1..10、/health connections=10、rooms=1；每人 END_ACTION 直到进入 BETTING；10 人各 SUBMIT_BET 0/0/1；断言 /health 仍 10；房主 destroy_room；断言所有 Peer 收到 room_destroyed 或 close code 4002、/health connections=0、rooms=0。
+T7 room_lifecycle_release：连续建 12 个房间（每个 1 人 join 后 destroy），最后 /health rooms=0、connections=0；磁盘 rooms/ 下无残留目录（允许 backups 之外为空）。
+T8 reconnect_storm：10 人开局后同时 close 全部连接，再并发 resume：5 人用 sessionToken（同一 token 可继续用，不轮换），5 人用 recoveryCode（会签发新 token 并作废旧 token）。断言 10 个 joined 的 seatId 与原座位一致；用恢复码的 5 人新 token 与原 token 不同，且旧 token 再 resume 必须被拒；/health connections=10、房间 PLAYING；随后 5 人 close，/health connections=5；全部 close 后为 0，房间仍存在。（注意：sessionToken 路径不轮换 token，不要断言它变了。）
+T9 recovery_race：同一玩家用同一 recoveryCode 并发恢复两次。恢复码本身不轮换（设计如此，它是长期凭证），两次握手都可能返回 joined，但会各自签发新 token，后一次使前一次失效。断言：最终该玩家只有 1 条当前会话/1 个 token 有效；两个连接中恰好一个仍可发命令并收到 snapshot，另一个被 4001/REPLACED 关闭或在后续命令收到 NOT_JOINED/REPLACED；游戏 version 与快照字节不变；不能出现两个会话记录或两条座位。
+T10 stale_token_after_rotation：用 recoveryCode resume 得到新 token 后，旧 token 再 resume 必须被拒绝（NOT_JOINED），且旧连接不能发命令改变状态（对照 version 与快照字节）。
+T11 kill_restart_midgame：用 fork + execArgv ["--import","tsx"] 起 recovery-worker（参考 review06-crash.test.ts），3 人房开局并进入 BETTING、2 人已锁定；SIGKILL 子进程；读磁盘 snapshot，重启服务；断言房间 paused、state 与磁盘快照逐字段一致（players/cents/version/phase/requests/bankLoans/privateLoans）、host resume 后 version+1 且 lastEvents[0].type==="GAME_RESUMED"、未锁定者仍可 SUBMIT_BET 并正常结算。
+
+3.2 允许的最小生产修改
+如测试暴露真实 bug：只允许改 apps/server/src/** 或 packages/game-core/src/** 的最小片段，必须在交接「修复清单」写 文件:行号、复现用例、修复理由；不得改协议、规则、schema、依赖。若无法最小修复，保持失败并报告，不要弱化断言。
+
+四、变异探针（实现后必须自己跑并记录红条）
+MUT1 引擎：把 engine.ts 的「同一借款人最多 1 PENDING」检查改成允许 2 条 ⇒ T3 的 I11 必须红（若 chaos 未触发，则固定 S1 中增加一笔第二请求的用例使其必红）。
+MUT2 引擎：让某个 handler 在抛错前先改金币（例如 handleBorrowBank 在读金额后先扣 1 分）⇒ T3 失败原子性必须红。
+MUT3 服务端：把并发 recovery 后旧 token 失效/旧连接释放的那段逻辑去掉（例如 restoreIdentity 不删旧 digest 或 ws 不 close 被顶替连接）⇒ T9 必须红。
+MUT4 服务端：destroyRoom 后不 cancelRoom/不断开连接 ⇒ T6 或 T7 必须红。
+每组变异只改一处、跑完立即还原，记录命令、红条名称、还原后 sha256/git diff 为空。
+
+五、验收命令（在仓库根执行，PATH 先补 C:\Windows\System32\WindowsPowerShell\v1.0）
+corepack pnpm -s test
+corepack pnpm -s typecheck
+corepack pnpm -s build
+git diff --check
+旧 881 条不得减少或削弱；新增测试建议 ≥12 条（11A 6、11B 6），实际条数以文件为准。全量耗时目标 < 180s，若超出在交接说明原因。
+
+六、明确不纳入本轮（已由 Lead 决策，不要顺手改）
+- 09A F18（handleUpgrade 同步 catch 无可控测试缝）：不为测试在生产代码开注入点；记为已接受风险。
+- 09C-B S6/S8/S14（真实 ACL 失败、force 普通文件、2s health 缺口）：需管理员权限与真实 Windows 语义，留给 09D 手工矩阵。
+- 08B/08C 真机安全区与音频：09D 真机验收。
+- 05B 清单未逐项记录：并入 09D。
+- 10A S5（收款后超 MAX 返回 INVALID_AMOUNT 且请求保持 PENDING）：保持现状。
+- D6 规则本身、教程文案、界面样式：已冻结，不得改。
+
+七、交付物（不 commit）
+1. packages/game-core/tests/endurance.test.ts
+2. apps/server/tests/stability.test.ts
+3. 若修复：最小源码 diff + 对应回归测试
+4. handoff/单元11-成果报告.txt、运行与验收.txt、下一阶段交接.txt、注意事项.txt
+   四份都要写：新增测试数与全量数、实跑输出、变异红条、发现的问题与处置、已知边界。
+5. 报告里明确回答：10 人局是否真的走到 GAME_OVER？winner 有/无两种终局是否都覆盖？真实 kill 后恢复是否逐字段一致？
