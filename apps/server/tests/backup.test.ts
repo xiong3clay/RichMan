@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, rmdir, symlink, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, expect, it } from "vitest";
@@ -506,4 +506,82 @@ it("T17 restored_game_equals_original: 真开一局、打命令、备份、删�
   } finally {
     await harness.close();
   }
+});
+
+it("T20 cleanup_reports_failed_removals: EACCES逐项可见且继续清理；dryRun只报告计划", async () => {
+  const { root, now } = await cleanupFixture();
+  const dry = await cleanupData({ root, now, dryRun: true });
+  expect(dry.wouldRemove).toEqual({ tmp: 2, logs: 5, backups: 2, corrupt: 2 });
+  expect(dry.logsRemoved).toEqual([]); expect(dry.backupsRemoved).toEqual([]); expect(dry.corruptRemoved).toEqual([]);
+  expect(dry.failed).toEqual([]);
+  const blocked = path.join(root, "logs", "server-24.log");
+  const result = await cleanupData({ root, now, hooks: { removePath: async (target, options) => {
+    if (target === blocked) throw Object.assign(new Error("EACCES injected deletion"), { code: "EACCES" });
+    await rm(target, { recursive: options.recursive, force: true });
+  } } });
+  expect(result.failed).toEqual([{ group: "logs", path: blocked, message: expect.stringContaining("EACCES") }]);
+  expect(result.logsRemoved).toHaveLength(4);expect(result.backupsRemoved).toHaveLength(2);expect(result.corruptRemoved).toHaveLength(2);
+  expect(result.tmpFilesRemoved).toBe(2);expect(result.wouldRemove).toEqual({ tmp: 0, logs: 0, backups: 0, corrupt: 0 });
+  expect(existsSync(blocked)).toBe(true);expect(existsSync(path.join(root,"logs","server-23.log"))).toBe(false);
+});
+
+it("T18 restore_post_write_failure_rolls_back_original: 写后失败回滚旧档且无半成品/多余保留目录", async () => {
+  const source=await tempDir(), target=await tempDir(), out=path.join(await tempDir(),"backup");
+  await commitFixture(source,"0042",makeSnapshot("0042",1234,["新甲","新乙"]));
+  await createBackup({root:source,outDir:out});await commitFixture(target,"0042",makeSnapshot("0042",999,["旧甲","旧乙"]));
+  const before=await readFile(path.join(target,"rooms","0042","snapshot.json"));let afterWriteRan=false;
+  await expect(restoreRoom({root:target,backupDir:out,code:"0042",force:true,hooks:{afterWrite:async()=>{
+    afterWriteRan=true;
+    expect((await readFile(path.join(target,"rooms","0042","snapshot.json"))).equals(before)).toBe(false);
+    throw new Error("INJECTED_AFTER_WRITE");
+  }}})).rejects.toMatchObject({code:"RESTORE_VERIFY_FAILED",details:{problems:["INJECTED_AFTER_WRITE"]}});
+  expect(afterWriteRan).toBe(true);
+  expect((await readFile(path.join(target,"rooms","0042","snapshot.json"))).equals(before)).toBe(true);
+  expect(await readdir(path.join(target,"rooms"))).toEqual(["0042"]);
+});
+
+it("T19 restore_rollback_failure_details: 回滚失败保留旧档且message/details一致可诊断", async () => {
+  const source=await tempDir(), target=await tempDir(), out=path.join(await tempDir(),"backup");
+  await commitFixture(source,"0042");await createBackup({root:source,outDir:out});
+  await commitFixture(target,"0042",makeSnapshot("0042",999,["旧甲","旧乙"]));
+  const before=await readFile(path.join(target,"rooms","0042","snapshot.json"));let caught:any;
+  try { await restoreRoom({root:target,backupDir:out,code:"0042",force:true,hooks:{
+    afterWrite:()=>{throw new Error("INJECTED_AFTER_WRITE");},
+    rollback:async()=>{throw new Error("INJECTED_ROLLBACK");},
+  }}); } catch(error) { caught=error; }
+  expect(caught).toMatchObject({code:"RESTORE_VERIFY_FAILED",details:{rollbackError:"INJECTED_ROLLBACK",keptPath:expect.any(String)}});
+  expect(caught.message).toContain("回滚旧档失败");expect(caught.message).toContain(caught.details.rollbackError);expect(caught.message).toContain(caught.details.keptPath);
+  expect((await readFile(path.join(caught.details.keptPath,"snapshot.json"))).equals(before)).toBe(true);
+  expect(existsSync(path.join(target,"rooms","0042"))).toBe(false);
+});
+
+it("T21 create_refuses_symlink_out: junction输出被拒且目标零写入", async () => {
+  const source=await tempDir(), junctionTarget=await tempDir(), link=path.join(await tempDir(),"out-link");
+  await commitFixture(source,"0042");await symlink(junctionTarget,link,"junction");
+  try {
+    await expect(createBackup({root:source,outDir:link})).rejects.toMatchObject({code:"BACKUP_OUT_INVALID",message:expect.stringContaining("outDir 不能是符号链接/junction")});
+    expect(await readdir(junctionTarget)).toEqual([]);
+  } finally { await rmdir(link); }
+});
+
+it("T22 verify_rejects_empty_manifest: rooms空数组不可用于恢复", async () => {
+  const out=await tempDir();await writeFile(path.join(out,"manifest.json"),JSON.stringify({
+    backupFormatVersion:1,createdAt:new Date().toISOString(),sourceRoot:"/source",roomCount:0,rooms:[],skipped:[],
+  }));
+  const result=await verifyBackup(out);expect(result.ok).toBe(false);
+  expect(result.problems).toContain("manifest.rooms 为空（空备份不可用于恢复）");
+});
+
+it("T23 create_refuses_parent_junction: 父路径链接拒绝且目标零写入", async () => {
+  const source = await tempDir(), junctionTarget = await tempDir();
+  const link = path.join(await tempDir(), "parent-link");
+  await commitFixture(source, "0042");
+  await symlink(junctionTarget, link, "junction");
+  try {
+    await expect(createBackup({ root: source, outDir: path.join(link, "child") })).rejects.toMatchObject({
+      code: "BACKUP_OUT_INVALID", message: expect.stringContaining("父路径 " + link),
+    });
+    expect(await readdir(junctionTarget)).toEqual([]);
+    expect(existsSync(path.join(junctionTarget, "child"))).toBe(false);
+  } finally { await rmdir(link); }
 });

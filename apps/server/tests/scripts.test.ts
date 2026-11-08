@@ -484,3 +484,259 @@ describe.skipIf(!onWindows)("09B scripts", () => {
     expect(status.json?.server?.reason).toBe("");
   }, 60000);
 });
+
+// 09C-B: append-only T16–T22; 09B T1–T15 above remain byte-for-byte unchanged.
+async function backupScriptFixture(): Promise<{ data: string; out: string; code: string; bytes: Buffer }> {
+  const data = await makeTempDir();
+  const out = path.join(await makeTempDir(), 'richman-backup-fixture');
+  const code = '0042';
+  const { FileRoomStore } = await import('../src/storage/file-store.js');
+  const { RULES_VERSION } = await import('@richman/game-core');
+  const { PROTOCOL_VERSION } = await import('@richman/shared');
+  const players = [{ playerId:'p1',seatId:1,nickname:'脚本验收',ready:false,online:false,tokenDigest:'a'.repeat(64) }];
+  await new FileRoomStore(data).commitRoom(code, {
+    schemaVersion:1,rulesVersion:RULES_VERSION,protocolVersion:PROTOCOL_VERSION,savedAt:1234,
+    roomCode:code,hostId:'p1',roomState:'LOBBY',paused:false,gameId:null,usedGameIds:[],players,
+    sessions:[{roomCode:code,playerId:'p1',seatId:1,tokenDigest:'a'.repeat(64),recoveryDigest:'b'.repeat(64),connectionEpoch:1}],
+    game:null,commands:[],lastEvents:[],
+  }, []);
+  const { createBackup } = await import('../src/storage/backup.js');
+  await createBackup({root:data,outDir:out});
+  return {data,out,code,bytes:await readFile(path.join(data,'rooms',code,'snapshot.json'))};
+}
+function singleScriptJson(result: RunResult): Record<string, any> {
+  expect(result.stdout.trim().split(/\r?\n/), failureMessage(result)).toHaveLength(1);
+  expect(result.json, failureMessage(result)).not.toBeNull();
+  return result.json!;
+}
+
+describe.skipIf(!onWindows)('09C-B backup/restore/cleanup scripts',()=>{
+  it('T16 backup_script_creates_backup',async()=>{
+    const fixture=await backupScriptFixture();const out=path.join(await makeTempDir(),'created');
+    const result=runScript('backup.ps1',['-DataDir',fixture.data,'-Out',out,'-Json']);
+    expect(result.status,failureMessage(result)).toBe(0);
+    expect(singleScriptJson(result)).toMatchObject({ok:true,script:'backup',out,rooms:1,skipped:0,pruned:0});
+    expect(JSON.parse(await readFile(path.join(out,'manifest.json'),'utf8')).roomCount).toBe(1);
+    const warningModule=path.join(await makeTempDir(),'warning.cjs');
+    await writeFile(warningModule,"process.stderr.write('CLI_WARNING_TEST\\n');",'utf8');
+    const previousOptions=process.env['NODE_OPTIONS'];
+    try{
+      process.env['NODE_OPTIONS']=(previousOptions??'')+' --require '+JSON.stringify(warningModule);
+      const warned=runScript('backup.ps1',['-DataDir',fixture.data,'-Json']);
+      expect(warned.status,failureMessage(warned)).toBe(0);
+      expect(singleScriptJson(warned)).toMatchObject({ok:true,rooms:1});expect(warned.stderr).toContain('CLI_WARNING_TEST');
+    }finally{if(previousOptions===undefined)delete process.env['NODE_OPTIONS'];else process.env['NODE_OPTIONS']=previousOptions;}
+  },60000);
+  it('T17 restore_script_refuses_while_running',async()=>{
+    const fixture=await backupScriptFixture();const port=await freePort();
+    const snapshotPath=path.join(fixture.data,'rooms',fixture.code,'snapshot.json');
+    const {createHash}=await import('node:crypto');const hash=(b:Buffer)=>createHash('sha256').update(b).digest('hex');
+    try{
+      const start=runScriptToFile('start-lan.ps1',['-Port',String(port),'-DataDir',fixture.data],fixture.data);
+      expect(start.status,failureMessage(start)).toBe(0);
+      const before=hash(await readFile(snapshotPath));
+      const result=runScript('restore.ps1',['-DataDir',fixture.data,'-Backup',fixture.out,'-Room',fixture.code,'-Json']);
+      expect(result.status,failureMessage(result)).toBe(2);
+      expect(singleScriptJson(result)).toMatchObject({ok:false,script:'restore',code:'SERVICE_RUNNING'});
+      expect(hash(await readFile(snapshotPath))).toBe(before);
+      const {readdir}=await import('node:fs/promises');
+      expect((await readdir(path.join(fixture.data,'rooms'))).filter(n=>n.startsWith('restore-keep-'))).toEqual([]);
+      const statePath=path.join(fixture.data,'run','server.json'),stateBytes=await readFile(statePath);
+      const brokenBytes=Buffer.from('{BROKEN_STATE_TEST','utf8');
+      try{
+        await writeFile(statePath,brokenBytes);
+        const healthy=runScript('restore.ps1',['-DataDir',fixture.data,'-Backup',fixture.out,'-Room',fixture.code,'-Port',String(port),'-Json']);
+        expect(healthy.status,failureMessage(healthy)).toBe(2);
+        expect(singleScriptJson(healthy)).toMatchObject({ok:false,code:'SERVICE_RUNNING'});
+        expect(await readFile(statePath)).toEqual(brokenBytes);expect(hash(await readFile(snapshotPath))).toBe(before);
+      }finally{await writeFile(statePath,stateBytes);}
+    }finally{
+      const stop=runScript('stop.ps1',['-DataDir',fixture.data]);
+      expect(stop.status,failureMessage(stop)).toBe(0);await waitFor(async()=>!(await portOpen(port)));
+    }
+  },60000);
+  it('T18 restore_script_restores_after_stop',async()=>{
+    const fixture=await backupScriptFixture();const port=await freePort();
+    try{
+      const start=runScriptToFile('start-lan.ps1',['-Port',String(port),'-DataDir',fixture.data],fixture.data);
+      expect(start.status,failureMessage(start)).toBe(0);
+      const stop=runScript('stop.ps1',['-DataDir',fixture.data]);expect(stop.status,failureMessage(stop)).toBe(0);
+      await waitFor(async()=>!(await portOpen(port)));await rmDirWithRetry(path.join(fixture.data,'rooms',fixture.code));
+      const result=runScript('restore.ps1',['-DataDir',fixture.data,'-Backup',fixture.out,'-Room',fixture.code,'-Port',String(port),'-Json']);
+      expect(result.status,failureMessage(result)).toBe(0);
+      expect(singleScriptJson(result)).toMatchObject({ok:true,script:'restore',restored:[{code:fixture.code,keptPath:null}],pausedHint:true});
+      expect(await readFile(path.join(fixture.data,'rooms',fixture.code,'snapshot.json'))).toEqual(fixture.bytes);
+    }finally{runScript('stop.ps1',['-DataDir',fixture.data]);}
+  },60000);
+  it('T19 restore_script_requires_force_for_existing',async()=>{
+    const fixture=await backupScriptFixture();const port=await freePort();
+    const args=['-DataDir',fixture.data,'-Backup',fixture.out,'-Room',fixture.code,'-Port',String(port),'-Json'];
+    const refused=runScript('restore.ps1',args);
+    expect(refused.status,failureMessage(refused)).toBe(2);
+    expect(singleScriptJson(refused)).toMatchObject({ok:false,code:'RESTORE_TARGET_EXISTS'});
+    expect(await readFile(path.join(fixture.data,'rooms',fixture.code,'snapshot.json'))).toEqual(fixture.bytes);
+    const force=runScript('restore.ps1',[...args,'-Force']);expect(force.status,failureMessage(force)).toBe(0);
+    const result=singleScriptJson(force);expect(result.restored[0].keptPath).toContain('restore-keep-');
+    expect(await readFile(path.join(result.restored[0].keptPath,'snapshot.json'))).toEqual(fixture.bytes);
+    const manifestPath=path.join(fixture.out,'manifest.json');const manifest=JSON.parse(await readFile(manifestPath,'utf8'));
+    manifest.backupFormatVersion=99;await writeFile(manifestPath,JSON.stringify(manifest),'utf8');
+    const invalid=runScript('restore.ps1',['-DataDir',fixture.data,'-Backup',fixture.out,'-All','-Port',String(port),'-Json']);
+    expect(invalid.status,failureMessage(invalid)).toBe(1);
+    expect(singleScriptJson(invalid)).toMatchObject({ok:false,code:'MANIFEST_INVALID'});
+  },60000);
+  it('T20 cleanup_script_dry_run',async()=>{
+    const data=await makeTempDir();const logs=path.join(data,'logs'),tmp=path.join(data,'.tmp');
+    await mkdir(logs);await mkdir(tmp);const {utimes}=await import('node:fs/promises');
+    for(let i=0;i<3;i++){const file=path.join(logs,'server-'+i+'.log');await writeFile(file,'log');await utimes(file,100+i,100+i);}
+    const oldTmp=path.join(tmp,'old.tmp');await writeFile(oldTmp,'tmp');await utimes(oldTmp,100,100);
+    const result=runScript('cleanup.ps1',['-DataDir',data,'-DryRun','-KeepLogs','1','-Json']);
+    expect(result.status,failureMessage(result)).toBe(0);
+    expect(singleScriptJson(result)).toMatchObject({ok:true,script:'cleanup',dryRun:true,removed:{tmp:0,logs:0,backups:0,corrupt:0},wouldRemove:{tmp:1,logs:2,backups:0,corrupt:0},failed:[]});
+    for(let i=0;i<3;i++)expect(existsSync(path.join(logs,'server-'+i+'.log'))).toBe(true);
+    expect(existsSync(oldTmp)).toBe(true);
+  },60000);
+  it('T21 cleanup_script_reports_failed',async()=>{
+    const data=await makeTempDir();const result=runScript('cleanup.ps1',['-DataDir',data,'-Json']);
+    expect(result.status,failureMessage(result)).toBe(0);
+    const json=singleScriptJson(result);expect(json.ok).toBe(true);expect(Array.isArray(json.failed)).toBe(true);expect(json.failed).toEqual([]);
+    // 真实删除失败由核心 T20 hooks.removePath 注入 EACCES 覆盖；本测试不伪造脚本成功。
+    for(const value of ['-1','1.5']){
+      const invalid=runScript('cleanup.ps1',['-DataDir',data,'-KeepLogs',value,'-Json']);
+      expect(invalid.status,failureMessage(invalid)).toBe(1);
+      expect(singleScriptJson(invalid)).toMatchObject({ok:false,code:'BAD_ARGUMENT'});
+    }
+  },60000);
+  it('T22 scripts_reject_unknown_parameter',async()=>{
+    for(const name of ['backup.ps1','restore.ps1','cleanup.ps1']){
+      const bytes=await readFile(path.join(scriptsDir,name));expect(bytes.subarray(0,3)).toEqual(Buffer.from([0xef,0xbb,0xbf]));
+      expect(bytes.toString('utf8').replace(/^\uFEFF/,'')).toMatch(/^\[CmdletBinding\(\)\]/);
+    }
+    const result=runScript('backup.ps1',['-Nope','1']);expect(result.status,failureMessage(result)).toBe(1);
+    expect(result.stderr+result.stdout).toMatch(/Nope/);expect(result.stdout).not.toMatch(/at .*backup\.ps1/i);
+  },60000);
+});
+
+// 09C-B review: append-only T23–T28. Overrides execute real temporary script
+// copies only for mutation verification; normal acceptance uses the original helpers.
+function runReviewScript(name: 'backup.ps1' | 'restore.ps1', args: string[]): RunResult {
+  const variable = name === 'backup.ps1' ? 'RICHMAN_09CB_BACKUP_TEST_SCRIPT' : 'RICHMAN_09CB_RESTORE_TEST_SCRIPT';
+  const copy = process.env[variable];
+  if (!copy) return runScript(name, args);
+  return runPowerShellCommand('& ' + psQuote(copy) + ' ' + args.map(arg => /^-[A-Za-z]+$/.test(arg) ? arg : psQuote(arg)).join(' ') + '; exit $LASTEXITCODE');
+}
+
+describe.skipIf(!onWindows)('09C-B review repairs', () => {
+  it('T23 backup_script_refuses_existing_out', async () => {
+    const fixture = await backupScriptFixture();
+    const empty = await makeTempDir();
+    const refused = runScript('backup.ps1', ['-DataDir', fixture.data, '-Out', empty, '-Json']);
+    expect(refused.status, failureMessage(refused)).toBe(2);
+    expect(singleScriptJson(refused)).toMatchObject({ ok: false, script: 'backup', code: 'BACKUP_OUT_EXISTS' });
+    const { readdir } = await import('node:fs/promises');
+    expect(await readdir(empty)).toEqual([]);
+    const full = await makeTempDir();
+    await writeFile(path.join(full, 'keep.txt'), 'KEEP_CONTENT', 'utf8');
+    const nonempty = runScript('backup.ps1', ['-DataDir', fixture.data, '-Out', full, '-Json']);
+    expect(nonempty.status, failureMessage(nonempty)).toBe(2);
+    expect(singleScriptJson(nonempty)).toMatchObject({ ok: false, code: 'BACKUP_OUT_EXISTS' });
+    expect(await readFile(path.join(full, 'keep.txt'), 'utf8')).toBe('KEEP_CONTENT');
+    expect(existsSync(path.join(full, 'manifest.json'))).toBe(false);
+    const file = path.join(await makeTempDir(), 'existing-file');
+    await writeFile(file, 'KEEP_FILE', 'utf8');
+    const plainFile = runScript('backup.ps1', ['-DataDir', fixture.data, '-Out', file, '-Json']);
+    expect(plainFile.status, failureMessage(plainFile)).toBe(2);
+    expect(singleScriptJson(plainFile)).toMatchObject({ ok: false, code: 'BACKUP_OUT_EXISTS' });
+    expect(await readFile(file, 'utf8')).toBe('KEEP_FILE');
+  }, 60000);
+
+  it('T24 restore_all_success', async () => {
+    const fixture = await backupScriptFixture();
+    const { FileRoomStore } = await import('../src/storage/file-store.js');
+    const { createBackup } = await import('../src/storage/backup.js');
+    const second = JSON.parse(fixture.bytes.toString('utf8'));
+    second.roomCode = '7506';
+    for (const session of second.sessions) session.roomCode = '7506';
+    await new FileRoomStore(fixture.data).commitRoom('7506', second, []);
+    const out = path.join(await makeTempDir(), 'two-rooms');
+    await createBackup({ root: fixture.data, outDir: out });
+    const port = await freePort();
+    expect(port).not.toBe(8000);
+    try {
+      const start = runScriptToFile('start-lan.ps1', ['-DataDir', fixture.data, '-Port', String(port)], fixture.data);
+      expect(start.status, failureMessage(start)).toBe(0);
+      const stop = runScript('stop.ps1', ['-DataDir', fixture.data]);
+      expect(stop.status, failureMessage(stop)).toBe(0);
+      await waitFor(async () => !(await portOpen(port)));
+      for (const code of ['0042', '7506']) await rmDirWithRetry(path.join(fixture.data, 'rooms', code));
+      const restored = runReviewScript('restore.ps1', ['-DataDir', fixture.data, '-Backup', out, '-All', '-Port', String(port), '-Json']);
+      expect(restored.status, failureMessage(restored)).toBe(0);
+      expect(singleScriptJson(restored)).toMatchObject({
+        ok: true, restored: [{ code: '0042', keptPath: null }, { code: '7506', keptPath: null }], pausedHint: true,
+      });
+      const again = runScriptToFile('start-lan.ps1', ['-DataDir', fixture.data, '-Port', String(port)], fixture.data);
+      expect(again.status, failureMessage(again)).toBe(0);
+      const health = await (await fetch('http://127.0.0.1:' + port + '/health')).json();
+      expect(health.rooms).toBe(2);
+      const listing = await (await fetch('http://127.0.0.1:' + port + '/api/rooms')).json();
+      expect(listing.rooms.map((room: any) => room.roomCode).sort()).toEqual(['0042', '7506']);
+      expect(listing.rooms.every((room: any) => room.paused === true)).toBe(true);
+    } finally {
+      const stopped = runScript('stop.ps1', ['-DataDir', fixture.data]);
+      expect(stopped.status, failureMessage(stopped)).toBe(0);
+      await waitFor(async () => !(await portOpen(port)));
+    }
+  }, 60000);
+
+  it('T25 restore_all_and_room_conflict', async () => {
+    const fixture = await backupScriptFixture();
+    const port = await freePort();
+    const result = runReviewScript('restore.ps1', ['-DataDir', fixture.data, '-Backup', fixture.out, '-All', '-Room', fixture.code, '-Port', String(port), '-Json']);
+    expect(result.status, failureMessage(result)).toBe(1);
+    expect(singleScriptJson(result)).toMatchObject({ ok: false, code: 'BAD_ARGUMENT' });
+    const { readdir } = await import('node:fs/promises');
+    expect((await readdir(path.join(fixture.data, 'rooms'))).some(name => name.startsWith('restore-keep-'))).toBe(false);
+    expect(await readFile(path.join(fixture.data, 'rooms', fixture.code, 'snapshot.json'))).toEqual(fixture.bytes);
+  }, 60000);
+
+  it('T26 backup_script_parent_junction_refused', async () => {
+    const fixture = await backupScriptFixture();
+    const target = await makeTempDir(), link = path.join(await makeTempDir(), 'parent-link');
+    const { symlink, readdir, rmdir } = await import('node:fs/promises');
+    await symlink(target, link, 'junction');
+    try {
+      const result = runScript('backup.ps1', ['-DataDir', fixture.data, '-Out', path.join(link, 'child'), '-Json']);
+      expect(result.status, failureMessage(result)).toBe(1);
+      expect(singleScriptJson(result)).toMatchObject({ ok: false, code: 'BACKUP_OUT_INVALID', message: expect.stringContaining('父路径') });
+      expect(await readdir(target)).toEqual([]);
+    } finally { await rmdir(link); }
+  }, 60000);
+
+  it('T27 backup_script_keep_prunes_only_matching', async () => {
+    const fixture = await backupScriptFixture(), parent = await makeTempDir();
+    await writeFile(path.join(parent, 'keep.txt'), 'UNRELATED_FILE', 'utf8');
+    await mkdir(path.join(parent, 'other-dir'));
+    await writeFile(path.join(parent, 'other-dir', 'file.txt'), 'UNRELATED_DIRECTORY', 'utf8');
+    const first = path.join(parent, 'richman-backup-a'), second = path.join(parent, 'richman-backup-b');
+    const a = runReviewScript('backup.ps1', ['-DataDir', fixture.data, '-Out', first, '-Keep', '1', '-Json']);
+    expect(a.status, failureMessage(a)).toBe(0); expect(singleScriptJson(a)).toMatchObject({ ok: true, pruned: 0 });
+    const b = runReviewScript('backup.ps1', ['-DataDir', fixture.data, '-Out', second, '-Keep', '1', '-Json']);
+    expect(b.status, failureMessage(b)).toBe(0); expect(singleScriptJson(b)).toMatchObject({ ok: true, pruned: 1 });
+    expect(existsSync(first)).toBe(false); expect(existsSync(path.join(second, 'manifest.json'))).toBe(true);
+    expect(await readFile(path.join(parent, 'keep.txt'), 'utf8')).toBe('UNRELATED_FILE');
+    expect(await readFile(path.join(parent, 'other-dir', 'file.txt'), 'utf8')).toBe('UNRELATED_DIRECTORY');
+  }, 60000);
+
+  it('T28 script_arg_errors', async () => {
+    for (const name of ['restore.ps1', 'cleanup.ps1']) {
+      const invalid = runScript(name, ['-Nope', '1']);
+      expect(invalid.status, failureMessage(invalid)).toBe(1);
+      expect(invalid.stdout + invalid.stderr).toMatch(/Nope/);
+      expect(invalid.stdout + invalid.stderr).not.toMatch(/at .*\.ps1/i);
+    }
+    const missing = path.join(await makeTempDir(), 'not-created');
+    const result = runScript('cleanup.ps1', ['-DataDir', missing, '-Json']);
+    expect(result.status, failureMessage(result)).toBe(1);
+    expect(singleScriptJson(result)).toMatchObject({ ok: false, code: 'DATA_DIR_MISSING' });
+    expect(existsSync(missing)).toBe(false);
+  }, 60000);
+});

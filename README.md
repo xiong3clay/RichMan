@@ -101,3 +101,30 @@
 可向银行或玩家借款、还款、催债；失信后不可还款、永久失信但不会被淘汰；危险（金币为负）可自救，否则破产。
 
 细节一律以 V1.3.2 第三节（R01～R10）为准。
+
+## 备份、恢复与清理（Windows）
+
+三个脚本使用 Windows PowerShell 5.1 兼容语法，支持 `-Json` 输出一行 JSON。以下使用自选数据目录；省略 `-DataDir` 时沿用启动脚本的目录解析规则。
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/backup.ps1 -DataDir D:\RichManData -Json
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/restore.ps1 -DataDir D:\RichManData -Backup D:\RichManData\backups\richman-backup-20261108-120000 -All -Json
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/cleanup.ps1 -DataDir D:\RichManData -DryRun -Json
+```
+
+备份可在服务运行时读取完整的 `snapshot.json`。省略 `-Out` 时在 `<DataDir>\backups\richman-backup-<时间戳>` 创建全新目录；显式指定 `-Out` 必须指向尚不存在的路径，已有空目录也不能复用；目录或文件只要已存在，脚本均以 `BACKUP_OUT_EXISTS`、退出码 2 拒绝且不写入。可用 `-WithAudit` 复制已有审计日志，`-Keep N` 在备份后保留最近 N 份；默认 `-Keep 0` 不删除旧备份。
+
+```text
+richman-backup-<时间戳>/
+  manifest.json
+  rooms/<房间码>/snapshot.json
+  rooms/<房间码>/events.ndjson    # 仅 -WithAudit 且源文件存在时
+```
+
+**恢复前必须停止服务**：先运行 `scripts/stop.ps1 -DataDir D:\RichManData` 并确认已退出。恢复脚本同时检查进程归属和端口 `/health`。`run/server.json` 缺失或损坏时，自定义端口必须显式传 `-Port`，否则只探测 8000，不能据此认定其它端口上的服务已停止。服务仍在运行就以 `SERVICE_RUNNING`、退出码 2 拒绝，且不写入数据。用 `-Room 0042` 恢复指定房间，或用 `-All` 恢复备份中全部房间；两者不能同时使用。目标房间已经存在时必须显式加 `-Force`，旧档保留为 `rooms/restore-keep-*`，需要人工保留或清理。恢复完运行 `scripts/start-lan.ps1 -DataDir D:\RichManData`；房间按暂停态载入，由房主在界面点“继续游戏”。
+
+清理默认保留每类日志 20 个（server/tunnel 分别计）、备份 10 份、损坏隔离目录 5 个，仅删除超过 24 小时的 `.tmp` 普通文件；可用 `-KeepLogs`、`-KeepBackups`、`-KeepCorrupt`、`-TmpHours` 调整。先用 `-DryRun` 查看 `wouldRemove` 四类计数；此时没有实际删除，核心 `removed` 数组保持空，脚本 `removed` 计数为 0。正式清理逐项报告 `failed`，单项失败不阻止其它项；不会删除有效房间或 `restore-keep-*`。数据目录不存在时返回 `DATA_DIR_MISSING`、退出码 1；存在但没有可清理项时仍成功返回零计数。
+
+退出码：0 为成功；1 为参数、校验、运行或清理项失败；2 为需要人工处理（显式输出路径已存在（含空目录）、恢复目标已存在、服务仍在运行）。
+
+备份包含身份摘要和私有账务，不得公开、上传或贴到聊天。核心备份写入口 `outDir` 及其任一父路径不允许是符号链接或 junction，创建前检查并以 `BACKUP_OUT_INVALID` 拒绝；显式 `-Out` 本身已存在时，脚本会先按 `BACKUP_OUT_EXISTS` 拒绝。只读 `backupDir`（校验/恢复所用的备份目录）允许跟随链接，但仍应使用可信目录。空备份不可用于恢复。

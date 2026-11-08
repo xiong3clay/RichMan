@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { mkdir, open, readFile, readdir, rename, rm, stat, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { validateSnapshot } from "./file-store.js";
 import type { RoomSnapshot } from "./types.js";
 
 export type BackupErrorCode =
   | "BACKUP_OUT_EXISTS"
+  | "BACKUP_OUT_INVALID"
   | "BACKUP_EMPTY"
   | "BACKUP_MANIFEST_INVALID"
   | "BACKUP_FILE_INVALID"
@@ -54,6 +55,18 @@ export interface CleanupResult {
   logsRemoved: string[];
   backupsRemoved: string[];
   corruptRemoved: string[];
+  failed: { group: "tmp" | "logs" | "backups" | "corrupt"; path: string; message: string }[];
+  wouldRemove: { tmp: number; logs: number; backups: number; corrupt: number };
+}
+
+export interface CleanupHooks {
+  removePath?: (target: string, options: { recursive: boolean }) => Promise<void>;
+}
+
+export interface RestoreHooks {
+  afterWrite?: () => void | Promise<void>;
+  /** 测试可注入回滚失败；生产缺省仍直接rename。 */
+  rollback?: (keptPath: string, target: string) => Promise<void>;
 }
 
 const CODE_PATTERN = /^\d{4,8}$/;
@@ -215,6 +228,24 @@ function parseManifest(value: unknown): BackupManifest {
   };
 }
 
+/** 写入前检查根到目标的所有已存在前缀，不跟随父路径链接。 */
+async function assertNoReparsePointInPath(target: string): Promise<void> {
+  const resolved = path.resolve(target);
+  const root = path.parse(resolved).root;
+  let current = root;
+  for (const component of ["", ...path.relative(root, resolved).split(path.sep).filter(Boolean)]) {
+    if (component) current = path.join(current, component);
+    try {
+      if ((await lstat(current)).isSymbolicLink()) {
+        throw new BackupError("BACKUP_OUT_INVALID", "outDir 不能是符号链接/junction：父路径 " + current);
+      }
+    } catch (error) {
+      if (isEnoent(error)) return;
+      throw error;
+    }
+  }
+}
+
 export async function createBackup(opts: {
   root: string;
   outDir: string;
@@ -226,10 +257,14 @@ export async function createBackup(opts: {
   const outDir = path.resolve(opts.outDir);
   const roomsRoot = path.join(root, "rooms");
   const now = opts.now ?? new Date();
+  await assertNoReparsePointInPath(outDir);
   let outCreated = false;
   try {
     try {
-      const outStat = await stat(outDir);
+      const outStat = await lstat(outDir);
+      if (outStat.isSymbolicLink()) {
+        throw new BackupError("BACKUP_OUT_INVALID", "outDir 不能是符号链接/junction：" + outDir);
+      }
       if (!outStat.isDirectory()) {
         throw new BackupError("BACKUP_OUT_EXISTS", "备份输出路径已存在且不是目录：" + outDir);
       }
@@ -241,6 +276,9 @@ export async function createBackup(opts: {
       if (!isEnoent(error)) throw error;
       await mkdir(outDir, { recursive: true });
       outCreated = true;
+    }
+    if ((await lstat(outDir)).isSymbolicLink()) {
+      throw new BackupError("BACKUP_OUT_INVALID", "outDir 不能是符号链接/junction：" + outDir);
     }
 
     let codes: string[];
@@ -433,6 +471,7 @@ export async function verifyBackup(
     problems.push(messageOf(error));
     return { ok: false, manifest: null, problems };
   }
+  if (manifest.rooms.length === 0) problems.push("manifest.rooms 为空（空备份不可用于恢复）");
   for (const room of manifest.rooms) {
     await verifyRoomFiles(path.resolve(backupDir), room, problems);
   }
@@ -445,6 +484,7 @@ export async function restoreRoom(opts: {
   code: string;
   force?: boolean;
   now?: Date;
+  hooks?: RestoreHooks;
 }): Promise<{ code: string; keptPath: string | null }> {
   const backupDir = path.resolve(opts.backupDir);
   const root = path.resolve(opts.root);
@@ -497,6 +537,7 @@ export async function restoreRoom(opts: {
       const auditBytes = await readFile(path.join(backupDir, "rooms", code, "events.ndjson"));
       await writeFileAtomic(path.join(target, "events.ndjson"), auditBytes);
     }
+    await opts.hooks?.afterWrite?.();
     const copied = await readFile(path.join(target, "snapshot.json"));
     if (copied.length !== entry.snapshotBytes || sha256(copied) !== entry.snapshotSha256) {
       throw new Error("复制后的 snapshot.json 大小或 sha256 与 manifest 不一致");
@@ -506,10 +547,11 @@ export async function restoreRoom(opts: {
     await rm(target, { recursive: true, force: true }).catch(() => {});
     if (keptPath !== null) {
       try {
-        await rename(keptPath, target);
+        await (opts.hooks?.rollback ?? rename)(keptPath, target);
       } catch (rollbackError) {
-        throw new BackupError("RESTORE_VERIFY_FAILED", "恢复失败且回滚旧档失败：" + messageOf(rollbackError), {
+        throw new BackupError("RESTORE_VERIFY_FAILED", "恢复失败且回滚旧档失败：" + messageOf(rollbackError) + "；旧档保留在：" + keptPath, {
           problems: [messageOf(error)],
+          rollbackError: messageOf(rollbackError),
           keptPath,
           target,
         });
@@ -594,6 +636,7 @@ export async function cleanupData(opts: {
   tmpMaxAgeMs?: number;
   now?: Date;
   dryRun?: boolean;
+  hooks?: CleanupHooks;
 }): Promise<CleanupResult> {
   const keepLogs = opts.keepLogs ?? 20;
   const keepBackups = opts.keepBackups ?? 10;
@@ -612,6 +655,15 @@ export async function cleanupData(opts: {
     logsRemoved: [],
     backupsRemoved: [],
     corruptRemoved: [],
+    failed: [],
+    wouldRemove: { tmp: 0, logs: 0, backups: 0, corrupt: 0 },
+  };
+  const removePath = opts.hooks?.removePath ?? (async (target: string, options: { recursive: boolean }) => {
+    await rm(target, { recursive: options.recursive, force: true });
+  });
+  const failed = (group: CleanupResult["failed"][number]["group"], target: string, error: unknown) => {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    result.failed.push({ group, path: target, message: (code ? code + ": " : "") + messageOf(error) });
   };
 
   try {
@@ -637,12 +689,12 @@ export async function cleanupData(opts: {
       }
       files.sort((left, right) => right.mtimeMs - left.mtimeMs || right.name.localeCompare(left.name));
       for (const file of files.slice(keepLogs)) {
-        if (dryRun) continue;
+        if (dryRun) { result.wouldRemove.logs += 1; continue; }
         try {
-          await unlink(file.path);
+          await removePath(file.path, { recursive: false });
           result.logsRemoved.push(file.name);
-        } catch {
-          // 删不掉就保留，继续处理其它文件。
+        } catch (error) {
+          failed("logs", file.path, error);
         }
       }
     }
@@ -656,12 +708,12 @@ export async function cleanupData(opts: {
     for (let index = entries.length - 1; index >= keepBackups; index -= 1) {
       const entry = entries[index];
       if (!entry) continue;
-      if (dryRun) continue;
+      if (dryRun) { result.wouldRemove.backups += 1; continue; }
       try {
-        await rm(entry.dir, { recursive: true, force: true });
+        await removePath(entry.dir, { recursive: true });
         result.backupsRemoved.push(entry.name);
-      } catch {
-        // 单个备份删除失败不影响其它项。
+      } catch (error) {
+        failed("backups", entry.dir, error);
       }
     }
   } catch {
@@ -682,12 +734,12 @@ export async function cleanupData(opts: {
       .map(entry => ({ name: entry.name, stamp: corruptStamp(entry.name) }))
       .sort((left, right) => right.stamp - left.stamp || right.name.localeCompare(left.name));
     for (const entry of corrupt.slice(keepCorrupt)) {
-      if (dryRun) continue;
+      if (dryRun) { result.wouldRemove.corrupt += 1; continue; }
       try {
-        await rm(path.join(roomsDir, entry.name), { recursive: true, force: true });
+        await removePath(path.join(roomsDir, entry.name), { recursive: true });
         result.corruptRemoved.push(entry.name);
-      } catch {
-        // 单个损坏目录删除失败不影响其它项。
+      } catch (error) {
+        failed("corrupt", path.join(roomsDir, entry.name), error);
       }
     }
   } catch {
@@ -712,12 +764,13 @@ export async function cleanupData(opts: {
         if (fileStat.mtimeMs >= threshold) continue;
         if (dryRun) {
           result.tmpFilesRemoved += 1;
+          result.wouldRemove.tmp += 1;
         } else {
-          await unlink(filePath);
+          await removePath(filePath, { recursive: false });
           result.tmpFilesRemoved += 1;
         }
-      } catch {
-        // 单个临时文件失败不中断。
+      } catch (error) {
+        failed("tmp", filePath, error);
       }
     }
   } catch {
