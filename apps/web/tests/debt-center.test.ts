@@ -260,6 +260,36 @@ describe("07A 债务中心：请求区", () => {
     const safe = renderDebt(debtView({ incomingRequests: [normal] }, { serverNow }));
     expect(safe).not.toContain("出借有风险");
   });
+
+  it("两条 incomingRequests 在债务中心逐条展示（07A 只读账本），不出现 10B 引导卡共 N 个文案", () => {
+    const serverNow = "2026-11-05T00:00:00.000Z";
+    const third: WirePublicPlayer = {
+      playerId: "p3",
+      seatId: 3,
+      nickname: "丙",
+      credit: "GOOD",
+      status: "ALIVE",
+      alive: true,
+      defaultedBankDebtCents: "0",
+    };
+    const base = viewFixture();
+    const view = debtView(
+      {
+        incomingRequests: [
+          { ...requestFixture(), requestId: "req-a", borrowerId: "p2", lenderId: "p1",
+            principalCents: "111", deadlineMs: Date.parse(serverNow) + 45_000 },
+          { ...requestFixture(), requestId: "req-b", borrowerId: "p3", lenderId: "p1",
+            principalCents: "222", deadlineMs: Date.parse(serverNow) + 45_000 },
+        ],
+      },
+      { serverNow, publicPlayers: [...base.publicPlayers, third] },
+    );
+    const html = renderDebt(view);
+    expect(html).toContain("乙 想借 111 分");
+    expect(html).toContain("丙 想借 222 分");
+    expect(html).not.toContain("待答复请求：共");
+    expect(html).not.toContain("当前第 1 个");
+  });
 });
 
 describe("07A 债务中心：公开信息与空态", () => {

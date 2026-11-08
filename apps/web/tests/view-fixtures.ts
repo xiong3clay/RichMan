@@ -23,5 +23,5 @@ export function bankFixture(): WireBankLoan {
 }
 export function requestFixture(): WireLoanRequest {
   return { requestId: "req-1", borrowerId: "p2", lenderId: "p1", principalCents: "500", rateBps: 1000,
-    createdRound: 1, createdAtMs: 0, deadlineMs: 60000, status: "PENDING", borrowerCredit: "GOOD", borrowerDefaultedBankDebtCents: "0" };
+    createdRound: 1, createdAtMs: 0, deadlineMs: Date.parse("2099-01-01T00:00:00.000Z"), status: "PENDING", borrowerCredit: "GOOD", borrowerDefaultedBankDebtCents: "0" };
 }

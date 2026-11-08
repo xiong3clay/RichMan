@@ -15,6 +15,8 @@ import {
 import type { WireCommandResult, WireGameEvent, WireLoanRequest, WireSnapshotView } from "./net/wire";
 import { deriveStep } from "./game/steps";
 import type { ActionStage, DebtOption, GuidedStep, UiState } from "./game/steps";
+import { requestDeadlineIso } from "./game/request-deadline";
+import { useRequestExpired } from "./game/use-request-expired";
 import {
   INITIAL_UI_STATE,
   debtOptions,
@@ -203,6 +205,22 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
     if (!paused || !connected || error !== null) { resumePendingRef.current = false; setResumePending(false); }
   }, [paused,connected,error]);
   const step = deriveStep(view, ui);
+  /** 只有请求卡需要请求自己的截止；页头仍按阶段 view.deadlineAt。 */
+  const activeRequest =
+    step.kind === "requestLender" || step.kind === "requestBorrower" ? step.request : null;
+  const requestDeadlineIsoValue =
+    activeRequest === null ? null : requestDeadlineIso(activeRequest.deadlineMs);
+  const requestPastDeadline = useRequestExpired(
+    activeRequest?.deadlineMs ?? null,
+    view.serverNow,
+    snapshotClockRef.current.receivedAtMs,
+  );
+  const requestExpired =
+    requestPastDeadline || (activeRequest !== null && requestDeadlineIsoValue === null);
+  useEffect(() => {
+    if (!requestExpired) return;
+    setConfirmAction(current => current?.kind === "acceptLoan" ? null : current);
+  }, [requestExpired]);
   const currentConfirmation = confirmAction !== null && confirmationIsCurrent(confirmAction, view) ? confirmAction : null;
   const blockedBank = bankBlockedReason(view);
   const selfOptions = debtOptions(view);
@@ -560,7 +578,9 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
           <div className="choice-grid">
             <Choice
               label="确认同意并立即转账"
+              disabled={requestExpired}
               onClick={() => {
+                if (requestExpired) return;
                 setConfirmAction(null);
                 send(() => client.acceptPrivateLoan(request.requestId, versionOptions), "accept", { requestId: request.requestId });
               }}
@@ -767,7 +787,10 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
             借款 {formatCents(current.request.principalCents)} · 利率 {rateLabel(current.request.rateBps)}
           </p>
           <p className="step-hint">
-            请求截止：<Countdown deadlineAt={view.deadlineAt} {...countdownProps} />
+            请求截止：
+            {requestExpired || requestDeadlineIsoValue === null
+              ? "已截止，等待系统收口"
+              : <Countdown deadlineAt={requestDeadlineIsoValue} {...countdownProps} />}
           </p>
           <p className="step-hint">{cancelHint}。</p>
           <div className="choice-grid">
@@ -775,10 +798,12 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
               label="取消请求"
               hint={cancelHint}
               tone="ghost"
-              onClick={() =>
+              disabled={requestExpired}
+              onClick={() => {
+                if (requestExpired) return;
                 send(() => client.cancelPrivateLoan(current.request.requestId, versionOptions), "cancel",
-                  { requestId: current.request.requestId, requestPhase: view.phase, requestPhaseInstanceId: view.phaseInstanceId })
-              }
+                  { requestId: current.request.requestId, requestPhase: view.phase, requestPhaseInstanceId: view.phaseInstanceId });
+              }}
             />
           </div>
         </section>
@@ -796,21 +821,36 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
             {creditLabel(request.borrowerCredit)}
           </p>
           <p className="step-hint">
+            待答复请求：共 {current.pendingCount} 个，当前第 1 个；答复后自动出现下一笔。
+          </p>
+          <p className="step-hint">
+            请求截止：
+            {requestExpired || requestDeadlineIsoValue === null
+              ? "已截止，等待系统收口"
+              : <Countdown deadlineAt={requestDeadlineIsoValue} {...countdownProps} />}
+          </p>
+          <p className="step-hint">
             失信银行欠款：{formatCents(request.borrowerDefaultedBankDebtCents)}；同意/拒绝都不消耗你的行动。
           </p>
           <div className="choice-grid">
             <Choice
               label="同意借款"
               hint="下一步确认金额、利率与对方信用"
-              onClick={() => setConfirmAction({ kind: "acceptLoan", request })}
+              disabled={requestExpired}
+              onClick={() => {
+                if (requestExpired) return;
+                setConfirmAction({ kind: "acceptLoan", request });
+              }}
             />
             <Choice
               label="拒绝"
               hint="请求关闭，不转账"
               tone="ghost"
-              onClick={() =>
-                send(() => client.refusePrivateLoan(request.requestId, versionOptions), "refuse", { requestId: request.requestId })
-              }
+              disabled={requestExpired}
+              onClick={() => {
+                if (requestExpired) return;
+                send(() => client.refusePrivateLoan(request.requestId, versionOptions), "refuse", { requestId: request.requestId });
+              }}
             />
           </div>
         </section>
@@ -823,14 +863,18 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
           <p className="eyebrow">等待</p>
           <h2 className="question">
             {current.acted
-              ? "你已完成本轮行动"
+              ? current.seatId === null
+                ? "本轮行动已结束"
+                : "你已完成本轮行动"
               : current.nickname === null
                 ? "等待其他玩家行动"
                 : "等待 " + current.nickname + " 行动"}
           </h2>
           <p className="step-hint">
             {current.acted
-              ? "本轮不再给你新的问题；阶段推进后会自动出现下一步。"
+              ? current.seatId === null
+                ? "正在等待未答复的借款请求收口；全部答复或到期后自动进入下注。"
+                : "本轮不再给你新的问题；阶段推进后会自动出现下一步。"
               : current.seatId === null
                 ? "本轮行动即将结束。"
                 : "其他玩家完成后会依次轮到你。"}
@@ -1514,7 +1558,9 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
    * 其他确认卡必须让位给暂停/结束/连接占位，避免暂停时还能发经济命令。
    */
   const showConfirmation = currentConfirmation !== null &&
-    (currentConfirmation.kind === "destroyRoom" || (!paused && step.kind !== "gameOver" && canSubmit));
+    (currentConfirmation.kind === "destroyRoom" ||
+      (!paused && step.kind !== "gameOver" && canSubmit &&
+        !(currentConfirmation.kind === "acceptLoan" && requestExpired)));
 
   /**
    * 命令结果/服务端 error/本地校验提示放在顶部吸顶区，滚动到操作卡后仍然可见。

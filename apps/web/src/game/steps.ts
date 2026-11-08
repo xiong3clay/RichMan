@@ -153,7 +153,7 @@ export type GuidedStep =
   | { kind: "bankDue"; loan: WireSnapshotView["finance"]["bankLoans"][number] }
   | { kind: "danger"; stage: DangerStage }
   | { kind: "requestBorrower"; request: WireLoanRequest }
-  | { kind: "requestLender"; request: WireLoanRequest }
+  | { kind: "requestLender"; request: WireLoanRequest; pendingCount: number }
   | { kind: "actionOwn"; stage: ActionStage; debtOptions: DebtOption[] }
   | { kind: "actionWait"; seatId: number | null; nickname: string | null; acted: boolean }
   | { kind: "betting"; stage: BetStage }
@@ -274,7 +274,13 @@ export function deriveStep(view: WireSnapshotView, ui: UiState): GuidedStep {
   // 收到请求是“需要我回答的问题”，优先于自己发出的等待；两者都不消耗行动。
   if (view.finance.incomingRequests.length > 0) {
     const request = view.finance.incomingRequests[0];
-    if (request !== undefined) return { kind: "requestLender", request };
+    if (request !== undefined) {
+      return {
+        kind: "requestLender",
+        request,
+        pendingCount: view.finance.incomingRequests.length,
+      };
+    }
   }
   if (view.finance.pendingRequest !== null) {
     return { kind: "requestBorrower", request: view.finance.pendingRequest };

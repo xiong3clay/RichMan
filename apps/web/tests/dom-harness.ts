@@ -243,6 +243,38 @@ export async function mountDom(element: ReactNode) {
     if (!container.contains(button)) throw new Error("Click target is outside the mounted DOM");
     await act(async () => { if (!button.disabled) button.dispatchEvent(nativeEvent("click")); });
   };
+  /**
+   * 绕过 disabled 检查强制点击，用于验证组件内过期守卫。
+   * React 会按 fiber props 的 disabled 抑制合成 click（临时移除 DOM 属性也不生效），
+   * 所以这里直接调用按钮挂载的 React onClick props，模拟“脚本/开发者工具强行触发”的路径；
+   * 正常用户点不到 disabled 按钮。找不到 props 时才退回直接派发 native click。
+   */
+  const clickElementUnchecked = async (button: DomElement): Promise<void> => {
+    if (!container.contains(button)) throw new Error("Click target is outside the mounted DOM");
+    const propsKey = Object.keys(button).find(name => name.startsWith("__reactProps$"));
+    const props = propsKey === undefined
+      ? undefined
+      : (button as unknown as Record<string, unknown>)[propsKey] as Record<string, unknown> | undefined;
+    const onClick = props?.["onClick"];
+    if (typeof onClick === "function") {
+      await act(async () => {
+        (onClick as (event: unknown) => void)({
+          preventDefault() {},
+          stopPropagation() {},
+          target: button,
+          currentTarget: button,
+        });
+      });
+      return;
+    }
+    const wasDisabled = button.disabled;
+    if (wasDisabled) button.disabled = false;
+    try {
+      await act(async () => { button.dispatchEvent(nativeEvent("click")); });
+    } finally {
+      if (wasDisabled) button.disabled = true;
+    }
+  };
   return {
     container,
     text: (): string => container.textContent,
@@ -257,7 +289,13 @@ export async function mountDom(element: ReactNode) {
       if (button === undefined) throw new Error("Missing matching button at index " + index);
       await clickElement(button);
     },
+    clickUnchecked: async (text: string): Promise<void> => {
+      const buttons = matchingButtons(text);
+      if (buttons.length !== 1) throw new Error("Expected one button containing " + JSON.stringify(text) + ", found " + buttons.length);
+      await clickElementUnchecked(buttons[0]!);
+    },
     clickElement,
+    clickElementUnchecked,
     input: async (placeholder: string, value: string): Promise<void> => {
       const inputs = container.querySelectorAll("input").filter(input => input.getAttribute("placeholder") === placeholder);
       if (inputs.length !== 1) throw new Error("Expected one input with placeholder " + JSON.stringify(placeholder));
