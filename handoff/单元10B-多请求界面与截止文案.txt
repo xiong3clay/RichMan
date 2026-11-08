@@ -1,0 +1,118 @@
+RichMan 单元 10B：多请求界面与请求截止文案（唯一规格）
+
+基线：HEAD ec8a745（10A 已提交，工作区干净；69 文件 / 866 条测试）。
+工作区：D:\Lianjunjie\biancheng\RichMan
+本轮只改 apps/web/**，不改 packages/**、apps/server/**、apps/web/src/net/wire.ts、协议、依赖，不 commit。
+
+一、背景
+10A 已把 D6 语义 A 落到引擎：提交私人借款请求立即消耗借款人行动，牌桌继续；同一借款人最多 1 个 PENDING，出借人可以同时收到多个 PENDING；所有座位行动完但仍有 PENDING 时，ACTION 保持、currentSeatId=null，等请求逐笔收口或到期后才进入 BETTING。
+10B 只补界面：当前 UI 只显示 incomingRequests[0]，没有“还有几笔”；借款人等待卡与出借人请求卡都没有按请求自己的 deadlineMs 倒计时；过期后仍显示“同意/拒绝/取消”按钮；全席已行动但仍在等请求时，等待卡写“本轮行动即将结束”。这些都会让玩家误判，甚至把服务端必然拒绝的迟到命令发出去。
+
+二、范围与禁令
+- 只改 apps/web/src、apps/web/tests；可新增 apps/web/src/game/request-deadline.ts、apps/web/src/game/use-request-expired.ts 与测试。
+- 不改引擎、协议、服务端、scheduler、wire 类型、金额/账户语义、依赖。
+- 不新增全局“待答复请求数”协议字段；不使用 view.deadlineAt 充当请求截止（view.deadlineAt 是当前阶段/当前行动席的截止，D6 下常与请求无关）。
+- 不把 incomingRequests 渲染成完整列表，不展示其他借款请求的金额/借款人；只显示当前这一笔 + 总数，避免隐私与手机溢出。
+- 不按 requestId/createdAtMs 重新排序；顺序以服务端快照数组为准（10A 规格：到达顺序，稳定）。
+- 不削弱 866 条旧测试；除下面“允许的旧测试改动”外，不改旧断言。
+
+三、现状证据（当前 HEAD）
+- apps/web/src/game/steps.ts:151-166 GuidedStep：requestBorrower 只有 request，requestLender 只有 request，actionWait 有 seatId/nickname/acted。
+- steps.ts:275-278 只取 view.finance.incomingRequests[0]；incomingRequests 由 views.ts:189-191 过滤为 lenderId=本人且 status=PENDING，所以 length 就是待答复数。
+- apps/web/src/GameView.tsx:757-786 借款人卡“请求截止”用 <Countdown deadlineAt={view.deadlineAt}>；GameView.tsx:788-818 出借人卡无倒计时、无笔数；GameView.tsx:820-839 全席已行动时仍写“本轮行动即将结束”。
+- apps/web/src/Countdown.tsx 接收 deadlineAt: string|null、serverNow、receivedAtMs，内部 250ms tick；apps/web/src/game/clock.ts:17-23 countdownText 对 null 返回“—”、过期返回“0:00”。
+- apps/web/src/net/wire.ts:70-82 WireLoanRequest.deadlineMs 是 epoch 毫秒；view.finance.pendingRequest / incomingRequests 均来自快照。
+- apps/web/tests/view-fixtures.ts:26 requestFixture().deadlineMs=60000（1970 年），属于旧测试数据；见第六节授权改动。
+
+四、实现要求
+A. 步骤数据
+1) GuidedStep 的 requestLender 增加必填字段 pendingCount: number。
+2) deriveStep 在 incomingRequests.length > 0 时返回 { kind:"requestLender", request: incomingRequests[0], pendingCount: incomingRequests.length }；不改优先级（收到请求仍优先于自己发出的请求）。
+3) 不新增其他 step 字段；actionWait 继续用 acted/seatId 判断。
+
+B. 借款人等待卡（GameView requestBorrower）
+1) “请求截止”必须用 current.request.deadlineMs，不得用 view.deadlineAt。
+2) 新增纯函数 requestDeadlineIso(deadlineMs): string|null：有限数字返回 new Date(deadlineMs).toISOString()，NaN/Infinity/非数字返回 null。
+3) 未过期且 ISO 非 null：显示“请求截止：<Countdown deadlineAt={iso} {...countdownProps} />”。
+4) 已过期：显示固定文案“请求截止：已截止，等待系统收口”，不再显示 Countdown 的 0:00；“取消请求”disabled，且点击不发命令。
+5) 保留 ACTION/TAX 两种取消提示文案；不得改写。
+
+C. 出借人请求卡（GameView requestLender）
+1) 卡上必须显示当前是第几笔、共几笔，固定文案：
+   “待答复请求：共 {pendingCount} 个，当前第 1 个；答复后自动出现下一笔。”
+   pendingCount 为 1 时也显示“共 1 个，当前第 1 个”。
+2) 增加“请求截止”行，同 B.2-B.4：request.deadlineMs → Countdown；过期显示“已截止，等待系统收口”。
+3) “同意借款”“拒绝”在过期时都 disabled，且点击不发命令。
+4) 只显示当前 request 的借款人/金额/利率/信用/失信欠款，不渲染其他 incoming 的字段。
+
+D. 截止态与确认卡
+1) 新增 useRequestExpired(deadlineMs: number|null, serverNow: string, receivedAtMs: number): boolean：
+   - 以快照 serverNow 与本地 receivedAtMs 校准服务端时钟；nowMs 每 250ms 更新一次（与 Countdown 一致），deadlineMs<=服务端 now 即 true；deadlineMs 为 null/非有限时 false。
+   - 卸载时清理定时器；serverNow/deadlineMs 变化时重新校准。
+2) GameView 在每次渲染取当前请求（requestLender 或 requestBorrower）的 deadlineMs 调用该 hook。
+3) 若 acceptLoan 确认卡正开着而请求已过期：立即 setConfirmAction(null)，且 showConfirmation 对 acceptLoan + requestExpired 返回 false；过期后只能看到请求卡的“已截止”状态，不能点“确认同意并立即转账”。
+4) 过期只影响这一笔请求的按钮与确认；不得禁用其他命令、不得清空输入、不得改快照。
+
+E. 行动等待卡（GameView actionWait）
+1) 当 current.acted === true 且 current.seatId === null（全席已行动、仍在等请求收口）：
+   - 标题：“本轮行动已结束”
+   - 说明：“正在等待未答复的借款请求收口；全部答复或到期后自动进入下注。”
+   - 不得再出现“本轮行动即将结束”。
+2) 其他分支（current.acted true 且 seatId 非 null、或 acted false）保持现有文案，不扩大改动。
+3) 不显示具体待答复数量（客户端没有全局计数，不要伪造）。
+
+F. 不变量
+- requestBorrower 的取消仍发送 client.cancelPrivateLoan(requestId, versionOptions)，但过期时 disabled。
+- requestLender 的同意仍走 acceptLoan 确认卡，拒绝仍直接 client.refusePrivateLoan；过期时 disabled。
+- 所有金额、利率、信用文案沿用现有 formatCents/rateLabel/creditLabel。
+- 不新增 CSS 也可；若加 class，必须保证 360px 无横向滚动（沿用 08B 契约）。
+- 不改变 BankDue/Danger/Betting 的倒计时来源。
+
+五、测试清单（新增/扩展，最低 12 条）
+T1 steps：incomingRequests 两笔时 deriveStep 返回第一笔且 pendingCount===2；数组不被修改。
+T2 request-deadline：requestDeadlineIso 有限值→ISO；NaN/Infinity→null。
+T3 request-deadline：isRequestExpired 在 deadline 前 false、恰好等于 true、之后 true；serverNow 与 receivedAtMs 有时钟偏差时按服务端时间判定；非法输入不抛错。
+T4 DOM 出借人卡：两笔请求，显示“共 2 个，当前第 1 个”；“请求截止”显示 request.deadlineMs 的 0:45，而 view.deadlineAt 故意设为 0:10，断言不出现 0:10。
+T5 DOM 出借人卡：请求已过期（deadlineMs=serverNow-1000）时显示“已截止，等待系统收口”，同意/拒绝按钮 disabled；用 client spy 点击确认不产生调用。
+T6 DOM 借款人卡：pendingRequest deadline 为 +45 秒、view.deadlineAt 为 +10 秒，显示 0:45；过期版本显示“已截止”且“取消请求”disabled。
+T7 DOM 实时过期：初始 deadline=+1 秒，挂载后 1.1 秒（advanceTimersByTimeAsync）变“已截止”，同意/拒绝/取消变为 disabled。
+T8 DOM 确认卡撤回：先点“同意借款”打开确认卡，推进到过期，确认卡消失且请求卡显示已截止；client.acceptPrivateLoan 未被调用。
+T9 DOM 行动等待：ACTION、actedSeats=[本人座位]、currentSeatId=null，显示“本轮行动已结束”和“借款请求收口”，不出现“本轮行动即将结束”。
+T10 DOM 多笔逐笔：第一笔答复后把视图换成第二笔（pendingCount=1），显示第二笔借款人并恢复未过期按钮；不残留第一笔。
+T11 DOM view.deadlineAt=null 但 request.deadlineMs 未来：仍显示请求倒计时且按钮可用（证明没有用 view.deadlineAt 当兜底）。
+T12 旧 866 条全绿；新增测试总数不少于 12。
+
+变异探针（实现后临时改、验证变红、逐字节还原）
+MUT1 把 pendingCount 固定为 1 → T1/T4 红。
+MUT2 请求卡改用 view.deadlineAt → T4/T6/T11 红。
+MUT3 删除过期 disabled → T5/T6/T7 红。
+MUT4 useRequestExpired 去掉 250ms interval → T7 红。
+MUT5 actionWait 恢复“本轮行动即将结束” → T9 红。
+至少执行 MUT1–MUT5，记录实际红条与还原后测试。
+
+六、允许的旧测试改动（只此一处）
+apps/web/tests/view-fixtures.ts:26 requestFixture 的 deadlineMs: 60000 改为固定未来值 Date.parse("2099-01-01T00:00:00.000Z")。
+原因：60000 是 1970 年，10B 起所有 request 卡都会按真实截止判断并禁用按钮；旧测试会因此点不到“同意借款/取消请求”。这是测试数据失真修正，不是放宽断言。禁止改任何旧断言；如发现必须改其他旧测试，先停下来报告，不要自行修改。
+
+七、验收命令（必须真实执行并记录输出）
+- corepack pnpm -s --filter @richman/web test（或仓库现有 web 测试命令）
+- corepack pnpm -s test（全量，预计 69 文件 / 866+新增条）
+- corepack pnpm -s typecheck
+- corepack pnpm -s build
+- git diff --check；git status --short
+若本机 PATH 缺 WindowsPowerShell，先补 C:\Windows\System32\WindowsPowerShell\v1.0，不要把环境失败当代码失败。
+
+八、交付物
+1) 代码与测试改动（仅 apps/web/**）。
+2) 四份中文交接，放在 handoff/：
+   handoff/单元10B-成果报告.txt
+   handoff/单元10B-运行与验收.txt
+   handoff/单元10B-下一阶段交接.txt
+   handoff/单元10B-注意事项.txt
+   必须写清：改了哪些文件、T1–T12 对应测试名、MUT1–MUT5 实测结果、旧 866 条是否全绿、已知边界（没有全局待答复计数、过期后等待服务端广播收口、客户端时钟只用于禁用按钮不做权威判定）。
+3) 不 commit；完成后报告 git status、测试/typecheck/build 的真实输出摘要。
+
+九、已知边界（写进注意事项，不要在本轮修）
+- 有当前行动席时，服务端的请求过期广播可能晚到该席的下一次 tick；客户端只按本地校准时钟把按钮置灰并显示“等待系统收口”，不自行删除请求，不做权威裁决。
+- incomingRequests 的稳定顺序是服务端 append 顺序，不是按 deadline/创建时间排序；不要在本轮加排序。
+- 本轮不显示全局待答复请求总数；全席已行动时的等待卡只说明“等待借款请求收口”，不伪造数量。
