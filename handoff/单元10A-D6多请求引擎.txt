@@ -1,0 +1,73 @@
+单元 10A 规格：D6 多请求（语义 A）——引擎与视图
+日期：2026-11-08
+实现：Codex（只做 10A 引擎/视图/测试）；10B 界面另派 Trae
+基线：a1aa986（67 文件/840 条全绿）
+
+一、用户已确认的语义（A）
+1. 借款人提交私人借款请求成功，立即消耗其本轮主要行动；牌桌不等待，下一位继续。
+2. 同一借款人全局最多一个 PENDING 请求（现有 createLoanRequest 已保证，保留）。
+3. 出借人可以同时收到多个借款人的 PENDING 请求，逐个同意/拒绝；同意/拒绝都不消耗出借人的行动。
+4. 所有未答复请求在 ACTION 阶段结束时统一收口（置 EXPIRED），不得进入 BETTING。
+5. 借款人取消请求不退还已消耗的行动；取消后行动仍算完成。
+6. TAX 自救阶段的“危险玩家借款”保持现有语义：等待答复期间自救计时暂停式处理不变，仍用 pendingRequestId；本单元不改变自救流程。
+
+二、范围
+只改：
+- packages/game-core/src/engine.ts
+- packages/game-core/tests/（可新增 engine-requests.test.ts；必要时只改因语义变更而失效的旧断言，逐条在交接里说明）
+- packages/game-core/src/views.ts（仅当发现字段不足；正常应无需改）
+不改：packages/shared/** 协议、apps/server/**、apps/web/**、脚本、依赖；不改 SNAPSHOT_SCHEMA_VERSION；不 commit。
+
+三、实现要点
+1. EngineExtras.pendingRequestId 仅保留给 TAX 自救。
+   - ACTION 阶段发起请求后不得再设置它；若旧快照在 ACTION 带着 pendingRequestId，normalize/加载时把该请求的借款人座位补进 actedSeats，然后清空 pendingRequestId（迁移旧语义，避免永久卡住）。
+2. handleRequestPrivateLoan / createPrivateRequest
+   - TAX 分支保持现状：设置 pendingRequestId、setDeadline(request.deadlineMs)、等待收口。
+   - ACTION 分支：请求 deadline = ctx.nowMs + TIMERS[...].requestSec * 1000（不再取当前行动窗口的 min，因为提交后行动立即结束）；append 请求并发 LOAN_REQUESTED 后，立即 finishSeatAction(s)（记录 actedSeats、currentSeatId=null、清 pendingRequestId、deadline=null）。
+   - 不允许同一借款人第二个 PENDING：仍由 createLoanRequest 的 DUPLICATE_PENDING_REQUEST 拒绝，命令失败不消耗行动（finishSeatAction 不应执行）。
+3. runSystem 的 ACTION 分支
+   - 删除“pendingRequestId 非空则阻塞整桌”的分支。
+   - 每 tick 先扫描全部 PENDING 请求：deadlineMs <= now 的逐个 expireLoanRequest + LOAN_REQUEST_EXPIRED，状态变更；不要调用 finishSeatAction，也不要清 currentSeatId。
+   - 然后再走 currentSeatId 选座、行动超时、nextSeat。
+   - 全部座位 acted 后进入 enterBetting；enterBetting 现有“所有 PENDING 置 EXPIRED”逻辑保留（即阶段末统一收口），事件逐条发。
+4. 同意/拒绝
+   - handleAcceptPrivateLoan / handleRefusePrivateLoan 在 ACTION 阶段不再调用 finishSeatAction，也不改 currentSeatId / deadline。
+   - closeRequestWindow(s, rescue)：rescue=true 时恢复 dangerDeadlineMs；ACTION 时只清 pendingRequestId（本来为 null），不做行动收尾。
+   - 同意/拒绝可由出借人随时发起（ACTION 阶段），即使不是当前行动座位；现有不校验 turn 的行为保留。
+   - 同意前仍校验 now < request.deadlineMs；过期则标记 EXPIRED 并返回 REQUEST_EXPIRED，不改变任何人的行动。
+5. 取消
+   - ACTION：借款人可取消自己任何 PENDING 请求，不再要求 s.pendingRequestId === requestId；置 CANCELLED、发 LOAN_REQUEST_CLOSED，不执行 finishSeatAction（行动已在提交时消耗）。
+   - TAX：保持现有 pendingRequestId/危险玩家校验。
+6. resumeFromPause
+   - ACTION 阶段除了重建当前座位窗口，还要把所有 PENDING 请求 deadline 改为 nowMs + requestSec*1000（避免停服后旧 deadline 导致一恢复就全部过期）；不得重置已 acted 的座位。
+7. 视图
+   - getPlayerView 现有 pendingRequest（本人 PENDING）与 incomingRequests（本人为出借人的 PENDING 数组）已满足多请求；不要新增他人可见字段，不要暴露请求金额给第三人。
+   - 若请求数组顺序影响 UI，按 createdAtMs 升序、requestId 次序稳定输出。
+8. 不变量
+   - 任一时刻同一 borrowerId 最多一个 PENDING。
+   - ACTION 阶段除当前座位外，任何人的 actedSeats 不因“同意/拒绝/取消”改变。
+   - 阶段结束（BETTING/TAX/下一轮）时不得残留 PENDING。
+   - 金额守恒：同意时出借人减少额 = 借款人增加额 = principalCents；拒绝/取消/过期不转账。
+
+四、必测（新增 engine-requests.test.ts，命名可调整）
+T1 两名借款人向同一出借人各发一个请求：提交后 currentSeat 立即前进、两人都在 actedSeats、两个请求均 PENDING、出借人视图 incomingRequests.length===2。
+T2 出借人不是当前座位时同意其中一个：转账正确、请求 ACCEPTED、currentSeatId 不变、被接受人的行动不被二次结算。
+T3 出借人是当前座位时同意：其行动不结束，仍可继续借款/还款/END_ACTION；END_ACTION 后才前进。
+T4 拒绝不消耗出借人行动；拒绝后 incomingRequests 少一条，其余请求仍在。
+T5 借款人提交后取消：CANCELLED、actedSeats 不重复、行动不退还、牌桌继续。
+T6 一个请求 45 秒到期时另一个仍在等待：过期事件只针对前者，currentSeat/其他请求不受影响。
+T7 阶段末统一收口：所有座位行动完成后进入 BETTING，所有剩余 PENDING 都变 EXPIRED，BETTING 中 requests 无 PENDING。
+T8 同一借款人第二个请求被 DUPLICATE_PENDING_REQUEST 拒绝，且不消耗其行动（若其仍当前座位）。
+T9 TAX 自救借款回归：危险玩家请求→出借人同意→负余额转正→自救结束，流程与旧测试一致。
+T10 旧快照迁移：ACTION + pendingRequestId 的 state 经 normalize/加载后，借款人座位在 actedSeats、pendingRequestId 为 null，牌桌可继续（可直接调用 applyCommand/advanceSystem 验证）。
+T11 金额守恒与上限：出借人余额不足时 accept 返回 INSUFFICIENT_FUNDS，两个请求都不变，不产生负出借人。
+
+五、验收
+- pnpm -s exec vitest run packages/game-core 全绿；pnpm -s test 全量不得低于 840 且无旧测试被削弱（语义变更需逐条说明）。
+- pnpm typecheck 0；pnpm -s build 0。
+- 变异探针（自己跑并写进交接）：MUT1 提交后不 finishSeatAction → T1 应红；MUT2 ACTION 仍按 pendingRequestId 阻塞 → T1/T2 应红；MUT3 同意时调用 finishSeatAction → T3 应红；MUT4 阶段末不清 PENDING → T7 应红。
+- 四份交接 handoff/单元10A-{成果报告,运行与验收,下一阶段交接,注意事项}.txt，写清改动文件:行、语义、测试数、变异结果、旧断言改动清单。
+- 不 commit；不碰 apps/server/data 与 8000 端口。
+
+六、给 10B 的接口约定
+UI 只依赖现有快照字段：finance.pendingRequest（本人发出）、finance.incomingRequests（本人收到，可多条）、每个请求的 deadlineMs。10B 负责：等待卡显示“本次行动已用掉”、按 request.deadlineMs 倒计时、incoming 显示“还有 N 个请求”、同意/拒绝后不显示“行动已结束”等文案。10A 不改协议字段。

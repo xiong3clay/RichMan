@@ -10,7 +10,7 @@ RichMan 项目当前状态
 
 【进度与范围】
 已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（已提交 eeec8ca，第四轮补强 bb7c2f2，交接 1ebdbe0）、09B（首版 6491fe9/39dc1b9；第五、六轮复核修复已提交 bcb9aae，文档 71e099a）、09C-A（实现 2bd84cd，规格 c522bb4，Qoder 复核可提交）、09C-B（实现 70b18a0，Qoder 复核 M1/M2 修复后 code PASS）、09C-C（实现 7c8fd7d，Qoder 复核可提交）、09C-D（发布文档 0.9.0，839c3c6；/health 版本号修复待提交）。
-当前子任务：09D 真机发布验收矩阵（用户按清单操作、Lead 记录；清单已写 handoff/单元09D-真机发布矩阵.txt，D01–D20，2885 字符，待用户执行）；08C 背景音乐已按用户要求换成三首外部曲目轮播（Lead 实现并验收，handoff/单元08C-背景音乐替换.txt）。09C-D 已完成：仓库进入开发版 0.9.0，MIT LICENSE、CHANGELOG、README 总览与五处 package.json 版本号已提交 839c3c6。
+当前子任务：09D 真机发布验收矩阵（用户按清单操作、Lead 记录；清单已写 handoff/单元09D-真机发布矩阵.txt，D01–D20，2885 字符，待用户执行）；08C 背景音乐已换成三首外部曲目轮播（已提交 e23191c/a1aa986）；单元 10A D6 多请求引擎规格已写（handoff/单元10A-D6多请求引擎.txt，语义 A），等 Codex 实现。09C-D 已完成：仓库进入开发版 0.9.0，MIT LICENSE、CHANGELOG、README 总览与五处 package.json 版本号已提交 839c3c6。
 09C-B 完成（70b18a0）：backup.ps1/restore.ps1/cleanup.ps1 + README 备份节 + 09C-A S1/S2 补强；
 Qoder 首轮 M1（父路径 junction 写穿）/M2（显式已存在空 Out）已修复，复验 code PASS，M-DOC（pwsh7 未复现声明）由 Lead 改文档。
 09C 拆分：A 核心库与 CLI（已提交 2bd84cd）→ B PowerShell 包装与备份节（已提交 70b18a0）→
