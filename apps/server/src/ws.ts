@@ -143,13 +143,8 @@ function visibleEvents(state: EngineState, events: GameEvent[], viewerId: string
       return { ...event, payload: publicPayload };
     }
     if (event.type === "BET_SETTLED" && Array.isArray(payload.players)) {
-      const players = (payload.players as Array<Record<string, unknown>>).map(player => {
-        if (player.playerId === viewerId) return player;
-        const publicResult = { ...player };
-        delete publicResult.nextCents;
-        delete publicResult.overdraftCents;
-        return publicResult;
-      });
+      const players = (payload.players as Array<Record<string, unknown>>)
+        .filter(player => player.playerId === viewerId);
       return { ...event, payload: { ...payload, players } };
     }
     return event;

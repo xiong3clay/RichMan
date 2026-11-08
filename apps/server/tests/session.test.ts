@@ -391,7 +391,7 @@ it("bank_events_private: 普通银行借款与还款只向借款人发金额事�
   expect(observer).not.toContain('"type":"BANK_LOAN_REPAID"');
 });
 
-it("settlement_balance_private: 公开开奖结果保留盈亏但不泄漏他人余额及透支贷款", async () => {
+it("settlement_amounts_private: 开奖结果公开但只下发本人完整结算条目", async () => {
   const { s, room, clients } = await game();
   for (let i = 0; i < 2; i++) {
     clients[i]!.send(command(s, room, `settle-end${i}`, "END_ACTION", {})); await clients[i]!.next("command_result");
@@ -401,12 +401,77 @@ it("settlement_balance_private: 公开开奖结果保留盈亏但不泄漏他人
     expect((await clients[i]!.next("command_result")).outcome.ok).toBe(true);
   }
   const message = await clients[0]!.next("events", m => m.events.some((e: Message) => e.type === "BET_SETTLED"));
-  const players = message.events.find((e: Message) => e.type === "BET_SETTLED").payload.players;
+  const event = message.events.find((e: Message) => e.type === "BET_SETTLED");
+  const players = event.payload.players;
+  expect(players).toHaveLength(1);
+  expect(players[0].playerId).toBe("p1");
+  expect(players[0].betCents).toBe("100");
+  expect(players[0].guess).toBe(0);
+  expect(players[0].leverage).toBe(1);
+  expect(typeof players[0].won).toBe("boolean");
+  expect(typeof players[0].deltaCents).toBe("string");
   expect(typeof players[0].nextCents).toBe("string");
-  expect(players[1].nextCents).toBeUndefined();
-  expect(players[1].overdraftCents).toBeUndefined();
-  expect(players[1].betCents).toBe("100");
-  expect(typeof players[1].deltaCents).toBe("string");
+  expect(typeof event.payload.round).toBe("number");
+  expect([0, 1]).toContain(event.payload.drawResult);
+});
+
+it("bet_amounts_private: 不同下注金额与猜测只向本人下发本人条目", async () => {
+  const { s, room, clients } = await game();
+  for (let i = 0; i < 2; i++) {
+    clients[i]!.send(command(s, room, `amount-end${i}`, "END_ACTION", {})); await clients[i]!.next("command_result");
+  }
+  const bets = [
+    { betCents: "111", guess: 0, leverage: 1 },
+    { betCents: "222", guess: 1, leverage: 1 },
+  ];
+  for (let i = 0; i < 2; i++) {
+    clients[i]!.send(command(s, room, `amount-bet${i}`, "SUBMIT_BET", bets[i]));
+    expect((await clients[i]!.next("command_result")).outcome.ok).toBe(true);
+  }
+  const p1Message = await clients[0]!.next("events", m => m.events.some((e: Message) => e.type === "BET_SETTLED"));
+  const p1Event = p1Message.events.find((e: Message) => e.type === "BET_SETTLED");
+  expect(p1Event.payload.players).toHaveLength(1);
+  expect(p1Event.payload.players[0].playerId).toBe("p1");
+  expect(JSON.stringify(p1Event)).not.toContain("222");
+  expect(JSON.stringify(p1Event)).not.toContain("p2");
+  const p2Message = await clients[1]!.next("events", m => m.events.some((e: Message) => e.type === "BET_SETTLED"));
+  const p2Event = p2Message.events.find((e: Message) => e.type === "BET_SETTLED");
+  expect(p2Event.payload.players).toHaveLength(1);
+  expect(p2Event.payload.players[0].playerId).toBe("p2");
+  expect(JSON.stringify(p2Event)).not.toContain("111");
+  expect(JSON.stringify(p2Event)).not.toContain("p1");
+});
+
+it("draw_result_public_third_player: 第三人只收到本人条目但开奖结果全员一致", async () => {
+  const { s, room, clients } = await game(3);
+  for (let i = 0; i < 3; i++) {
+    clients[i]!.send(command(s, room, `third-end${i}`, "END_ACTION", {})); await clients[i]!.next("command_result");
+  }
+  const bets = [
+    { betCents: "111", guess: 0, leverage: 1 },
+    { betCents: "222", guess: 1, leverage: 1 },
+    { betCents: "0", guess: 0, leverage: 1 },
+  ];
+  for (let i = 0; i < 3; i++) {
+    clients[i]!.send(command(s, room, `third-bet${i}`, "SUBMIT_BET", bets[i]));
+    expect((await clients[i]!.next("command_result")).outcome.ok).toBe(true);
+  }
+  const [aMessage, cMessage] = await Promise.all([
+    clients[0]!.next("events", m => m.events.some((e: Message) => e.type === "BET_SETTLED")),
+    clients[2]!.next("events", m => m.events.some((e: Message) => e.type === "BET_SETTLED")),
+  ]);
+  const aEvent = aMessage.events.find((e: Message) => e.type === "BET_SETTLED");
+  const cEvent = cMessage.events.find((e: Message) => e.type === "BET_SETTLED");
+  expect([0, 1]).toContain(cEvent.payload.drawResult);
+  expect(cEvent.payload.drawResult).toBe(aEvent.payload.drawResult);
+  expect(cEvent.payload.players).toHaveLength(1);
+  expect(cEvent.payload.players[0].playerId).toBe("p3");
+  expect(cEvent.payload.players[0].betCents).toBe("0");
+  const text = JSON.stringify(cEvent);
+  expect(text).not.toContain("111");
+  expect(text).not.toContain("222");
+  expect(text).not.toContain("p1");
+  expect(text).not.toContain("p2");
 });
 
 it("bank_due_identity_private: 三人WS仅借款人知道到期贷款并可决策及还款", async () => {
