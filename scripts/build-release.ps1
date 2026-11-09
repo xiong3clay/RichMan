@@ -128,12 +128,9 @@ for (const moduleName of ["ws", "react", "react-dom", "zod"]) {
         '备份包含身份摘要与私有账务，不得公开、上传或贴到聊天。'
     ) -join "`r`n") + "`r`n")
     Write-Text (Join-Path $staging 'tools/README.txt') ((@(
-        '公网临时隧道需要 cloudflared.exe，但发布包不捆绑它。',
-        '任选一种：',
-        '  1) 把 cloudflared.exe 放到本目录（tools/cloudflared.exe）；',
-        '  2) 设置环境变量 RICHMAN_CLOUDFLARED 指向该 exe；',
-        '  3) winget install Cloudflare.cloudflared（安装到 PATH）。',
-        '下载：https://github.com/cloudflare/cloudflared/releases',
+        '双击 start-tunnel.bat 时，若这里没有 cloudflared.exe 会自动下载（约 40MB，需联网）。',
+        '也可以手动放一份到 tools/cloudflared.exe，或设置 RICHMAN_CLOUDFLARED 指向该 exe。',
+        '手动下载：https://github.com/cloudflare/cloudflared/releases',
         '隧道域名每次重启都会变；换域名后用房间码+恢复码回座。'
     ) -join "`r`n") + "`r`n")
 
@@ -148,11 +145,11 @@ for (const moduleName of ["ws", "react", "react-dom", "zod"]) {
         '4. 首次启动如被 Windows 防火墙拦截，请允许入站 TCP 8000；',
         '   管理员可执行：New-NetFirewallRule -DisplayName "RichMan 8000" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow',
         '',
-        '二、公网临时隧道（可选）',
-        '1. 把 cloudflared.exe 放进 tools/（或设 RICHMAN_CLOUDFLARED）。',
-        '2. 先启动本地服务，再双击 start-tunnel.bat。',
-        '3. 窗口会打印 https://<随机>.trycloudflare.com；域名每次重启都会变。',
-        '4. 换域名后用“房间码 + 恢复码”回座；旧页面 token 可能失效。',
+        '二、公网临时隧道（可选，一次双击）',
+        '1. 直接双击 start-tunnel.bat：本地服务没开会自动启动，cloudflared 缺失会自动下载。',
+        '2. 窗口会打印并复制 https://<随机>.trycloudflare.com，并自动打开浏览器（-NoBrowser 可关）。',
+        '3. 首次下载约 40MB，需要联网；下载失败时局域网仍可玩，可稍后重试或手动放 tools/cloudflared.exe。',
+        '4. 域名每次重启都会变；换域名后用“房间码 + 恢复码”回座，旧页面 token 可能失效。',
         '',
         '三、停止 / 状态',
         '- stop.bat：只停止服务自己记录 pid 的进程；状态文件损坏/不匹配时退出码 2。',
@@ -191,8 +188,9 @@ for (const moduleName of ["ws", "react", "react-dom", "zod"]) {
         '4. 手机连不上',
         '   确认同一 Wi-Fi、防火墙放行 8000；校园网客户端隔离时改用隧道。',
         '',
-        '5. 隧道未找到（CLOUDFLARED_NOT_FOUND）',
-        '   把 cloudflared.exe 放进 tools/，或设置 RICHMAN_CLOUDFLARED。',
+        '5. 隧道未找到 / 下载失败（CLOUDFLARED_NOT_FOUND）',
+        '   start-tunnel.bat 首次会自动下载；失败时检查网络后重试，或手动把 cloudflared.exe',
+        '   放进 tools/，或设置 RICHMAN_CLOUDFLARED。下载失败不影响本地与局域网。',
         '',
         '6. 恢复被拒绝（SERVICE_RUNNING，退出码 2）',
         '   先运行 stop.bat，确认 status 不健康后再 restore。',

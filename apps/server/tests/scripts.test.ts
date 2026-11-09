@@ -792,3 +792,62 @@ describe.skipIf(!onWindows)('12A portable layout', () => {
     });
   });
 });
+
+
+// 12B 之后：start-tunnel 一键化（双击等价）——服务自启、缺 cloudflared 提示、已有隧道复用。
+describe.skipIf(!onWindows)('12B+ tunnel one-click', () => {
+  it('T31 tunnel_autostarts_server_then_reports_missing_cloudflared', async () => {
+    const dir = await makeTempDir();
+    const port = await freePort();
+    const missing = path.join(dir, 'no-such-cloudflared.exe');
+    try {
+      const result = runScriptToFile(
+        'start-tunnel.ps1',
+        ['-NoBrowser', '-NoDownload', '-Cloudflared', missing, '-Port', String(port), '-DataDir', dir],
+        dir,
+      );
+      expect(result.status, failureMessage(result)).toBe(1);
+      expect(result.stdout).toContain('本地服务未运行，正在自动启动');
+      expect(result.stdout).toMatch(/未找到 cloudflared/);
+      expect(result.stdout).toContain('局域网仍可继续玩');
+      expect(existsSync(path.join(dir, 'run', 'server.json'))).toBe(true);
+      expect(await portOpen(port)).toBe(true);
+      expect(existsSync(path.join(dir, 'run', 'tunnel.json'))).toBe(false);
+    } finally {
+      const stop = runScript('stop.ps1', ['-DataDir', dir]);
+      expect(stop.status, failureMessage(stop)).toBe(0);
+      await waitFor(async () => !(await portOpen(port)));
+    }
+  }, 120000);
+
+  it('T32 tunnel_reuses_running_tunnel_url', async () => {
+    const dir = await makeTempDir();
+    const fakeDir = await makeTempDir();
+    const port = await freePort();
+    const fakePath = path.join(fakeDir, 'cloudflared.exe');
+    await copyFile(process.execPath, fakePath);
+    const fake = spawn(fakePath, ['-e', 'setTimeout(()=>{},120000)'], { stdio: 'ignore', windowsHide: true });
+    children.push(fake);
+    try {
+      await waitFor(() => { try { process.kill(fake.pid!, 0); return true; } catch { return false; } });
+      await writeState(dir, 'tunnel', {
+        pid: fake.pid,
+        startedAtUtc: getStartTime(fake.pid!),
+        url: 'https://probe-ux.trycloudflare.com',
+        port,
+      });
+      spawnRichmanHealth(port);
+      await waitHealthReady(port);
+      const result = runScript('start-tunnel.ps1', [
+        '-NoBrowser', '-Cloudflared', fakePath, '-Port', String(port), '-DataDir', dir,
+      ]);
+      expect(result.status, failureMessage(result)).toBe(0);
+      expect(result.stdout).toContain('隧道已在运行');
+      expect(result.stdout).toContain('公网地址：https://probe-ux.trycloudflare.com');
+      expect(result.stdout).toContain('玩法：一台电脑建房');
+      expect(existsSync(path.join(dir, 'run', 'server.json'))).toBe(false);
+    } finally {
+      await killAndWait(fake);
+    }
+  }, 60000);
+});

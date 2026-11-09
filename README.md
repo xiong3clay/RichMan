@@ -40,9 +40,11 @@
 
 - `start-lan.ps1`：单进程 `node --import tsx` 起服，先做健康检查；已运行则幂等退出。
   可选 `-Port 8000`、`-DataDir <目录>`、`-Build`（缺前端产物时先构建）、`-CheckOnly`。
-- `start-tunnel.ps1`：要求本地 `/health` 先通过，再起 cloudflared 临时隧道并打印
-  `https://<随机>.trycloudflare.com`。可选 `-Port`、`-DataDir <目录>`、
-  `-Cloudflared <exe>`、`-CheckOnly`。
+- `start-tunnel.ps1`：一键公网临时隧道。本地服务没开就先自动调用 `start-lan.ps1`；
+  缺 cloudflared 时首次自动下载到 `tools/cloudflared.exe`（约 40MB，需联网）；起好后
+  会复制并打印 `https://<随机>.trycloudflare.com`，除 `-NoBrowser` 外自动打开浏览器。
+  可选 `-Port`、`-DataDir <目录>`、`-Cloudflared <exe>`、`-NoDownload`、
+  `-NoBrowser`、`-CheckOnly`。下载失败不影响本地/局域网游玩。
 - `status.ps1`：查看本地服务与隧道健康；`-Json` 输出单行 JSON；可选 `-Port`、`-DataDir`。
   未显式传 `-Port` 时从 `run/server.json` 读取端口，再回退 8000。
   即使状态文件过期/损坏/不匹配（`server.stateNote` = `stale`/`mismatch`/`unknown`/`broken`），
