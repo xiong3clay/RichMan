@@ -1,0 +1,27 @@
+[Unit]
+Description=RichMan multiplayer game server
+Documentation=https://github.com/xiong3clay/RichMan
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=richman
+Group=richman
+WorkingDirectory=@PREFIX@
+EnvironmentFile=-/etc/richman/richman.env
+ExecStart=@NODE@ @PREFIX@/app/server/server.mjs
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=@DATA_DIR@
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

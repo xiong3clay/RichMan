@@ -18,7 +18,9 @@
     "test:e2e": "node -e \"console.error('尚未实现：e2e 测试按 V1.3 在单元 05 建立'); process.exit(1)\"",
     "smoke:lan": "tsx scripts/smoke-two-clients.ts",
     "release:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
-    "release:verify": "node scripts/verify-release.mjs"
+    "release:verify": "node scripts/verify-release.mjs",
+    "release:linux": "node scripts/build-linux-release.mjs",
+    "release:linux:verify": "node scripts/verify-linux-release.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
