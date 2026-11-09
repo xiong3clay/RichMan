@@ -110,8 +110,11 @@
 - 复制 scripts 时只复制包内 8 个 ps1，不要把 fetch/bundle/verify/test 脚本带进包。
 - 包内 .bat 必须 ASCII 文件名、CRLF、chcp 65001、cd /d "%~dp0"、pause。
 - build-release 的 verify 必须真实启动 server.mjs；不能为了快只查文件。
-- verify 的 secret_scan 只匹配 JSON 风格 token/recoveryCode 键值；文档里出现“token”
-  单词不算，但不能因此把真实凭据写进包。
+- verify 的 secret_scan 覆盖全部非二进制且 ≤2MB 的文件（含无扩展名 LICENSE 与
+  licenses/**/LICENSE），跳过 .exe/.mp3/.wav 等二进制、>2MB 与含 NUL 的文件；
+  正则同时覆盖 sessionToken/recoveryCode/token 的 JSON、key=value 与 plain 形态，
+  并对 staging 与 zip 解压目录双向扫描（12B 第二轮复核后口径）。
+  文档里出现“token”单词不算，但不能因此把真实凭据写进包。
 - 12B 已把 start-lan 发布路径引号修复纳入包；若回退该行，含空格目录再次启动失败。
 
 五、最终产物与范围
@@ -139,7 +142,7 @@
   本轮未重新构建 zip，只改验收脚本与测试。
 
 七、发布前验收顺序（本机执行，必须照做）
-1) 全量回归：corepack pnpm -s test（期望 74 文件 / 916 条）+ typecheck + build。
+1) 全量回归：corepack pnpm -s test（期望 74 文件 / 923 条）+ typecheck + build。
 2) 反向探针三条（临时目录操作，不碰真实产物）：
    M1 复制 staging → 删 app/server/backup-cli.mjs → 重压 zip → verify --zip 该 zip 必须 exit 1；
    M2 复制 staging → LICENSE 追加 {"sessionToken":"…"} → 只更新副本 SUMS 的 LICENSE 行 → 必须 exit 1；
@@ -150,3 +153,38 @@
 5) 解压到含中文与空格的目录，跑 start-lan → /health → 建房 → 备份 → stop → restore -All → 再 start-lan，最后核对解压文件逐个 SHA256 与 SHA256SUMS 一致。
 6) 只有 1)–5) 全过，才允许把 hash/size 回写四份 12B 交接与 项目当前状态，并进入 09D 真机矩阵；09D 通过前版本号保持 0.9.0。
 
+八、复核后修复 3 补充（内层空目录与已知缺口）
+- zip 内层空目录也会红：comparePackageDirs 现在比较目录集合（listDirs 递归、/ 结尾、排序），
+  任意层多一个空目录 → “多余目录：<rel>/”，少一个 → “缺少目录：<rel>/”；
+  不要回退成只比较文件列表，否则空目录可再次绕过。
+- 已知覆盖缺口（Qoder S1）：scanSecrets 跳过 >2MB 文件与含 NUL 字节的文件，
+  这两类不在 secret 扫描保证范围内。>2MB 文本禁止进入发布包；确需包含时必须人工审计
+  并在交接记录，不能只依赖 release:verify 的 secret_scan。
+- 已知边界（Qoder S3）：duplicate zip entry（同一路径多条 entry）会在 Expand-Archive 时
+  顶层合并，checkZipTopLevel 只看合并后的单目录，不检查 zip entry 层的重复；
+  当前未纳入检查范围，发布流程依赖构建脚本不产生重复 entry。
+- 内层空目录测试用 T14/T15 守住；T16 保证目录集合一致时不会误报目录差异。
+
+
+
+九、Lead 验收时的文件修复记录（2026-11-09，第三轮复核修复）
+- 背景：Lead 在做变异探针时用 PowerShell 5.1 的 Get-Content -Raw 读取 scripts/release-lib.mjs（无 BOM 的 UTF-8），
+  PowerShell 按系统 ANSI(936) 解码、写回时按 UTF-8 编码，导致该文件中文全部损坏（代码行结构与 ASCII 部分完好）。
+- 处置：按 UTF-8 字节语义逐处重建中文字符串与注释换行，未改任何比较/扫描/校验逻辑。
+- 重建后证据（全部为 Lead 真实执行）：
+  * vitest run scripts/release-lib.test.mjs → 27/27 通过
+  * corepack pnpm -s test → 74 文件 / 923 条，127.37s
+  * typecheck exit 0；build exit 0（index--JyM_5JG.css 18.07kB、index-Cs5Nm0o4.js 427.55kB）
+  * 正向 node scripts/verify-release.mjs（原 staging + 原 zip）→ exit 0、problems 为空
+  * 五条负向均 exit 1 且文案正确：
+    - 内层空目录 app/web/empty-dir/ → zip_extract：zip 与 staging 不一致：多余目录：app/web/empty-dir/
+    - 顶层 extra.txt → zip 顶层只允许 RichMan-v0.9.0-win-x64/ 一个目录，实际：RichMan-v0.9.0-win-x64/,extra.txt
+    - 顶层 other/ → 同上（实际：RichMan-v0.9.0-win-x64/,other/）
+    - zip 删 app/server/backup-cli.mjs → 缺少必需文件：app/server/backup-cli.mjs
+    - 副本 LICENSE 追加 {"sessionToken":"..."} → SHA256 不匹配 / 文件大小不一致
+  * secret_scan 独立探针（关键）：副本 LICENSE 追加 token 后重算副本 SHA256SUMS.txt 与 zip 内 SHA256SUMS，
+    使 SHA 检查全部通过 → 仍然报 "secret_scan：疑似明文 token/恢复码：LICENSE"，证明扫描不依赖 hash 差异。
+  * 变异：跳过目录集合比较 → T14/T15 红；listDirs 恒返回 [] → 9 条红；两组均按字节还原，还原后 sha256 一致。
+- 当前文件指纹：scripts/release-lib.mjs 13047 字节，sha256 502C104688145FEB62E666144C892786EB4CD5AEE0793780EFF2B67187F7F9C8。
+- 给复核者的边界：本次重建只替换中文文本，逻辑未动；请以 27 条库测试 + 5 条端到端探针 + 变异结果作为行为证据，
+  不必以字节比对上一版（上一版已被误读破坏，未入库）。

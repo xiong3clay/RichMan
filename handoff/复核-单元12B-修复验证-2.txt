@@ -1,0 +1,186 @@
+RichMan 单元 12B 第二轮复核后修复验证
+================================================
+复核员：Qoder（只读复核；未改生产代码/测试/协议/交接，未 commit）
+日期：2026-11-09
+工作区：D:\Lianjunjie\biancheng\RichMan
+HEAD：9327e89
+唯一新增文件：handoff/复核-单元12B-修复验证-2.txt
+
+一、结论
+需修复。
+顶层额外文件/目录的上一轮 must-fix 已闭环：checkZipTopLevel 在 record("zip_extract") 前判定，
+顶层 extra.txt、顶层 other/ 目录、顶层目录名改成 -copy 均 exit1；缺 backup-cli 与 LICENSE
+token 的 M1/M2 也 exit1。正向原 staging + 原 zip 仍 exit0/12 PASS；24/24、全量 920、
+typecheck/build 0 均通过。
+但新边界仍有 1 个必须修复项：
+  **zip 顶层只有 RichMan-v0.9.0-win-x64/，里层多一个空目录时，verify 仍 exit 0、12 PASS。**
+原因是 comparePackageDirs 的 listFiles 只收集文件，validateStaging 也不检查目录集合；
+空目录既不在 REQUIRED/SHA256SUMS，也不在 comparePackageDirs。Qoder 复现结果：
+INNER_EMPTY_DIR → exit0，zip_extract PASS（47 files/105846765 bytes），problems=[]。
+期望为 exit1，指出“zip 与 staging 不一致：多余目录：app/web/empty-dir/”。
+
+二、must-fix 列表
+
+M1 内层额外空目录不透传
+   文件:行号：
+   - scripts/release-lib.mjs:268-310（comparePackageDirs 只比较文件；listFiles 在
+     release-lib.mjs:220-232 对 `entry.isFile()` 才 push）
+   - scripts/verify-release.mjs:216-222（zip_extract 调用 comparePackageDirs，但无法看见空目录）
+   - scripts/release-lib.mjs:137-169（validateStaging 同样只列文件）
+   问题：
+   zip 顶层判定已正确（checkZipTopLevel 看整个根），但 zip 内任意层多一个空目录不会被
+   validateStaging/comparePackageDirs 发现，因为两者均基于文件列表。
+   复现命令（临时目录，不修改 release/）：
+   1) 复制 release/RichMan-v0.9.0-win-x64 到临时目录 `$base/RichMan-v0.9.0-win-x64`；
+   2) 新建空目录 `$base/RichMan-v0.9.0-win-x64/app/web/empty-dir`；
+   3) 用 Compress-Archive 重压为 `$base/RichMan-v0.9.0-win-x64.zip`；
+      （若 Compress-Archive 不写入空目录 entry，用 ZipArchive 显式创建
+        `RichMan-v0.9.0-win-x64/app/web/empty-dir/` 空 entry；我复核时已显式创建。）
+   4) 写 `$base/SHA256SUMS.txt`（该 zip 名+hash，UTF8 无 BOM），运行：
+      `node scripts/verify-release.mjs --dir <原始 staging> --zip $base/RichMan-v0.9.0-win-x64.zip`
+   期望：exit 1，problems 含“多余目录：app/web/empty-dir/”（或 comparePackageDirs 的目录差异）。
+   实际：exit 0，12 项全 PASS；zip_extract 显示 47 files / 105846765 bytes。
+   建议改法：
+   - comparePackageDirs 增加目录集合比较：递归列出两边**目录**相对路径（排序、/ 分隔），
+     actual 有 expected 无 → “多余目录：<rel>/”；expected 有 actual 无 → “缺少目录：<rel>/”；
+   - 或者在 verify 的 zip_extract 增加 `listDirs(extractedDir)` 与 staging 对目录集合比较；
+   - 增加 T14：内层空目录必须红；同样可覆盖“内层空目录 + 文件”的情况。
+   当前真实 zip 没有空目录，但发布验收门禁仍可被空目录绕过，必须修。
+
+三、should-fix / nit 列表
+S1 上一轮 S3（scanSecrets 跳过 >2MB/NUL）仍未在交接中标注为“已知覆盖缺口”
+   文件:行号：scripts/release-lib.mjs:317-327（MAX_SCAN_BYTES、buffer.includes(0)）；
+          handoff/单元12-注意事项.txt:113-115 只描述“跳过 >2MB 与含 NUL 文件”，没有说
+          这类文件不在 secret_scan 覆盖范围、需要单独审计。
+   实际包：node.exe 走 .exe 跳过；所有文本文件 <2MB，release:verify PASS，无实际漏检；
+          但若未来加 2MB+ 文本日志，secret 可被完全跳过。
+   建议在注意事项明确“>2MB 文本/NUL 文件不保证扫描，禁止进入发布包或需人工审计”，
+   或改为流式/首尾分块扫描。非阻塞。
+
+S2 comparePackageDirs 对大文件双读，耗时/内存可接受但可优化
+   文件:行号：scripts/release-lib.mjs:298-307（expected/actual 各 readFile）。
+   实际：node.exe 93.5MB 被读两次（约 187MB 峰值），本机 release:verify 约 11s；未过慢。
+   建议对大文件用流式 SHA256/只读一次；非阻塞。
+
+S3 checkZipTopLevel 的边界测试还缺大小写变体/空根/多个同名目录
+   文件:行号：scripts/release-lib.mjs:268-278；tests T10/T11/T12/T13
+          （scripts/release-lib.test.mjs:252-299）。
+   代码对大小写变体是 exact match（会红）、空根 names=[] 会红；但 T10–T13 没有这两条用例。
+   多个同名目录：Expand-Archive 后 Windows 会合并，checkZipTopLevel 只看合并后的单目录；
+   若要在 zip entry 层禁止 duplicate top entries，需要读 ZipArchive entries，当前未覆盖。
+   低优先，建议补大小写/空根测试；duplicate entry 作为已知边界写入注意事项。
+
+S4 文档数字/文案：S6 已消除，本轮只剩环境差异与 S1 的覆盖说明
+   - handoff/单元12-注意事项.txt:113 已是新口径（含无扩展名、JSON/key=value/plain、staging+zip）；
+   - 成果报告.txt:134 与下一阶段交接.txt:47 已改成顶层 checkZipTopLevel → VERSION →
+     validateStaging → comparePackageDirs → server.mjs hash；
+   - 运行与验收.txt 已追加“复核后修复 2”段，T10–T13/24/24/920/12 PASS 均有；
+   - 交接写 110.99s/126.99s，我独立全量 920 条 115.44s；环境差异，不算错误；
+   - build-info.gitDirty=true 与 release:build 首次 node.exe 占用已在注意事项:129-134 写明。
+   仅 S1 的 >2MB/NUL 风险仍未标注，列 should-fix。
+
+四、A–F 逐条判定
+
+A. 上一轮 must-fix（顶层额外文件/目录）：**PASS（当前版本）**
+   - checkZipTopLevel（release-lib.mjs:268-278）对 `readdir(extracted,{withFileTypes:true})`
+     全量根条目：`length===1 && isDirectory() && name===expectedTop`；额外文件/目录、大小写变体、
+     空根、多个根目录都会 problems。
+   - verify-release.mjs:207-214 在 record("zip_extract", ...) 之前调用，失败在 catch 中记录
+     zip_extract false，problems 可见。
+   - comparePackageDirs 仍只比目录内部（release-lib.mjs:268+），不承担顶层；verify 顶层显式检查。
+   - 实测：
+     * 顶层 extra.txt（file）→ exit1，detail “zip 顶层只允许 RichMan-v0.9.0-win-x64/ 一个目录，
+       实际：RichMan-v0.9.0-win-x64/,extra.txt”；
+     * 顶层 other/ 目录 → exit1，实际含 other/；
+     * 顶层目录改成 RichMan-v0.9.0-win-x64-copy/ → exit1，实际列出 -copy/。
+   - 大小写变体：exact name 判定，代码会红；T10–T13 没有专门用例（S3）。
+   - 空根：names=[] → “（空）” problem；无专门测试（S3）。
+   - 多个同名目录：解压后 Windows 合并，当前只看合并结果；zip entry 级 duplicate 未覆盖（S3 已知边界）。
+
+B. 四条负向 + 两条新边界：**四条 PASS；新边界中的内层空目录 FAIL**
+   当前代码实测：
+   a) 顶层 extra.txt → exit1；zip_extract FAIL 顶层文案。
+   b) 顶层 other/ → exit1；zip_extract FAIL 顶层文案。
+   c) zip 删 app/server/backup-cli.mjs → exit1；problems 含“zip 内容不完整：缺少必需文件：
+      app/server/backup-cli.mjs”“SHA256SUMS 指向不存在”“zip 与 staging 不一致：缺少文件”。
+   d) 副本 LICENSE 追加 {"sessionToken":"ABCDEFGH12345678"} 且同步副本 SUMS → exit1；
+      secret_scan 报 `LICENSE,zip:LICENSE`。
+   自选边界：
+   e) 顶层目录名 RichMan-v0.9.0-win-x64-copy → exit1（顶层检查正确）。
+   f) 顶层 RichMan-v0.9.0-win-x64/ + 内层 `app/web/empty-dir/` 空目录 → **exit0、12 PASS**
+      （must-fix M1）。
+
+C. T10–T13 与变异：**PASS（测试覆盖修复点），但缺内层空目录 T14**
+   - 24/24 通过；T10 顶层额外文件；T11 顶层额外目录；T12 顶层正确；
+     T13 comparePackageDirs size-only（"文件大小不一致：x.txt"）。
+   - 变异：
+     1) checkZipTopLevel 恒返回 ok:true → T10/T11 红，T12/T13 绿（符合预期；顶层探针会回到旧假 PASS）。
+     2) 删除 comparePackageDirs 的 `problems.push("文件大小不一致...")` → T13 红。
+     3) 在 verify 的 zip_extract 中把“record("zip_extract", true, ...)”插到 topCheck 之前：
+        顶层 extra 探针仍 exit1，problems 里仍看到“zip 顶层只允许…”，但 checks 里出现两条
+        zip_extract（一条 MUT true、一条 false）；说明顶层检查即使移到 record 之后，problems
+        仍可见，但会留下重复 PASS 记录，当前代码在 record 前抛出是正确的。
+   - 所有变异均临时改、立即逐字节还原；release-lib.mjs 恢复后 sha256
+     7580e981674bab7cc3c7d9adb7c3aaf53b003ec45bef30da393067fd63f2ecdf
+     （与 Lead 报告一致）；verify-release.mjs 也恢复（本次临时变异前备份/后校验）。
+
+D. 旧 20 条/916 条与范围：**PASS**
+   - 旧 20 条（原 11 + T1–T9）文本未改；新增 T10–T13 后单文件 24 条；全量独立 74 文件/920 条
+     （115.44s）通过，旧 916 条未减少。
+   - fix 第二轮只改 scripts/release-lib.mjs、scripts/verify-release.mjs、
+     scripts/release-lib.test.mjs、handoff；未改 build-release.ps1、产物结构、apps/packages/协议/依赖。
+   - release 产物未重建：47 文件/105846765B、zip 44976792B、SHA256
+     EE86127FA7EF6CC77B959D11CFD49BFBAB8746EA4C86BA734A80484728D79B82；未 commit。
+   - 工作区仍含 12B 初版既有 README/package/vitest/start-lan 改动，本轮 fix 未扩到它们。
+
+E. 文档 S6：**PASS（已消除），有 S1 的说明缺口**
+   - 注意事项:113 已由旧“只匹配 JSON”改为覆盖无扩展名/LICENSE、JSON/key=value/plain、
+     staging+zip；成果报告:134/下一阶段交接:47 已改为 checkZipTopLevel→VERSION→
+     validateStaging→comparePackageDirs→server hash；运行与验收已追加“复核后修复 2”。
+   - 20/24、920、release:verify 12 PASS、EE861.../44976792/47/105846765 与实际一致；
+     110.99s/126.99s 与我 115.44s 属环境差异。
+   - build-info.gitDirty=true 与 release:build 首次 node.exe 占用说明存在（注意事项:129-134）。
+   - 唯一缺口：>2MB/NUL 跳过未写成“已知覆盖风险”（S1）。
+
+F. 新风险：**顶层无误报；内层空目录是 must-fix；S1/S2 为残余风险**
+   - checkZipTopLevel 合法包：原 staging+原 zip 12 PASS；顶层 `-copy` 正确红；大小写 exact。
+     没有发现合法包误报。
+   - 内层空目录可绕过 comparePackageDirs；M1。
+   - scanSecrets >2MB/NUL 跳过：实际包无 >2MB 文本，未误报/未漏实际凭据；
+     但未来大文本 secret 不在覆盖范围，交接未明示（S1）。
+   - comparePackageDirs 双读 node.exe，本机 verify 约 11s，可接受；峰值约 187MB（S2）。
+
+五、独立复跑与变异摘要
+1) corepack pnpm -s vitest run scripts/release-lib.test.mjs → 24 passed，3.10s，exit0。
+2) corepack pnpm -s test → 74 files，920 passed，115.44s，exit0。
+3) corepack pnpm -s typecheck → exit0；corepack pnpm -s build → 143 modules，370ms，exit0。
+4) corepack pnpm -s release:verify（原 staging+原 zip）→ exit0，12 PASS；room 8090/port 55859；
+   staging 47 files/105846765B；zip_extract 47 files/server.mjs 8E8CCC529640；
+   secret_scan “staging 与 zip 均未发现 token/recovery 明文”。
+5) 当前代码负向：
+   - TOP_FILE exit1：顶层只允许 …/，实际：…/,extra.txt
+   - TOP_DIR exit1：实际含 other/
+   - MISSING exit1：缺少必需文件 + SUMS 指向不存在 + 与 staging 不一致
+   - SECRET exit1：secret_scan LICENSE,zip:LICENSE
+   - TOP_RENAMED exit1：实际 RichMan-v0.9.0-win-x64-copy/
+   - INNER_EMPTY_DIR **exit0 / 12 PASS**（must-fix）
+6) 变异：
+   - checkZipTopLevel 恒真 → T10/T11 红；还原后 24/24。
+   - 删 size 分支 push → T13 红；还原后 24/24。
+   - topCheck 移到 record 之后 → 顶层探针仍 exit1、problems 可见，但 checks 重复；
+     当前代码位置正确；已还原。
+7) 临时文件/探针已清理；release 原产物 hash 未变；未 commit。
+
+六、未覆盖/边界
+- 内层空目录 must-fix 尚未修（本轮只验证现有修复）。
+- 大小写变体/空根/多个同名目录没有专门测试；当前代码对大小写 exact、空根会红，
+  duplicate zip entry 的顶层合并属于已知边界（S3）。
+- scanSecrets >2MB/NUL 跳过不在覆盖范围，当前包无触发（S1）。
+- 真实手工完整 backup→restore -All→重启未在本轮重做；release:verify 仍覆盖包内 node 启动/
+  health/建房/backup-cli/checkOnly。
+- 真实 09D 手机/ACL 矩阵不在本轮。
+
+复核结论：顶层额外文件/目录、M1 缺文件、M2 secret 均已在当前版本闭环，24/24、920、
+12 PASS 真实通过；但内层额外空目录仍使 verify exit0，必须补目录集合比较与 T14。
+修复该点并保留现有顶层断言后，其余 S1–S3 can be should-fix。本次未修改生产代码/测试/
+协议/交接，未 commit，只新增本报告。

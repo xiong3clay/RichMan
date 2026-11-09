@@ -1,0 +1,177 @@
+RichMan 单元 12B 第三轮复核修复验证
+================================================
+复核员：Qoder（只读复核；未改生产代码/测试/协议/交接，未 commit）
+日期：2026-11-09
+工作区：D:\Lianjunjie\biancheng\RichMan
+HEAD：7bdf856
+唯一新增文件：handoff/复核-单元12B-修复验证-3.txt
+
+一、结论
+可提交。
+上一轮的内层空目录 must-fix 已闭环：comparePackageDirs 新增 listDirs（相对路径、/ 结尾、
+排序）并比较目录集合；当前 `zip 顶层正确 + app/web/empty-dir/ 空目录 entry` 实测 exit1，
+problems 为“zip_extract：zip 与 staging 不一致：多余目录：app/web/empty-dir/”。
+M2 也不是只靠 hash 差异：副本 LICENSE 写 token 后同时重算副本 SHA256SUMS 与 zip 内
+SHA256SUMS，zip_extract 已 PASS，仍由 secret_scan 报 LICENSE,zip:LICENSE exit1。
+正向原 staging+原 zip 仍 exit0/12 PASS；27/27、全量 923、typecheck/build 均通过；
+F1/F2/F3 变异均按预期变红并已逐字节还原。
+无 must-fix。仅有 1 个文档哈希 stale（运行 fix3 段仍写 Trae 修复前 8D9882，但当前文件是
+502C1046…；注意事项已写 502C）与若干 nit/should-fix。
+
+二、must-fix 列表
+无。
+未发现当前代码会放行缺失/多余文件、内层空目录、顶层额外项、明文 secret 或错误产物的路径；
+也未发现合法包误报。
+
+三、should-fix / nit 列表
+S1 运行与验收 fix3 段的“还原前后 sha256 8D9882…”已 stale
+   文件:行号：handoff/单元12-运行与验收.txt:440；
+          当前文件指纹在 handoff/单元12-注意事项.txt:188 为
+          `502C104688145FEB62E666144C892786EB4CD5AEE0793780EFF2B67187F7F9C8`（13047 字节）。
+   背景：Lead 在变异时用 PowerShell 5.1 Get-Content -Raw 误读无 BOM UTF-8，之后按字节重建中文，
+         这是已知且不判 must-fix；但 run fix3 仍引用修复前 8D9882，容易让后来者误判
+         “还原 hash 不一致”。建议把该段改为“Trae 交付时 pre-Lead-repair hash 8D9882；
+         Lead 修复后当前 502C”，或直接写当前值并保留背景说明。非阻塞。
+
+S2 注意事项存在两个“八”节标题
+   文件:行号：handoff/单元12-注意事项.txt（“八、复核后修复 3 补充”与“八、Lead 验收时的
+          文件修复记录”）。内容本身正确；只是章节号重复，建议第二个改为“九”或“附：”。
+   nit，不阻塞。
+
+S3 checkZipTopLevel 的边界测试还可补大小写/空根/多个同名目录
+   文件:行号：scripts/release-lib.mjs:281-296；tests T10–T13（release-lib.test.mjs:252-299）。
+   代码对 `name !== expectedTop` 是 exact 判定（大小写变体会红），空根 names=[] 会红；
+   但当前测试没有专门覆盖这两个边界。多个同名目录：Expand-Archive 在 Windows 会合并，
+   checkZipTopLevel 只看合并后的根；zip entry 层的 duplicate 已在注意事项第八节记录为已知边界，
+   不在本轮检查范围。建议补 T17/T18（大小写、空根）和/或 entry 级检查；低优先。
+
+S4 scanSecrets 的 >2MB/NUL 跳过已在第八节明确为已知缺口
+   文件:行号：scripts/release-lib.mjs:317-327；handoff/单元12-注意事项.txt 第八节已写
+   “>2MB 文本禁止进入发布包/需人工审计”，本项不再是未文档化风险。
+   实际包没有 >2MB 文本；node.exe 走 .exe 跳过；release:verify secret PASS。
+   仍建议后续改为流式/分块扫描或在构建时直接禁止 >2MB 文本进入包；非阻塞。
+
+S5 comparePackageDirs 对大文件双读
+   文件:行号：scripts/release-lib.mjs:335-345（expected/actual readFile）。
+   实际 node.exe 93.5MB 读两次（约 187MB 峰值），本机 release:verify 约 11s；可接受。
+   若要优化可流式 SHA256；不是缺陷。
+
+S6 手工完整备份→restore -All→重启未在本轮重做
+   我独立做了正向 verify（包内 node 启动、health、建房、backup-cli 空 data、cleanup、
+   packaged CheckOnly）；没有再次手工执行真实房间 backup→restore -All→重启。
+   交接中的 12B 手工段仍作为 Lead 记录；不把 12 项 verify 当作全链路备份恢复证据。
+
+四、A–F 逐条判定
+
+A. M1 是否真闭环：PASS
+   - release-lib.mjs:121-130 listDirs 递归列出目录，相对路径、/ 结尾、排序；
+     comparePackageDirs:297-333 先比较目录集合（多余目录/缺少目录），再比较文件；
+     verify-release.mjs:206-224 保留 checkZipTopLevel 后再 validateStaging + comparePackageDirs。
+   - 根层：checkZipTopLevel（release-lib.mjs:281-296）在 record("zip_extract",...) 之前
+     由 verify-release.mjs:210-214 调用；额外文件/目录、大小写变体、空根、多个根目录均会红。
+   - 内层空目录：我按规格用 ZipFile.CreateEntry('RichMan-v0.9.0-win-x64/app/web/empty-dir/')
+     构造，原 staging + 临时 zip 跑 verify → exit1，problems 为
+     “zip_extract：zip 与 staging 不一致：多余目录：app/web/empty-dir/”。
+   - 顶层 extra.txt / other/ / 目录名改成 -copy：均 exit1，文案分别含 extra.txt、other/、-copy/。
+   - T14 内层多余目录、T15 缺少目录、T16 目录一致仅文件内容不同 → 27/27 通过；
+     T16 的 problems 恰好只有“文件内容不一致：shared/x.txt”，没有目录误报。
+   - 大小写/空根/多个同名目录：代码逻辑正确但测试未单列（S3）；duplicate zip entry 已记录
+     为已知边界，不阻塞。
+
+B. 四条负向 + 两条新边界：PASS
+   当前代码实测（均为原 staging 与临时 zip）：
+   a) 内层 app/web/empty-dir/ 空目录 entry → exit1，zip_extract 报“多余目录：app/web/empty-dir/”。
+   b) 顶层 extra.txt → exit1，zip_extract 报“zip 顶层只允许 …/，实际：…/,extra.txt”。
+   c) 顶层 other/ → exit1，实际列表含 other/。
+   d) zip 删 app/server/backup-cli.mjs → exit1；含“缺少必需文件”、
+      “SHA256SUMS 指向不存在”、“与 staging 不一致：缺少文件”。
+   e) 副本 LICENSE 写 token，同时重算副本 SHA256SUMS 及 zip 内 SHA256SUMS：
+      zip_extract 已 PASS，仍 exit1，secret_scan 报“疑似明文 token/恢复码：LICENSE,zip:LICENSE”。
+   f) 顶层目录名为 RichMan-v0.9.0-win-x64-copy → exit1（顶层检查正确）。
+   额外符号链接 entry（Python ZipInfo external_attr 0o120777 写入，Windows 解压为文件）：
+      verify exit1，报“多余文件：app/web/symlink-dir”，未形成绕过。
+   因此 A/B 的已知新边界均被覆盖；inner empty 是真实修复。
+
+C. T10–T13/T14–T16 与变异：PASS
+   - release-lib.test.mjs 27/27 通过（2.45s）；全量 74 文件 / 923 条通过（114.15s），旧 920 未减少。
+   - 变异（每次临时改、立即逐字节还原；release-lib.mjs 当前 sha256
+     502C104688145FEB62E666144C892786EB4CD5AEE0793780EFF2B67187F7F9C8）：
+     1) comparePackageDirs 不比较目录集合 → T14/T15 红，T16 绿（符合预期）。
+     2) listDirs 恒返回 [] → T14/T15 红，T16 绿（符合预期）。
+     3) comparePackageDirs 仅在文件数量不同才比较目录 → T14/T15 红，T16 绿（符合预期；
+        证明空目录差异是独立检测点，不依赖文件数）。
+   - 每组还原后均通过 27/27；release-lib.mjs restore hash 502C… 与 current 一致。
+   - 未发现 T14/T15/T16 是恒真或与实现细节耦合；T16 明确断言 problems 不含目录问题。
+
+D. 旧 24 条/920 条与范围：PASS
+   - 旧 24 条文本未改；新增 T14–T16 后 27 条；全量 923（旧 920 未减少）。
+   - 本轮 fix 只改 scripts/release-lib.mjs、scripts/release-lib.test.mjs 与 handoff/
+     （verify-release.mjs 本轮无需改线）；未改 build-release.ps1、产物结构、apps/packages/协议/依赖。
+   - release 产物未重建：47 文件 / 105846765 字节，zip 44976792 字节，SHA256
+     EE86127FA7EF6CC77B959D11CFD49BFBAB8746EA4C86BA734A80484728D79B82。
+   - 工作区仍含 12B 初版既有 README/package/vitest/start-lan 改动；fix3 未扩到它们；
+     未 commit、未 git add。
+
+E. 文档数字：PASS，唯一 S1 stale hash
+   - 注意事项:145/175-176、运行:183-184/296/346/412-413、成果:150、下一阶段:119、
+     项目状态:21/38 均写 923；24→27；release-lib 24→27；Trae 116.77s / Lead 127.37s
+     两个耗时都真实独立（我 114.15s），不是互相矛盾的假数据。
+   - 注意事项:188 写当前 502C…、13047 字节，与我实测一致；运行 fix3:440 仍写 8D9882…
+     是 Trae 修复前/pre-Lead-repair 值，见 S1。
+   - 注意事项第八节已补 S1（>2MB/NUL 跳过不在 secret 扫描保证范围、>2MB 文本禁止进包/
+     人工审计）和 S3（duplicate zip entry 顶层合并是已知边界）；S6 旧口径已消除：
+     注意事项:113 已是新 secret 口径，成果:134/下一阶段:47 已改成 checkZipTopLevel→VERSION→
+     validateStaging→comparePackageDirs→server hash。
+   - 产物 hash/size 与实际一致；verify 12 PASS；build 143 modules。
+
+F. 新风险：PASS（无阻塞）
+   - checkZipTopLevel 对合法包无误报：原 staging+原 zip exit0/12 PASS；顶层 -copy 正确红。
+   - 内层空目录已红；符号链接 entry 在 Windows 解压为普通文件，被 compare 判为多余文件，
+     不绕过；嵌套 duplicate entry 已写入已知边界，当前构建不发；>2MB/NUL 已在第八节明确为
+     未覆盖范围；实际包没有 >2MB 文本。
+   - comparePackageDirs 双读 node.exe：约 11s，峰值内存约 187MB，当前发布机可接受；
+     后续可流式优化（S5）。
+   - 没有发现新的资金/协议/发布包内容风险。
+
+G. 逻辑漂移：PASS
+   - 目录比较放在文件比较之前；目录文案固定“多余目录：<rel>/”“缺少目录：<rel>/”，
+     文件文案保持“缺少文件/多余文件/文件大小不一致/文件内容不一致”；T16 证明目录一致时
+     不产生目录误报。
+   - validateStaging 的 REQUIRED/SHA256SUMS 逻辑未变；checkZipTopLevel 未回退；scanSecrets
+     未变；verify 中顶层检查仍在 record("zip_extract") 之前。
+   - 唯一字节变化来自 Lead 的中文重建（已知），行为由 27 条 + 多条端到端负向 + 变异重新证明；
+     不以“文件被改过”本身判 must-fix。
+
+H. 文档一致性：PASS（除 S1 stale hash / S2 重复八）
+   - 923 条、27 条、116.77s/127.37s、EE861.../44976792/47/105846765 均与实物/实测一致；
+     Trae 与 Lead 的两个耗时是不同环境实测，允许并存。
+   - 注意事项第八节 S1/S3 与 run fix3 的 27/923/12 PASS 均已写；无旧的“只匹配 JSON”/
+     “只核顶层 VERSION/server”口径残留（注意:137 是“不要回退”的提醒，不是旧口径）。
+   - S1 hash stale 与 S2 重复八已列 should-fix/nit，不影响 923 条/产物。
+
+五、独立复跑摘要
+1) corepack pnpm -s vitest run scripts/release-lib.test.mjs → 27 passed，2.45s，exit0。
+2) corepack pnpm -s test → 74 files / 923 passed，114.15s，exit0。
+3) corepack pnpm -s typecheck → exit0；corepack pnpm -s build → 143 modules，231ms，exit0。
+4) corepack pnpm -s release:verify（原 staging+原 zip）→ exit0，12 PASS；
+   staging 47 files/105846765B；zip_extract 47 files/server.mjs 8E8CCC529640；
+   secret_scan “staging 与 zip 均未发现 token/recovery 明文”；room 0525/port 57008。
+5) 当前代码负向：INNER_EMPTY exit1（多余目录：app/web/empty-dir/）；
+   SECRET_MATCHING_HASHES exit1（secret_scan LICENSE,zip:LICENSE，zip_extract PASS）；
+   TOP_FILE/TOP_DIR/MISSING 均 exit1；TOP_RENAMED exit1。
+6) 符号链接 entry 探针：exit1（多余文件：app/web/symlink-dir），未绕过。
+7) F1/F2/F3 变异：T14/T15 红、T16 绿；还原后 27/27；release-lib hash 502C… 一致。
+8) release 原产物 hash/size 未变；临时目录已清理；未 commit。
+
+六、未覆盖/边界
+- 手工真实房间 backup→restore -All→重启未重做（S6）；release:verify 覆盖空 data backup-cli
+  与 CheckOnly。
+- duplicate zip entry 的 entry 级检查未做（第八节已记录）；大小写/空根没有专门测试（S3）。
+- >2MB/NUL secret 跳过仍是已知覆盖缺口（第八节已记录），实际包无触发。
+- 未做 09D 真机/ACL 矩阵；未重建 zip，bundle/build 产物仍沿用既有 EE861...。
+
+复核结论：M1 内层空目录、M2 全 hash 重算 secret、顶层额外文件/目录均已闭环；
+27/27、923 条、release:verify 12 PASS、typecheck/build 0 均真实通过；无 must-fix。
+可提交；建议顺手修 S1 的 stale 8D9882 文档哈希（改成当前 502C… 或标注 Trae 修复前），
+并把 S2 duplicate heading / S3 边界测试作为后续 should-fix。本次未修改生产代码/测试/
+协议/交接，未 commit，只新增本报告。

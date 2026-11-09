@@ -44,7 +44,9 @@
   用包内 node 启动 server.mjs 检查 /health version、GET /、mp3 200、POST 201；
   用包内 node 跑 backup-cli create（空 data 期望 BACKUP_EMPTY exit 1）与
   cleanup --dry-run exit 0；包内 start-lan -CheckOnly；
-  Expand-Archive 到临时目录核对顶层名/VERSION/server.mjs hash。
+  Expand-Archive 到临时目录后：顶层只允许 RichMan-v<version>-win-x64/ 一个目录
+  （checkZipTopLevel，任何额外文件/目录都红）→ VERSION → validateStaging →
+  comparePackageDirs 全量比对 → server.mjs hash。
 - scripts/release-lib.mjs + release-lib.test.mjs：
   REQUIRED/FORBIDDEN/parseVersionInfo/validateStaging；
   把 "scripts/**/*.test.mjs" 追加 vitest.config.ts include。
@@ -98,7 +100,7 @@ RichMan-v0.9.0-win-x64/
 12B 完成记录（2026-11-09）
 ================================================================
 一、已补齐
-- scripts/release-lib.mjs + release-lib.test.mjs（20 条）；vitest include 追加 scripts/**/*.test.mjs。
+- scripts/release-lib.mjs + release-lib.test.mjs（27 条）；vitest include 追加 scripts/**/*.test.mjs。
 - scripts/build-release.ps1：完整 3.4 流水线；stdout 单行 JSON；release-build.txt。
 - scripts/verify-release.mjs：12 项真实检查；release-verify.txt。
 - package.json release:build / release:verify。
@@ -114,7 +116,7 @@ RichMan-v0.9.0-win-x64/
 - zip release/RichMan-v0.9.0-win-x64.zip：44976792 字节
 - zip SHA256 EE86127FA7EF6CC77B959D11CFD49BFBAB8746EA4C86BA734A80484728D79B82
 - verify 12/12 PASS；含空格/中文目录解压实测通过（start/health/建房/backup/restore/restart）。
-- 全量 74 文件/916 条，typecheck/build 0。
+- 全量 74 文件/923 条，typecheck/build 0。
 
 三、下一入口
 - 09D 真机发布矩阵仍未执行：用这个 zip 做局域网 2/10 人、Android/iPhone、蜂窝隧道、

@@ -180,10 +180,10 @@ git diff --stat：10 files changed，+164/−19（另两份新脚本未跟踪）
 一、测试/类型/构建
 corepack pnpm -s test
   Test Files  74 passed (74)
-       Tests  916 passed (916)
-    Duration  113.73s
+       Tests  923 passed (923)
+    Duration  116.77s
     TEST_EXIT=0
-  说明：旧 896 条未减少；新增 scripts/release-lib.test.mjs 20 条。
+  说明：旧 896 条未减少；新增 scripts/release-lib.test.mjs 27 条。
   日志：artifacts/test-logs/release-12b-full-test.txt
 corepack pnpm -s typecheck → TSC_EXIT=0（release-12b-typecheck.txt）
 corepack pnpm -s build → 143 modules，built in 329ms，BUILD_EXIT=0（release-12b-build-web.txt）
@@ -293,7 +293,7 @@ M2：复制 staging、LICENSE 追加 {"sessionToken":"ABCDEFGH12345678"}、只�
   T6 scanSecrets 命中无扩展名 LICENSE；T7 干净 fixture 无命中；
   T8 build-info.protocolVersion 非 1；T9 build-info.gitCommit 过短。
 - 单文件：20/20 通过（2.54s）。
-- 全量：74 文件 / 916 条通过，113.73s，TEST_EXIT=0（旧 907 条未减少）。
+- 全量：74 文件 / 923 条通过，116.77s，TEST_EXIT=0（旧 916 条未减少）。
 - typecheck TSC_EXIT=0；build 143 modules / 320ms / BUILD_EXIT=0。
 
 四、正向 verify（原产物）
@@ -306,3 +306,143 @@ corepack pnpm -s release:verify → exit 0、12 项全 PASS：
   backup_cli create BACKUP_EMPTY exit 1；cleanup dry-run exit 0
   packaged_check_only node v24.21.0 / webDist ok
 日志：artifacts/test-logs/release-12b-fix-{lib-test,verify,full-test,typecheck,build}.txt。
+
+================================================================
+复核后修复 2（2026-11-09，顶层额外文件，Qoder M1）
+================================================================
+依据：handoff/复核-单元12B-修复验证.txt、handoff/单元12B-复核修复-2.txt。
+只改 scripts/release-lib.mjs、scripts/verify-release.mjs、scripts/release-lib.test.mjs
+与 handoff；未改 build-release.ps1/产物结构/协议/依赖；未重建 zip。
+
+一、修复点
+- release-lib 新增导出纯函数 checkZipTopLevel(rootEntries, expectedTop)：
+  解压根目录必须“只有一个条目，且是名为 RichMan-v<version>-win-x64 的目录”；
+  额外文件/目录、大小写变体、多个目录一律 problems，文案以“zip 顶层”开头。
+- verify-release 的 zip_extract 改为 readdir(extracted,{withFileTypes:true}) 全量判顶层，
+  调用 checkZipTopLevel，在 record("zip_extract", ...) 之前抛出，problems 可见；
+  仍保留 VERSION → validateStaging → comparePackageDirs → server.mjs hash。
+
+二、复现与修复前后（真实输出）
+复现命令（临时目录，不修改仓库产物）：
+  复制 release/RichMan-v0.9.0-win-x64 → $base/RichMan-v0.9.0-win-x64；
+  在 $base 写 extra.txt；
+  Compress-Archive -Path @($base/RichMan-v0.9.0-win-x64, $base/extra.txt)
+    -DestinationPath $base/RichMan-v0.9.0-win-x64.zip；
+  写 $base/SHA256SUMS.txt（UTF8 无 BOM、CRLF）；
+  node scripts/verify-release.mjs --dir <原 staging> --zip $base/RichMan-v0.9.0-win-x64.zip
+修复前（等价旧逻辑，变异 checkZipTopLevel 恒真）：
+  exit 0；{"ok":true,...,"zip_extract":{"ok":true,"detail":"...47 files..."}}，problems=[]。
+修复后：
+  exit 1；
+  problems[0]="zip_extract：zip 顶层只允许 RichMan-v0.9.0-win-x64/ 一个目录，
+  实际：RichMan-v0.9.0-win-x64/,extra.txt"。
+
+三、新增测试 T10–T13（旧 20 条未改）
+  T10 zip 顶层额外文件变红（problems 含 "zip 顶层" 与 "extra.txt"）；
+  T11 顶层额外目录变红（含 "other/"）；
+  T12 顶层只有期望目录时通过；
+  T13 comparePackageDirs 同路径不同长度报 "文件大小不一致：x.txt"。
+单文件：24/24 通过（2.49s）。
+全量：74 文件 / 920 条通过，110.99s，TEST_EXIT=0（旧 916 条未减少）。
+typecheck TSC_EXIT=0；build 143 modules / 296ms / BUILD_EXIT=0。
+
+四、正向 verify（原产物，未重建）
+corepack pnpm -s release:verify → exit 0、12 项全 PASS：
+  staging_structure 47 files / 105846765 bytes
+  zip_sha256 EE86127F…D79B82
+  zip_extract RichMan-v0.9.0-win-x64 / 47 files / 105846765 bytes / server.mjs 8E8CCC529640
+  secret_scan “staging 与 zip 均未发现 token/recovery 明文”
+  server_runtime health 0.9.0 / GET 200 / mp3 200 / room 8669；port_released 58553
+  backup_cli create BACKUP_EMPTY exit 1；cleanup dry-run exit 0
+  packaged_check_only node v24.21.0 / webDist ok
+
+五、四条负向（均 exit 1）
+  a) 顶层 extra.txt：problems[0]=“zip_extract：zip 顶层只允许 …/,extra.txt”
+  b) 顶层 extra 目录：problems[0]=“zip_extract：zip 顶层只允许 …/,other/”
+  c) zip 删 app/server/backup-cli.mjs：problems[0]=“zip_extract：zip 内容不完整：
+     缺少必需文件：app/server/backup-cli.mjs；…；zip 与 staging 不一致：缺少文件…”
+  d) 副本 LICENSE 追加 {"sessionToken":"ABCDEFGH12345678"}：
+     problems[0]=“zip_extract：zip 与 staging 不一致：文件大小不一致：LICENSE；…”
+日志：artifacts/test-logs/release-12b-fix2-{lib-test,full-test,typecheck,build,verify,negative}.txt。
+
+六、变异（改完立即还原并核对 sha256）
+  a) checkZipTopLevel 恒真：release-lib 测试 exit 1，失败 T10、T11；顶层探针 verify exit 0、
+     zip_extract PASS（复现旧假 PASS）。还原前后 sha256 均
+     7580E981674BAB7CC3C7D9ADB7C3AAF53B003EC45BEF30DA393067FD63F2ECDF。
+  b) 去掉 comparePackageDirs 的 size 分支 push：release-lib 测试 exit 1，失败 T13。
+     还原前后 sha256 同上。
+日志：artifacts/test-logs/release-12b-fix2-mutations.txt。
+
+七、产物未变
+  release/RichMan-v0.9.0-win-x64/：47 文件 / 105846765 字节
+  zip：44976792 字节，SHA256 EE86127FA7EF6CC77B959D11CFD49BFBAB8746EA4C86BA734A80484728D79B82
+
+================================================================
+复核后修复 3（2026-11-09，内层空目录，Qoder M1）
+================================================================
+依据：handoff/复核-单元12B-修复验证-2.txt、handoff/单元12B-复核修复-3.txt。
+只改 scripts/release-lib.mjs、scripts/release-lib.test.mjs 与 handoff；
+verify-release.mjs 无需改线（zip_extract 已调用 comparePackageDirs）；
+未改 build-release.ps1/产物结构/协议/依赖；未重建 zip；checkZipTopLevel 未回退。
+
+一、修复点
+- release-lib 新增内部 listDirs(dir)：递归、相对路径、/ 分隔、以 / 结尾、排序。
+- comparePackageDirs 增加目录集合比较（在文件比较之前）：
+  actual 有 expected 无 → “多余目录：<rel>/”；expected 有 actual 无 → “缺少目录：<rel>/”。
+  现有四条文件文案保持不变；verify 仍以“zip 与 staging 不一致：”为前缀。
+
+二、复现与修复前后（真实输出）
+复现命令（临时目录，不改 release/；Compress-Archive 会丢空目录，用 ZipArchive 显式 entry）：
+  复制 release/RichMan-v0.9.0-win-x64 → $base/RichMan-v0.9.0-win-x64；
+  新建空目录 app/web/empty-dir；
+  用 ZipFile 逐文件 CreateEntryFromFile 写出 zip，
+  再 $zip.CreateEntry('RichMan-v0.9.0-win-x64/app/web/empty-dir/')；
+  写 $base/SHA256SUMS.txt（UTF8 无 BOM、CRLF）；
+  node scripts/verify-release.mjs --dir <原 staging> --zip $base/RichMan-v0.9.0-win-x64.zip
+修复前（等价旧逻辑，变异“不比较目录集合”）：
+  exit 0；ok=true；zip_extract PASS（47 files / 105846765 bytes），problems=[]。
+修复后：
+  exit 1；
+  problems[0]="zip_extract：zip 与 staging 不一致：多余目录：app/web/empty-dir/"。
+
+三、新增测试 T14–T16（旧 24 条未改）
+  T14 内层多余空目录 → “多余目录：empty/”；
+  T15 缺少目录 → “缺少目录：only-expected/”；
+  T16 目录一致仅文件内容不同 → problems 恰好 ["文件内容不一致：shared/x.txt"]，无目录误报。
+单文件：27/27 通过（2.43s）。
+全量：74 文件 / 923 条通过，116.77s，TEST_EXIT=0（旧 920 条未减少）。
+typecheck TSC_EXIT=0；build 143 modules / 216ms / BUILD_EXIT=0。
+
+四、正向 verify（原产物，未重建）
+corepack pnpm -s release:verify → exit 0、12 项全 PASS：
+  staging_structure 47 files / 105846765 bytes
+  zip_sha256 EE86127F…D79B82
+  zip_extract RichMan-v0.9.0-win-x64 / 47 files / 105846765 bytes / server.mjs 8E8CCC529640
+  secret_scan “staging 与 zip 均未发现 token/recovery 明文”
+  server_runtime health 0.9.0 / GET 200 / mp3 200 / room 7259；port_released 61043
+  backup_cli create BACKUP_EMPTY exit 1；cleanup dry-run exit 0
+  packaged_check_only node v24.21.0 / webDist ok
+
+五、五条负向（均 exit 1）
+  a) 内层空目录 app/web/empty-dir/：
+     zip_extract：zip 与 staging 不一致：多余目录：app/web/empty-dir/
+  b) 顶层 extra.txt：zip_extract：zip 顶层只允许 …/,extra.txt
+  c) 顶层 other/ 目录：zip_extract：zip 顶层只允许 …/,other/
+  d) zip 删 app/server/backup-cli.mjs：zip_extract：zip 内容不完整：缺少必需文件：…
+  e) 副本 LICENSE 追加 {"sessionToken":"ABCDEFGH12345678"}：
+     zip_extract：zip 与 staging 不一致：文件大小不一致：LICENSE；…
+日志：artifacts/test-logs/release-12b-fix3-{lib-test,full-test,typecheck,build,verify,negative}.txt。
+
+六、变异（改完立即还原并核对 sha256）
+  a) comparePackageDirs 不比较目录集合：release-lib 测试 exit 1，失败 T14、T15；
+     内层空目录探针 verify exit 0、zip_extract PASS（复现修复前假 PASS）。
+  b) listDirs 恒返回 []：release-lib 测试 exit 1，失败 T14、T15。
+  还原前后 sha256 均 502C104688145FEB62E666144C892786EB4CD5AEE0793780EFF2B67187F7F9C8，
+  两组 RESTORED=True。
+  （注：Trae 交付时的 pre-Lead-repair 指纹 8D9882E7…94A2 已作废；当前文件是 Lead 按 UTF-8
+   语义重建中文后的 502C…F9C8 / 13047 字节，见注意事项第九节。）
+日志：artifacts/test-logs/release-12b-fix3-mutations.txt。
+
+七、产物未变
+  release/RichMan-v0.9.0-win-x64/：47 文件 / 105846765 字节
+  zip：44976792 字节，SHA256 EE86127FA7EF6CC77B959D11CFD49BFBAB8746EA4C86BA734A80484728D79B82
