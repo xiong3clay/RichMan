@@ -1,0 +1,175 @@
+单元 12A 运行与验收说明
+================================================================
+日期：2026-11-09
+适用：12A 打平服务端、便携 Node、发布模式脚本；不包含 12B 的 zip/verify/文档。
+
+一、环境
+Windows 10/11；Windows PowerShell 5.1；Node v24.18.0（开发机系统 node）；
+pnpm 11.7.0；Vite 8.3.5；Vitest 5.0.5。
+所有临时目录在 %TEMP%\richman-12a-*；未占用 8000，未碰 apps/server/data。
+
+二、测试/类型/构建（证据见 artifacts/test-logs）
+1) corepack pnpm -s test
+   Trae 首跑：
+     Test Files  73 passed (73)
+          Tests  896 passed (896)
+       Duration  135.24s
+       TEST_EXIT=0
+   日志：artifacts/test-logs/release-12a-full-test.txt
+   Lead 环境空闲复跑：
+     Test Files  73 passed (73)
+          Tests  896 passed (896)
+       Duration  123.38s
+       TEST_EXIT=0
+   日志：artifacts/test-logs/12a-lead-full-test.txt
+   说明：旧 893 条未减少；新增 T29/T30 + static GET/SPA 1 条。
+   负载型超时硬化只改超时、不改断言：T2 由默认 5s 改 20s；
+   endurance.test.ts T3/T4/T5 各改 30s（并行 agent 占满机器时曾触发默认超时）。
+2) corepack pnpm -s typecheck
+   TSC_EXIT=0；日志 release-12a-typecheck.txt
+3) corepack pnpm -s build
+   ✓ 143 modules transformed
+   apps/web/dist/assets/index--JyM_5JG.css 18.07 kB
+   apps/web/dist/assets/index-Cs5Nm0o4.js 427.55 kB
+   ✓ built in 727ms
+   BUILD_EXIT=0；日志 release-12a-build.txt
+4) git diff --check：EXIT 0（仅有 LF/CRLF 提示，不是空白错误）
+
+三、打平两个入口
+命令：
+  node scripts/bundle-server.mjs --out %TEMP%\richman-12a-bundle\app\server
+真实输出（单行 JSON）：
+  {"ok":true,"out":"...\\richman-12a-bundle\\app\\server",
+   "server":{"file":"...\\server.mjs","bytes":473640},
+   "backupCli":{"file":"...\\backup-cli.mjs","bytes":227116}}
+BUNDLE_EXIT=0；SERVER_HAS_WS=True。
+日志：release-12a-bundle.txt
+
+四、用系统 node 直接启动 server.mjs（无仓库 node_modules 依赖）
+环境：RICHMAN_STATIC_DIR=<repo>/apps/web/dist、RICHMAN_DATA_DIR=临时 data、
+PORT=随机空闲端口。
+真实输出：
+  HEALTH_STATUS=200
+  HEALTH_BODY={"ok":true,"service":"richman","version":"0.9.0",
+               "protocolVersion":1,"uptimeSec":0,"connections":0,
+               "rooms":0,"serverNow":"..."}
+  GET_ROOT_STATUS=200
+  GET_ROOT_HAS_ROOT=True
+  POST_ROOMS_STATUS=201
+  POST_ROOMS_BODY={"ok":true,"roomCode":"4137"}
+  ROOM_CODE=4137  ROOM_CODE_LENGTH=4
+  SERVER_STOPPED=True  PORT_RELEASED=True
+日志：release-12a-server.txt
+
+五、打平 backup-cli.mjs
+命令：
+  node app/server/backup-cli.mjs create --data <空目录> --out <不存在目录>
+真实输出：
+  BACKUP_CLI_EXIT=1
+  {"ok":false,"command":"create","code":"BACKUP_EMPTY",
+   "message":"没有可备份的房间"}
+  OUT_EXISTS=False（BACKUP_EMPTY 时新建 out 已清理）
+日志：release-12a-backup-cli.txt
+
+六、便携 Node 真实下载/校验
+命令：
+  powershell -File scripts/fetch-portable-node.ps1 -Dest %TEMP%\richman-12a-node
+真实输出：
+  下载 https://nodejs.org/dist/v24.21.0/node-v24.21.0-win-x64.zip
+  下载 https://nodejs.org/dist/v24.21.0/SHASUMS256.txt
+  已校验 SHA256：158F7685B44DE51F6C0DF1D153526CBCD3E1BC739A8DFC607721CEF75DE9E541
+  便携 Node 已准备：...\richman-12a-node
+  版本：v24.21.0
+  FETCH_EXIT=0
+  node.exe 93580104 字节；LICENSE 160555 字节；VERSION 10 字节
+  & node.exe --version → v24.21.0
+日志：release-12a-fetch-node.txt
+- 第二次运行命中缓存，未重新下载。
+- -ZipPath artifacts\node-cache\node-v24.21.0-win-x64.zip 也通过同目录
+  SHASUMS256.txt 校验并解压，ZIPPATH_EXIT=0、node.exe v24.21.0。
+
+七、最小发布形态 start-lan -CheckOnly
+目录：
+  %TEMP%\richman-12a-release\
+    app/server/{server.mjs,backup-cli.mjs}（12A bundle）
+    app/web/（apps/web/dist 全量）
+    node/{node.exe,LICENSE,VERSION}（刚下载）
+    scripts/*.ps1（仓库 scripts）
+    data/
+命令：
+  powershell -File scripts/start-lan.ps1 -CheckOnly -Port <空闲端口> -DataDir <data>
+真实输出：
+  LAYOUT_CHECK_EXIT=0
+  {"ok":true,"reason":"","port":58636,
+   "dataDir":"...\\richman-12a-release\\data",
+   "checks":{
+     "node":{"ok":true,"version":"v24.21.0"},
+     "webDist":{"ok":true,"path":"...\\app\\web\\index.html"},
+     "port":{"ok":true,"available":true,"port":58636},
+     "dataDir":{"ok":true,"path":"...\\data"},
+     "alreadyRunning":{"ok":true,"running":false}}}
+日志：release-12a-layout.txt
+
+八、包内真实启动/停止（便携 node + server.mjs）
+用 start-lan.ps1 -Port <随机> -DataDir <包内 data>（Start-Process -PassThru +
+WaitForExit，避免 -Wait 等待整棵进程树）：
+  PACKAGED_START_EXIT=0
+  PACKAGED_HEALTH=200 {"ok":true,"service":"richman","version":"0.9.0",...}
+  PACKAGED_GET_ROOT=200 HAS_ROOT=True
+  PACKAGED_STOP_EXIT=0
+  PACKAGED_PORT_RELEASED=True
+  PACKAGED_STATE_EXISTS=False
+包内 backup/cleanup（证明走 bundled CLI，而不是 tsx）：
+  PACKAGED_BACKUP_EXIT=1
+  BACKUP_OUT={"ok":false,"script":"backup","code":"BACKUP_EMPTY",...}
+  PACKAGED_CLEANUP_EXIT=0
+  CLEANUP_OUT={"ok":true,"script":"cleanup","dryRun":true,...}
+包内 restore（坏 manifest）：
+  PORTABLE_RESTORE_EXIT=1
+  {"ok":false,"script":"restore","code":"VERIFY_FAILED",...}
+包内 -Build：
+  BUILD_IN_PORTABLE_EXIT=1
+  发布包不含源码，不能构建前端
+日志：release-12a-packaged-backup.txt；包内启停输出记录在本节（未单独落盘）。
+（注：包内 run 日志随临时目录；未写入任何真实 apps/server/data。）
+
+九、git 范围（写交接前）
+git status --short：
+  M .gitignore
+  M apps/server/src/http.ts
+  M apps/server/tests/scripts.test.ts
+  M apps/server/tests/static.test.ts
+  M scripts/{backup,cleanup,restore,richman-common,start-lan,start-tunnel}.ps1
+  ?? scripts/bundle-server.mjs
+  ?? scripts/fetch-portable-node.ps1
+  ?? handoff/单元12-*.txt（四份）
+git diff --stat：10 files changed，+164/−19（另两份新脚本未跟踪）。
+无 packages/**、apps/web/**、package.json、pnpm-lock、protocol 改动。
+实现已提交 9045ea8；docs 随后提交。
+
+十、未验证/留给 12B
+- release-lib.mjs/release-lib.test.mjs 与 vitest include 追加（规格 3.8，12A 未做）。
+- build-release.ps1、verify-release.mjs、zip、SHA256SUMS、.bat、三份说明、
+  licenses/、README/package.json 发布命令。
+- 含空格/中文路径的最终 zip 解压实测（12B）。
+
+十一、Lead 独立复验（2026-11-09）
+----------------------------------------------------------------
+1) bundle-server.mjs：EXIT 0；server.mjs 473640B、backup-cli.mjs 227116B；
+   server.mjs HAS_WS=true、HAS_TSX=false。
+2) fetch-portable-node.ps1：缓存命中，3.765s，EXIT 0；node.exe 93580104B、
+   LICENSE 160555B、VERSION 10B、v24.21.0。
+3) 最小发布形态（无 node_modules）：
+   - start-lan -CheckOnly EXIT 0，ok=true、node.version=v24.21.0、webDist.ok=true、port 52805；
+   - 真实 start-lan 后 /health 200（version 0.9.0、protocolVersion 1）、
+     GET / 200（含 id=root）、POST /api/rooms 201（roomCode 5842）；
+   - stop.ps1 EXIT 0，端口关闭、状态文件删除。
+4) 包内 backup-cli create：EXIT 0，1 个房间，manifest.json+rooms/ 生成；
+   cleanup --dry-run：EXIT 0、failed=[]。
+5) 包内 -Build：EXIT 1，输出“发布包不含源码，不能构建前端”。
+6) 临时移走 node/ 后 start-lan -CheckOnly：EXIT 1、reason=NODE_MISSING_OR_OLD、
+   node.version 为空、webDist.ok=true；恢复后正常。
+7) 重跑 typecheck/build：0/0（143 modules、index--JyM_5JG.css 18.07kB、
+   index-Cs5Nm0o4.js 427.55kB）；git diff --check 仅 CRLF 提示、无空白错误。
+说明：用管道捕获 start-lan 输出会因服务子进程继承句柄而阻塞（09B 已记录的 E3）；
+本次以 start exit 0 + /health + stop exit 0 为证据，不是产品回归。

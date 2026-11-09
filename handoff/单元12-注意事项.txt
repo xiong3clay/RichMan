@@ -1,0 +1,77 @@
+单元 12A 注意事项
+================================================================
+日期：2026-11-09
+对象：12B 实现者、发布验收者、以后维护启动/备份脚本的人。
+
+一、发布模式识别
+- 唯一判据：<root>/app/server/server.mjs 存在 → Portable=true。
+  不要加 RICHMAN_MODE、不要看 node_modules、不要靠 cwd。
+- 发布模式 node 用 <root>/node/node.exe；缺失时 Get-RichManLayout 回退 'node'，
+  start-lan 会把 node 检查判失败并提示“发布包缺 node/node.exe”。
+- dataDir：显式 -DataDir > RICHMAN_DATA_DIR > <root>/data（发布）/
+  apps/server/data（开发）。env 仍可覆盖包内默认，这是有意兼容。
+- cloudflared 查找：显式 -Cloudflared > RICHMAN_CLOUDFLARED >
+  <root>/tools/cloudflared.exe > <root>/cloudflared.exe > PATH > 历史 fallback。
+  不捆绑 cloudflared，不要把其二进制放进包。
+
+二、服务端静态目录
+- http.ts 只在 main 分支传 RICHMAN_STATIC_DIR；DEFAULT_STATIC_DIR 与
+  startServer 签名、/health 字段不变。
+- 发布模式 start-lan 会设 RICHMAN_STATIC_DIR=<root>/app/web；12B 不要改成
+  传命令行参数或改 startServer 默认。
+- GET / 与未知无扩展名路径应返回 app/web/index.html；带扩展名缺失仍 404。
+  12A 已在 static.test.ts 真实覆盖（GET /、/missing），12B 不要重复造测试。
+
+三、打平（bundle-server.mjs）
+- 必须用 repository vite JS API、configFile:false、ssr.noExternal:true；
+  alias 与 vite.config.ts 一致；两个入口分两次 build，第二次 emptyOutDir:false。
+- 第一次 build 前必须清空 outDir；manifest 不应留在 server 目录。
+- 产物检查不是“文件存在”就完：两个文件 >50KB、server.mjs 含 ws 标记、
+  不出现 tsx 运行时依赖。12B verify 还应真实启动。
+- server.mjs 的 isMain 依赖 process.argv[1] 与 import.meta.url 相等；
+  用 node <绝对路径>/server.mjs 启动已验证。不要包成 CJS 或改 argv 逻辑。
+- backup-cli.mjs 内含 backup/file-store/validateSnapshot；发布包不需要
+  node_modules，但也不要把源码/tsx 带进包。
+
+四、便携 Node
+- 默认 v24.21.0；官方 zip SHA256 已写入交接。
+- 缓存 artifacts/node-cache（gitignored）；重复运行命中缓存不再下载。
+- -ZipPath 仍必须与同目录/缓存 SHASUMS256.txt 或显式 -Sha256 匹配；
+  不存在跳过校验开关；不要为了“离线方便”加 skip 参数。
+- PowerShell 5.1 的 ZipArchiveEntry 没有 ExtractToFile 扩展方法；
+  已用 Entry.Open()+Stream.CopyTo 逐个提取 node.exe/LICENSE。
+- 只复制 node.exe 与 LICENSE，写 VERSION；不要把 docs/npm/npx 带进包。
+- node.exe 未签名且约 93.5MB，杀软可能误报；写进故障排查，不绕过签名/校验。
+
+五、脚本行为
+- start-lan 发布模式 -Build 必须直接 exit 1（发布包不含源码/pnpm），
+  不能尝试 corepack；开发模式 -Build 行为保持原样。
+- start-lan 启动后写 run/server.json 的规则、健康检查、失败回收均未变；
+  只是 node 可执行文件/入口/静态目录换源。
+- backup/restore/cleanup 发布模式调 backup-cli.mjs；开发模式调
+  --import tsx backup-cli.ts；参数、JSON、退出码语义完全保持一致。
+- 不要改 stop/status 的进程身份规则；它们只通过 Resolve-DataDir 获得路径。
+- 所有 .ps1 必须 UTF-8 with BOM；入口保持 [CmdletBinding()] + param(；
+  PS5.1 不支持的语法不要用。
+
+六、验证方法与已知坑
+- 用 Start-Process -Wait 跑 start-lan 会等整棵进程树（detach 的服务不退→挂起）。
+  手工验证要用 -PassThru + WaitForExit，或像脚本测试那样重定向到文件。
+- 12A 已真实验证：包内 CheckOnly exit 0、node.version v24.21.0、
+  webDist.ok=true；包内真实 start/stop、/health 200、GET / 200；
+  包内 backup 返回 BACKUP_EMPTY exit 1、cleanup --dry-run exit 0、
+  restore 坏 manifest 返回 VERIFY_FAILED exit 1；包内 -Build exit 1。
+- 12B 的 verify 必须用包内 node 启动真实 server.mjs，不能只查文件；
+  端口用空闲端口，结束后杀子进程并确认释放。
+- 12A 未做 release-lib.mjs/test、zip、verify、.bat、文档；这些属于 12B，
+  不要把 12A 的 896 条当成最终发布验收。
+- 负载高时默认 5s 会误伤：scripts.test.ts T2 已显式 20s，
+  endurance.test.ts T3/T4/T5 已显式 30s；不要为“统一”把它们改回默认。
+  这两处只放宽超时，断言未动。
+
+七、版本与包内容
+- 版本仍 0.9.0；不得因打包写成 1.0.0（1.0.0 等 09D 真机矩阵通过后再改）。
+- 包内不得含 node_modules、源码、测试、handoff、docs、data/rooms、
+  token/恢复码/备份/日志；release/ 与 artifacts/node-cache/ 不进 git。
+- 四份 handoff 单元12 记录 12A 边界与 12B 清单；12B 完成后再补最终包
+  大小、zip SHA256、解压实测与禁止项扫描结果。

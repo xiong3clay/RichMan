@@ -1,0 +1,114 @@
+单元 12A 成果报告（发布包基础：打平、便携 Node、发布模式脚本）
+================================================================
+日期：2026-11-09
+基线：HEAD 4ae76cf（单元12规格文档；代码基线 696d7a6，893 条测试）
+实现提交：9045ea8（feat 12A）；本文件随 docs 提交。
+本轮范围：只做 12A，不做最终 zip 打包。
+
+一、完成项
+1. apps/server/src/http.ts（唯一生产代码改动）
+   main 分支 startServer 增加 staticDir: process.env['RICHMAN_STATIC_DIR']；
+   dataDir 表达式、DEFAULT_STATIC_DIR、startServer 签名、/health 字段均未改。
+2. scripts/bundle-server.mjs（新增）
+   用仓库内 vite JS API 分别打平：
+     apps/server/src/http.ts → server.mjs
+     apps/server/src/storage/backup-cli.ts → backup-cli.mjs
+   configFile:false、root=仓库根、alias 与 vite.config.ts 相同、
+   ssr.noExternal:true、outDir 显式、entryFileNames 显式、第二次 emptyOutDir:false。
+   校验：两文件存在且 >50KB；server.mjs 含 Sec-WebSocket-Key/WebSocketServer；
+   两文件均不得出现 tsx 运行时依赖。
+3. scripts/fetch-portable-node.ps1（新增）
+   默认 v24.21.0；下载 node-v24.21.0-win-x64.zip + SHASUMS256.txt 到
+   artifacts/node-cache；必须校验 zip SHA256（或 -ZipPath 同目录/缓存 SHASUMS、
+   或显式 -Sha256），没有跳过校验开关；只提取 node.exe 与 LICENSE，写 VERSION；
+   临时解压目录清理；网络失败给出手动缓存指引。
+4. scripts/richman-common.ps1（追加不改旧函数）
+   新增 Get-RichManLayout：
+     <root>/app/server/server.mjs 存在 → Portable=true，
+       nodeExe=<root>/node/node.exe（不存在回退 'node'）、serverEntry、
+       backupCli=<root>/app/server/backup-cli.mjs、webDir=<root>/app/web、
+       webIndex、dataDir=<root>/data；
+     否则 Portable=false，返回开发路径（node、apps/server/src/http.ts、
+       backup-cli.ts、apps/web/dist、apps/server/data）。
+   Resolve-DataDir：显式 -DataDir > RICHMAN_DATA_DIR > layout.dataDir。
+   Get-CloudflaredPath 在原有顺序中追加 <root>/tools/cloudflared.exe、
+   <root>/cloudflared.exe（显式/RICHMAN_CLOUDFLARED 仍优先）。
+5. scripts/start-lan.ps1
+   使用 layout；node 检查执行 layout.nodeExe --version（>=22）；
+   webDistIndex=layout.webIndex；
+   发布模式：layout.Portable 时直接用 node.exe app/server/server.mjs 启动，
+     设 RICHMAN_STATIC_DIR=layout.webDir、RICHMAN_DATA_DIR=dataPath；
+   开发模式：仍 node --import tsx --no-warnings apps/server/src/http.ts；
+   发布模式 -Build 直接输出“发布包不含源码，不能构建前端”并 exit 1。
+6. scripts/backup.ps1 / restore.ps1 / cleanup.ps1
+   发布模式：node <layout.BackupCli.mjs> …；
+   开发模式：node --import tsx …/backup-cli.ts；
+   参数、单行 JSON、退出码语义不变。
+7. scripts/start-tunnel.ps1
+   仅发布模式缺 cloudflared 的提示改为放到 <root>/tools/cloudflared.exe；
+   查找逻辑在 common 中统一。
+8. .gitignore 增加 release/ 与 artifacts/node-cache/。
+9. 测试（只追加，不改旧断言）
+   apps/server/tests/scripts.test.ts 末尾新增 T29/T30（临时发布形态目录，
+     dot-source common 后断言 Get-RichManLayout 与 Resolve-DataDir 优先级）。
+   apps/server/tests/static.test.ts 新增 1 条 GET / 与 GET /missing SPA 回退
+     （仓库不存在 http.test.ts；复用 static.test.ts 的 startServer+staticDir 设施）。
+   未改 T1–T28、未改其它旧测试断言。
+
+二、真实产物
+- server.mjs：473640 字节（>50KB，含 ws 标记）
+- backup-cli.mjs：227116 字节
+- 便携 node.exe：93580104 字节；LICENSE 160555 字节；VERSION=v24.21.0
+- node zip SHA256：
+  158F7685B44DE51F6C0DF1D153526CBCD3E1BC739A8DFC607721CEF75DE9E541
+- artifacts/node-cache 已缓存 zip+SHASUMS（gitignored），重复运行不再下载。
+
+三、测试与构建
+corepack pnpm -s test
+  Trae 首跑：73 Test Files passed；896 Tests passed；Duration 135.24s；TEST_EXIT=0
+  Lead 复跑：73 Test Files passed；896 Tests passed；Duration 123.38s；TEST_EXIT=0
+  （Lead 日志 artifacts/test-logs/12a-lead-full-test.txt）
+  说明：旧 893 条未少；新增 T29/T30 + static GET/SPA 1 条。
+  负载型超时硬化（只改超时、不改断言）：T2 scripts.test.ts 由默认 5s 改 20s；
+  endurance.test.ts T3/T4/T5 各改 30s。起因是并行 agent 占满机器时，
+  T2 实测 5127ms、T3 10146ms、T5 5719ms、T28（3×60s 子进程）187837ms 与
+  afterAll 22256ms 触发默认/文件级超时；环境空闲后标准全量 123.38s 全绿。
+corepack pnpm -s typecheck：TSC_EXIT=0
+corepack pnpm -s build：143 modules，built in 727ms，BUILD_EXIT=0
+  index--JyM_5JG.css 18.07kB / index-Cs5Nm0o4.js 427.55kB
+git diff --check：EXIT 0
+
+四、Lead 独立验收（2026-11-09）
+1) bundle：node scripts/bundle-server.mjs → EXIT 0；server.mjs 473640B、
+   backup-cli.mjs 227116B；server.mjs HAS_WS=true、HAS_TSX=false。
+2) 便携 Node：缓存命中（artifacts/node-cache 已有 zip+SHASUMS），3.765s，EXIT 0；
+   node.exe 93580104B、LICENSE 160555B、VERSION 10B，版本 v24.21.0。
+3) 最小发布形态（app/server + app/web + node + scripts + data，无 node_modules）：
+   start-lan -CheckOnly EXIT 0，JSON ok=true、node.version=v24.21.0、
+   webDist.ok=true、port 52805。
+4) 包内真实启停：start-lan 起服务 → /health 200（version 0.9.0、protocolVersion 1）→
+   GET / 200 且含 id=root → POST /api/rooms 201（roomCode 5842）→
+   stop.ps1 EXIT 0、端口关闭、状态文件删除。
+5) 包内 backup-cli create：EXIT 0，备份 1 个房间，生成 manifest.json+rooms/；
+   cleanup --dry-run：EXIT 0，failed=[]。
+6) 包内 -Build：EXIT 1，输出“发布包不含源码，不能构建前端”（符合预期）。
+7) 临时移走 node/ 后 start-lan -CheckOnly：EXIT 1、reason=NODE_MISSING_OR_OLD、
+   node.version 为空、webDist.ok=true；恢复 node/ 后正常。
+8) 重跑 typecheck/build：TSC_EXIT=0；BUILD_EXIT=0（143 modules，
+   index--JyM_5JG.css 18.07kB、index-Cs5Nm0o4.js 427.55kB）。
+
+五、未做项（12B）
+- scripts/build-release.ps1、scripts/verify-release.mjs
+- scripts/release-lib.mjs 与 release-lib.test.mjs、vitest include 追加
+- 包内 .bat、使用说明/故障排查/第三方许可、licenses/、SHA256SUMS、zip
+- README 发布构建节、package.json release:build/release:verify
+- 最终 zip 与真实解压包验证
+
+六、已知边界
+- 便携 node.exe 未签名，杀软可能报警；不绕过。
+- 发布包不捆绑 cloudflared；仅查找 tools/、根目录、RICHMAN_CLOUDFLARED 或 PATH。
+- PowerShell 5.1 的 ZipArchiveEntry 没有 ExtractToFile 扩展方法，fetch 脚本
+  用 ZipArchiveEntry.Open()+Stream.CopyTo 逐条解压；已真实验证。
+- start-lan 发布模式自动识别只依赖 app/server/server.mjs 是否存在，不要求
+  RICHMAN_MODE；开发模式行为保持不变。
+- 12A 未打包 zip，包体积/最终 SHA256 留 12B。

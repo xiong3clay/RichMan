@@ -1,5 +1,5 @@
 RichMan 项目当前状态
-更新日期：2026-11-08
+更新日期：2026-11-09
 更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复；07A/07B/07C 由 Trae 实现，Qoder 三轮复核，Lead 验收；08A/08B/08C 由 Trae 实现并完成复核修复；09A 已提交 eeec8ca，第四轮测试补强已提交 bb7c2f2（交接 1ebdbe0，Qoder 复核 PASS）；09B 已提交 6491fe9（文档 39dc1b9），Qoder 复核 FAIL(M1/M2)；第五/六轮修复 bcb9aae、文档 71e099a，Qoder 第六轮验证 code PASS、文档硬伤已改并提交 59c00f0；09C-B 规格已写（handoff/单元09C-B-备份恢复清理脚本.txt，含 Qoder S1–S6 补强）；09C-A 由 Trae 实现、Lead 验收并提交 2bd84cd，Qoder 复核判可提交（66 文件/813 条）；09C-B 已提交 70b18a0（Qoder 两轮复核：M1/M2 修复后 code PASS，文档 M-DOC 已改）；09C-C 已提交 7c8fd7d，Qoder 复核可提交（无 must-fix，S1 文档计数已改）；09C-D 已提交 839c3c6（0.9.0 LICENSE/CHANGELOG/README，typecheck/build 0）；09D 起服时发现 /health 仍硬编码 0.0.0，已改为 0.9.0 并加测试（66 文件/835 条，已提交 d07e13d）；单元 10A D6 多请求引擎已实现并提交 a8016c2，Qoder 只读复核可提交（无 must-fix，S1–S5 已处置），69 文件/866 条；10B 多请求界面与请求截止已提交 1ffe107，Qoder 复核可提交（无 must-fix，S1/S2 已按 Lead 裁决补强），71 文件/881 条；单元11由Codex完成11A/11B自动化，新增12条；Qoder只读复核「可提交、无must-fix」，Lead按S1–S4补强T3/I12/destroyed/T9/T10后全量73文件/893条（168.69s）、typecheck/build 0；两处破产一致性修复；已提交 7d079d1（feat）+696d7a6（docs），工作区干净）
 
 【单元11最新验证】
@@ -19,8 +19,8 @@ RichMan 项目当前状态
 游戏版本：开发版 0.9.0（未发布，目标 V1.0；1.0.0 门槛：09D 真机矩阵 + 单元 10 D6 + 发布包）
 
 【进度与范围】
-已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（已提交 eeec8ca，第四轮补强 bb7c2f2，交接 1ebdbe0）、09B（首版 6491fe9/39dc1b9；第五、六轮复核修复已提交 bcb9aae，文档 71e099a）、09C-A（实现 2bd84cd，规格 c522bb4，Qoder 复核可提交）、09C-B（实现 70b18a0，Qoder 复核 M1/M2 修复后 code PASS）、09C-C（实现 7c8fd7d，Qoder 复核可提交）、09C-D（发布文档 0.9.0，839c3c6；/health 版本号修复 d07e13d）、10A（D6 多请求引擎/阶段末等待，实现 a8016c2，Qoder 复核可提交）、10B（多请求引导卡/请求截止倒计时/过期守卫，实现 1ffe107，Qoder 复核可提交）、11（稳定性与故障演练，Qoder复核可提交，Lead补强后73文件/893条，未commit，待提交）。
-当前子任务：单元12 发布包（规格 handoff/单元12-发布包与内置便携Node.txt，Trae 分 12A/12B 实现（Codex 额度紧张，不占用））；09D 真机发布矩阵仍待用户执行、Lead 记录。单元11 已提交 7d079d1/696d7a6。
+已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（已提交 eeec8ca，第四轮补强 bb7c2f2，交接 1ebdbe0）、09B（首版 6491fe9/39dc1b9；第五、六轮复核修复已提交 bcb9aae，文档 71e099a）、09C-A（实现 2bd84cd，规格 c522bb4，Qoder 复核可提交）、09C-B（实现 70b18a0，Qoder 复核 M1/M2 修复后 code PASS）、09C-C（实现 7c8fd7d，Qoder 复核可提交）、09C-D（发布文档 0.9.0，839c3c6；/health 版本号修复 d07e13d）、10A（D6 多请求引擎/阶段末等待，实现 a8016c2，Qoder 复核可提交）、10B（多请求引导卡/请求截止倒计时/过期守卫，实现 1ffe107，Qoder 复核可提交）、11（稳定性与故障演练，已提交 7d079d1/696d7a6，Qoder复核可提交，Lead补强后73文件/893条）、12A（发布包基础，实现已提交 9045ea8，Lead验收 73文件/896条）。
+当前子任务：单元12B 发布包收尾（build-release/verify-release/zip/文档）；12A 已提交 9045ea8 并 Lead 验收。09D 真机发布矩阵仍待用户执行、Lead 记录。单元11 已提交 7d079d1/696d7a6。
 09C-B 完成（70b18a0）：backup.ps1/restore.ps1/cleanup.ps1 + README 备份节 + 09C-A S1/S2 补强；
 Qoder 首轮 M1（父路径 junction 写穿）/M2（显式已存在空 Out）已修复，复验 code PASS，M-DOC（pwsh7 未复现声明）由 Lead 改文档。
 09C 拆分：A 核心库与 CLI（已提交 2bd84cd）→ B PowerShell 包装与备份节（已提交 70b18a0）→
@@ -64,8 +64,9 @@ start-tunnel 打印 https://catalogs-organize-listings-garage.trycloudflare.com�
      终局名单与本人破产说明；只改 apps/web，BET_SETTLED 只取本人条目。
 06 起会话与命令去重已落盘（apps/server/data，RICHMAN_DATA_DIR 可覆盖），服务重启后房间恢复为暂停态，房主 resume_game 继续。
 
-【测试与构建（2026-11-08 单元11 Lead补强后实测）】
-corepack pnpm -s test    73 文件 / 893 条（旧881原样保留 + endurance6 + stability6），168.69s，EXIT_CODE=0；typecheck/build 0，build143 modules/396ms。
+【测试与构建（2026-11-09 单元12A Lead验收后实测）】
+corepack pnpm -s test    73 文件 / 896 条（旧893原样保留 + 12A新增3条），123.38s，EXIT_CODE=0；typecheck/build 0，build143 modules/269ms。
+12A 首跑135.24s；负载高时T2/T3/T5/T28曾触发默认超时，已将T2改20s、endurance T3/T4/T5改30s（只改超时，不改断言）。
 pnpm typecheck  TSC_EXIT=0
 pnpm -s build   BUILD_EXIT=0（index--JyM_5JG.css 18.07kB、index-Cs5Nm0o4.js 427.55kB，
                 143 modules；dist/audio 为 3 mp3 + CREDITS.txt + 5 wav，无 bgm-loop.wav）
@@ -401,3 +402,16 @@ https://diego-rotary-inclusive-hughes.trycloudflare.com（2026-11-06 21:5x 重�
 - 唯一规格：handoff/单元12-发布包与内置便携Node.txt（3.1–3.8）：http.ts 的 RICHMAN_STATIC_DIR；Vite SSR 打平 server.mjs/backup-cli.mjs；fetch-portable-node.ps1（v24.21.0，SHASUMS 校验+缓存）；build-release.ps1/verify-release.mjs；richman-common.ps1 增加 Get-RichManLayout 便携模式；start-lan/backup/restore/cleanup 按目录形态分流；7 个 .bat；发布包内使用说明/故障排查/第三方许可/SHA256SUMS。
 - 版本仍 0.9.0；09D 矩阵通过后才改 1.0.0。cloudflared 不捆绑，只检测（tools/cloudflared.exe 或 RICHMAN_CLOUDFLARED）。
 - 完成定义：旧 893 条不改且全绿，新增约 10–14 条；build/verify 真实跑通；解压到含空格/中文临时目录启动、建房、备份恢复；不 commit，交 Lead 验收。
+
+【单元12A 交付与 Lead 验收（2026-11-09）】
+- 范围（唯一规格 handoff/单元12-发布包与内置便携Node.txt）：12A 只做打平、便携 Node、发布模式脚本；12B 做 zip/verify/文档。
+- 实现已提交 9045ea8：apps/server/src/http.ts 只加 staticDir: RICHMAN_STATIC_DIR；新增 scripts/bundle-server.mjs（Vite SSR 打平 server.mjs/backup-cli.mjs）、
+  scripts/fetch-portable-node.ps1（v24.21.0，SHA256 强制校验+缓存）；richman-common.ps1 新增 Get-RichManLayout（app/server/server.mjs 存在即 Portable）；
+  start-lan/backup/restore/cleanup 按 layout 分流；.gitignore 加 release/ 与 artifacts/node-cache/。
+- 新增测试：scripts.test.ts T29/T30（布局与 DataDir 优先级）+ static.test.ts GET //missing SPA 1 条；旧测试仅授权 T2 超时 5s→20s，
+  endurance T3/T4/T5 各加 30s（负载抖动，断言未改）。全量 73 文件/896 条、typecheck/build 0。
+- Lead 手工验收（临时目录，不碰 8000/apps/server/data）：bundle 473640B/227116B、HAS_WS true、HAS_TSX false；
+  fetch 缓存命中 3.765s、node v24.21.0；最小发布形态 CheckOnly ok=true；真实 start→/health 200（0.9.0/协议1）→GET / 200→建房 201（5842）→stop 0、端口释放；
+  包内 backup create 1 房、cleanup --dry-run failed=[]；包内 -Build exit 1（预期文案）；移走 node/ 后 CheckOnly exit 1/NODE_MISSING_OR_OLD。
+- 已知边界：start-lan 在管道捕获下仍会因句柄继承阻塞（09B E3，非产品回归）；便携 node 未签名；cloudflared 不捆绑。
+- 12B 待办：build-release.ps1、verify-release.mjs、release-lib.mjs+测试、7 个 .bat、使用说明/故障排查/第三方许可/licenses/SHA256SUMS、zip 与解压实测。
