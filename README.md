@@ -15,7 +15,7 @@
 - 双客户端冒烟：`pnpm smoke:lan`
 - 发布包：`release/RichMan-v1.0.1-win-x64.zip`（内置 Node v24.21.0；`start-lan.bat` 开局，
   `start-tunnel.bat` 开公网临时隧道，`start-fixed.bat` 开 Tailscale 固定地址）
-- 发布后待办：09D 真机发布矩阵（两台电脑 + Android/iPhone），见 `handoff/单元09D-真机发布矩阵.txt`
+- 真机验收：09D 真机发布矩阵已由用户于 2026-11-10 确认可用（无 P0 阻断；逐项证据口径见 `handoff/单元09D-真机发布矩阵.txt` 第七节）
 - 已知限制见 [CHANGELOG.md](CHANGELOG.md) 与 `handoff/项目当前状态.txt`
 
 ## 快速开始

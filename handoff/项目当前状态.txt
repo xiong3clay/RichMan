@@ -53,7 +53,7 @@ RichMan 项目当前状态
 
 【进度与范围】
 已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（已提交 eeec8ca，第四轮补强 bb7c2f2，交接 1ebdbe0）、09B（首版 6491fe9/39dc1b9；第五、六轮复核修复已提交 bcb9aae，文档 71e099a）、09C-A（实现 2bd84cd，规格 c522bb4，Qoder 复核可提交）、09C-B（实现 70b18a0，Qoder 复核 M1/M2 修复后 code PASS）、09C-C（实现 7c8fd7d，Qoder 复核可提交）、09C-D（发布文档 0.9.0，839c3c6；/health 版本号修复 d07e13d）、10A（D6 多请求引擎/阶段末等待，实现 a8016c2，Qoder 复核可提交）、10B（多请求引导卡/请求截止倒计时/过期守卫，实现 1ffe107，Qoder 复核可提交）、11（稳定性与故障演练，已提交 7d079d1/696d7a6，Qoder复核可提交，Lead补强后73文件/893条）、12A（发布包基础，实现已提交 9045ea8，Lead验收 73文件/896条）、12B（发布包收尾，已提交 e1b47f9/f53a903/76fd73f，74文件/923条）、12C（隧道一键化，已提交 db7574f/545c8ba，74文件/925条）。
-当前子任务：1.0.1 已完成并发布 v1.0.1（dc16bc8/1bc159f，tag v1.0.1；932 条全绿、干净重建、固定地址实测、GitHub release 已上传）。下一步只剩 09D 真机发布矩阵（用户在真机执行、Lead 登记）。
+当前子任务：方案内单元 00～12 已全部完成，1.0.1 已发布；09D 真机发布矩阵已由用户于 2026-11-10 真机确认可用（无 P0 阻断，逐项证据口径见 handoff/单元09D-真机发布矩阵.txt 第七节）。再开工属于新需求或技术债。
 09C-B 完成（70b18a0）：backup.ps1/restore.ps1/cleanup.ps1 + README 备份节 + 09C-A S1/S2 补强；
 Qoder 首轮 M1（父路径 junction 写穿）/M2（显式已存在空 Out）已修复，复验 code PASS，M-DOC（pwsh7 未复现声明）由 Lead 改文档。
 09C 拆分：A 核心库与 CLI（已提交 2bd84cd）→ B PowerShell 包装与备份节（已提交 70b18a0）→
@@ -472,4 +472,5 @@ https://diego-rotary-inclusive-hughes.trycloudflare.com（2026-11-06 21:5x 重�
 - 干净重建：release/RichMan-v1.0.1-win-x64.zip，44,984,969 字节，SHA256 CD5749A11F805DB23D20D16F4592D8559E4F8E9AC8AC52CC75B14AA7F8065463；build-info gitDirty=false、commit 1bc159f；release:verify 12/12 PASS（49 文件 / 105,867,759 字节）。
 - 桌面部署 D:\Lianjunjie\Cqianyi\Desktop\RichMan-v1.0.1-win-x64；start-fixed 实测 /health 1.0.1/rooms=0、固定地址 https://laptop-g5ftl95e.tailbb114d.ts.net/ GET 200、POST /api/rooms 201。
 - GitHub release：https://github.com/xiong3clay/RichMan/releases/tag/v1.0.1（asset uploaded，digest 与本机一致）。
-- 剩余：09D 真机发布矩阵（D01–D20，用户在真机执行、Lead 登记）；已知测试缺口 Qoder S1–S3 留后续单元。
+- 09D（2026-11-10）：用户真机确认「09D 试过了，能行」；未逐项回填 D01–D20 与设备/时间，按「用户真机验收通过、逐项证据未留」登记（handoff/单元09D-真机发布矩阵.txt 第七节）。
+- 剩余（非计划内）：build-release.ps1 压缩重试硬化（火绒短暂独占 node.exe）；Qoder 遗留 S1–S3 测试缺口；iOS 安全区/真机音频/真实 ACL 等边界仅桌面证据。
