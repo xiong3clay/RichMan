@@ -1,0 +1,76 @@
+RichMan 单元 12B 复核修复（第三轮：内层空目录）
+================================================
+日期：2026-11-09
+依据：handoff/复核-单元12B-修复验证-2.txt（Qoder，结论“需修复”）
+Lead 已独立复现：zip 顶层正确，但内层多一个空目录 app/web/empty-dir/ 时 verify exit 0、12 PASS。
+
+一、范围
+只允许改：
+  scripts/release-lib.mjs
+  scripts/verify-release.mjs
+  scripts/release-lib.test.mjs
+  handoff/单元12-注意事项.txt（补 S1 已知缺口 + 本轮说明）
+  handoff/单元12-运行与验收.txt（追加“复核后修复 3”段）
+  handoff/单元12-成果报告.txt / 单元12-下一阶段交接.txt（数字与口径同步）
+  handoff/项目当前状态.txt（只更新 12B 状态/测试数）
+不改 build-release.ps1 的产物结构、packages/**、apps/**、协议、引擎、web、依赖；不 commit。
+第二轮已做的顶层 checkZipTopLevel 保持不变，不得回退。
+
+二、M1（必须）：zip 内层额外空目录不被发现
+现状：
+  scripts/release-lib.mjs 的 listFiles 只 push entry.isFile()，目录不计入；
+  comparePackageDirs（release-lib.mjs:284+）与 validateStaging 都基于文件列表，
+  因此 zip 内任意层多一个空目录既不在 REQUIRED/SHA256SUMS 也不在比对里。
+复现：
+  1) 复制 release/RichMan-v0.9.0-win-x64 到临时目录；
+  2) 在其 app/web 下新建空目录 empty-dir；
+  3) 用 System.IO.Compression.ZipFile 显式写入空目录 entry（Compress-Archive 会丢空目录）：
+     Add-Type -AssemblyName System.IO.Compression.FileSystem
+     $zip=[IO.Compression.ZipFile]::Open($zipPath,'Create')
+     [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip,$file,$rel,[IO.Compression.CompressionLevel]::Optimal)
+     空目录用 $zip.CreateEntry('RichMan-v0.9.0-win-x64/app/web/empty-dir/')
+  4) 写临时 SHA256SUMS.txt（UTF8 无 BOM）后
+     node scripts/verify-release.mjs --dir <原始 staging> --zip <临时 zip>
+  实际 exit 0、12 PASS；期望 exit 1，problems 含“多余目录：app/web/empty-dir/”。
+
+修法（必须）：
+1) scripts/release-lib.mjs 新增内部（或导出）目录列举 listDirs(dir)，返回相对路径并以 "/" 结尾、排序。
+2) comparePackageDirs 增加目录集合比较，问题文案固定为：
+   “多余目录：<rel>/” 与 “缺少目录：<rel>/”
+   放在文件比较之前或之后均可，但必须在同一个 problems 数组里。
+3) verify-release.mjs 的 zip_extract 已调用 comparePackageDirs，无需额外接线；
+   错误前缀沿用“zip 与 staging 不一致：”。
+4) 不要改变现有文件比较行为与文案（缺少文件/多余文件/文件大小不一致/文件内容不一致）。
+
+三、测试（必须，旧 24 条一条不改，只追加）
+T14 内层多余空目录：fixture 两目录，expected 无 dir、actual 有 empty/ → ok=false，problems 含“多余目录：empty/”。
+T15 缺少目录：expected 有 only-expected/ 而 actual 无 → ok=false，problems 含“缺少目录：only-expected/”。
+T16 目录集合一致但文件不同（回归）：两侧目录相同、文件内容不同 → 仍只有“文件内容不一致”，不因目录比较产生误报。
+预期：release-lib.test.mjs 24 → 27 条；全量 920 → 923 条。
+
+四、文档（必须）
+1) handoff/单元12-注意事项.txt：
+   - 明确 S1：scanSecrets 跳过 >2MB 文件与含 NUL 文件，这两类不保证扫描；>2MB 文本禁止进入发布包，
+     若必须包含需人工审计并在交接记录。
+   - 补一句“zip 内层空目录也会红（comparePackageDirs 目录集合比较）”，并注明 duplicate zip entry
+     的顶层合并不在检查范围（Qoder S3 已知边界）。
+2) handoff/单元12-运行与验收.txt 追加“复核后修复 3（内层空目录，Qoder M1）”段：
+   复现命令、修复前 exit0 / 修复后 exit1 的真实输出、T14–T16、27/27、全量条数与耗时、release:verify 12 PASS。
+3) 四份 12B 交接与 handoff/项目当前状态.txt 的测试数同步为实际值（预期 923）。
+4) 产物 hash/size 不变：EE86127F…D79B82 / 44976792 字节 / 47 文件 / 105846765 字节；本轮不重建 zip。
+
+五、验收（交付必须附真实输出）
+- corepack pnpm -s vitest run scripts/release-lib.test.mjs → 27 passed
+- corepack pnpm -s test → 74 文件 / 923 条（写实际耗时）
+- corepack pnpm -s typecheck → exit 0；corepack pnpm -s build → exit 0
+- 正向 node scripts/verify-release.mjs（原 staging + 原 zip）→ exit 0、12 PASS
+- 负向五条，逐条给 exit code 与 problems 首行：
+  a) 内层空目录 app/web/empty-dir/（第二节）。
+  b) 顶层 extra.txt（第二轮场景）。
+  c) 顶层 other/ 目录。
+  d) zip 删 app/server/backup-cli.mjs。
+  e) 副本 LICENSE 追加 {"sessionToken":"ABCDEFGH12345678"}。
+- 变异（改完立即还原并报还原前后 sha256）：
+  a) 让 comparePackageDirs 不比较目录集合 → T14/T15 红。
+  b) 让 listDirs 恒返回 [] → T14/T15 红。
+- 不 commit；交付后由 Qoder 只读复核。
