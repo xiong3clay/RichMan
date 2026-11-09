@@ -150,8 +150,6 @@ function Get-CloudflaredPath {
         if ($command.PSObject.Properties['Source'] -ne $null) { return $command.Source }
         if ($command.PSObject.Properties['Path'] -ne $null) { return $command.Path }
     }
-    $fallback = 'D:\Lianjunjie\tools\cloudflared.exe'
-    if (Test-Path -LiteralPath $fallback) { return $fallback }
     return $null
 }
 

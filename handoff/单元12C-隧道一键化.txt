@@ -31,6 +31,10 @@ RichMan 单元 12C：公网临时隧道一键化
 - -CheckOnly 只读：输出单行 JSON（ok/reason/port/dataDir/localServer/cloudflared/alreadyRunning），
   reason 优先级 ALREADY_RUNNING > LOCAL_SERVER_DOWN > CLOUDFLARED_NOT_FOUND；exit 0/1，语义与 09B 兼容。
 - 顺序上“先保证本地服务、再处理 cloudflared”，所以下载失败或没网时局域网仍能玩。
+- 同时删掉 richman-common.ps1 里作者机器专用的硬编码回退 'D:\Lianjunjie\tools\cloudflared.exe'：
+  发布包里不该出现作者路径，也不该在没网时悄悄用本机别的副本。现在查找顺序固定为
+  -Cloudflared → RICHMAN_CLOUDFLARED → <包根>/tools/cloudflared.exe → <包根>/cloudflared.exe
+  → PATH 里的 cloudflared → 自动下载。
 
 三、发布包文案（scripts/build-release.ps1）
 - tools/README.txt：改为“双击 start-tunnel.bat 会自动下载；也可手动放 tools/cloudflared.exe 或设 RICHMAN_CLOUDFLARED”。
