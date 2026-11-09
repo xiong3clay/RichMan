@@ -28,6 +28,14 @@
   restore exit 0、restart health 200 rooms=1、stop 0、端口释放。
 - 12B 已在干净工作区重建发布物（gitDirty=false）；09D 真机矩阵仍是 1.0.0 前唯一未完成门槛。
 
+【单元12C 一键隧道（2026-11-09）】
+- 用户要求把公网临时隧道集成到 start-tunnel.bat，双击即可；已改 scripts/start-tunnel.ps1：
+  本地服务未开自动调用 start-lan.ps1；缺 cloudflared 默认自动下载到 <包根>/tools/cloudflared.exe；
+  起好后复制并打印 https://xxx.trycloudflare.com、默认打开浏览器；-NoDownload/-NoBrowser 可关。
+- 下载失败只影响公网，本地/局域网仍可用；已有隧道会复用地址；-CheckOnly 单行 JSON 语义兼容 09B。
+- 发布文案（tools/README、使用说明、故障排查）与 README 已同步；新增 T31/T32 两条脚本测试。
+- 验收：74 文件/925 条、typecheck 0、build 0（143 modules）；提交后需重新 release:build 并覆盖桌面解压目录。
+
 【版本】
 方案版本：V1.3.3（V1.3.2 + 引导式界面 + 连接实测）
 规则版本：V1.3.2（本轮未改规则）

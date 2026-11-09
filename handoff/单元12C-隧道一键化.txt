@@ -1,0 +1,77 @@
+RichMan 单元 12C：公网临时隧道一键化
+日期：2026-11-09
+实现：Lead（DSH）直接修改 scripts/start-tunnel.ps1、scripts/build-release.ps1、README.md，并追加测试
+适用版本：0.9.0（版本号不变；1.0.0 仍等 09D 真机矩阵）
+
+一、为什么要改
+- 用户反馈（原话）：“公网临时隧道怎么那么麻烦，把操作集成到 start-tunnel.bat 上，双击即可开启”。
+- 旧行为有三个摩擦点：
+  1) 必须先双击 start-lan.bat 把本地服务跑起来，否则 start-tunnel 直接退出；
+  2) 发布包不捆绑 cloudflared.exe，只给一句“自己下载放 tools/”；
+  3) 只把 https://xxx.trycloudflare.com 打印在窗口里，不复制、不打开浏览器。
+- 本次目标：在发布包里“双击 start-tunnel.bat”一步完成（必要时自动起服、首次自动下载、复制并打开地址）。
+
+二、实现（scripts/start-tunnel.ps1，12000 字节，UTF-8 BOM，PS 5.1 语法解析 0 错误）
+- 参数：-Port 8000、-DataDir、-Cloudflared、-TimeoutSec 90、-NoDownload、-NoBrowser、-CheckOnly。
+- 正常流程：
+  1) 本地服务：先 Wait-HttpHealth 3 秒；不健康时读 run/server.json，若记录的服务仍健康且端口不同则沿用该端口；
+     仍不健康则用同一 PowerShell 宿主（5.1 用 powershell.exe、7 用 pwsh.exe）调用 scripts/start-lan.ps1
+     -Port/-DataDir 自动起服，再等健康最多 30 秒；失败给出“单独双击 start-lan.bat / 换端口”的提示后 exit 1。
+  2) cloudflared：找不到时默认自动下载
+     https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe
+     到 <包根>/tools/cloudflared.exe（先写 .download 临时名，小于 5MB 视为被网络拦截）；
+     下载失败打印原因 + 四种手动方案，并明确“本地服务已可用，局域网仍可继续玩”，exit 1，不影响本地/局域网。
+     -NoDownload 时不联网，直接打印帮助并 exit 1（供离线/测试使用）。
+  3) 已有隧道：若 run/tunnel.json 记录的 cloudflared 进程真实存活且 URL 非空，直接沿用地址并打印横幅、exit 0；
+     若记录的端口与本次不同，提示先 stop.bat 再重开。
+  4) 启动隧道：Start-Process cloudflared tunnel --url http://127.0.0.1:<port> --no-autoupdate，
+     读日志匹配 https://[a-z0-9-]+\.trycloudflare\.com，写 run/tunnel.json，超时/失败会回收子进程。
+- 成功后统一走横幅：打印并 Set-Clipboard 复制公网地址；除 -NoBrowser 外自动打开默认浏览器；
+  再提示玩法（一台建房、其他设备输房间码）、停止方式（stop.bat）、域名会变（用房间码+恢复码回座）。
+- -CheckOnly 只读：输出单行 JSON（ok/reason/port/dataDir/localServer/cloudflared/alreadyRunning），
+  reason 优先级 ALREADY_RUNNING > LOCAL_SERVER_DOWN > CLOUDFLARED_NOT_FOUND；exit 0/1，语义与 09B 兼容。
+- 顺序上“先保证本地服务、再处理 cloudflared”，所以下载失败或没网时局域网仍能玩。
+
+三、发布包文案（scripts/build-release.ps1）
+- tools/README.txt：改为“双击 start-tunnel.bat 会自动下载；也可手动放 tools/cloudflared.exe 或设 RICHMAN_CLOUDFLARED”。
+- 使用说明.txt 第二节：改为“一次双击”，说明自动起服、首次下载约 40MB、自动复制并打开浏览器、
+  下载失败局域网仍可玩、换域名用房间码+恢复码。
+- 故障排查.txt 第 5 条：改为“未找到/下载失败”的处置。
+- README.md 脚本说明同步更新（-NoDownload/-NoBrowser、自动起服/自动下载）。
+
+四、测试（apps/server/tests/scripts.test.ts，原 30 条追加到 32 条）
+- T31 tunnel_autostarts_server_then_reports_missing_cloudflared：
+  临时 data 目录 + 随机端口，-NoDownload -Cloudflared <不存在>：
+  断言 exit 1、stdout 含“本地服务未运行，正在自动启动”“未找到 cloudflared”“局域网仍可继续玩”、
+  run/server.json 已生成、端口已监听、没有 tunnel.json；finally 用 stop.ps1 停服并等端口释放。
+- T32 tunnel_reuses_running_tunnel_url：
+  复制 node.exe 成假 cloudflared.exe 常驻并写 tunnel.json（真实启动时间），起 mock /health：
+  断言 exit 0、stdout 含“隧道已在运行”“公网地址：https://probe-ux.trycloudflare.com”“玩法：一台电脑建房”，
+  且没有启动本地服务（未生成 run/server.json）。
+- 注意：自动起服时不要把 start-lan.ps1 接进 PowerShell 管道（| Out-Host）——start-lan 拉起的 node 会继承管道写端，
+  父脚本读不到 EOF 会一直挂住（09B 已记录的 E3 现象）。当前实现是直接调用，由子 PowerShell 进程退出即返回。
+
+五、本轮验收（Lead 实测）
+- corepack pnpm -s test：74 文件 / 925 条全绿（923 + T31/T32），147.08s，exit 0。
+- corepack pnpm -s typecheck：exit 0；corepack pnpm -s build：143 modules，exit 0
+  （index--JyM_5JG.css 18.07kB、index-Cs5Nm0o4.js 427.55kB）。
+- 单元测试覆盖：自动起服失败提示、缺 cloudflared 提示、已有隧道复用；真实下载与真实隧道见第六节。
+
+六、真实发布包验收（提交后重建）
+- 先停桌面包正在跑的服务，重新 corepack pnpm -s release:build（干净 HEAD，build-info gitDirty=false），
+  重新解压覆盖 D:\Lianjunjie\Cqianyi\Desktop\RichMan-v0.9.0-win-x64。
+- 双击/命令行运行 start-tunnel.bat 等价命令：应自动起服（或沿用已运行服务）、自动下载 cloudflared、
+  打印并复制 https://xxx.trycloudflare.com，浏览器打开该地址能进大厅；外部访问 /health 200。
+- 记录时以实际输出为准；隧道域名每次重建/重启都会变。
+
+七、边界与注意事项
+- 自动下载依赖 GitHub 可达；校园网/公司网可能失败，此时按提示手动放 tools/cloudflared.exe 或设 RICHMAN_CLOUDFLARED。
+- 首次下载约 40MB，需要几十秒；窗口会停在“正在自动下载”，不是卡死。
+- 下载的是 Cloudflare 官方未签名 exe，可能触发 SmartScreen/杀软提示，需用户自行放行；发布包本身不捆绑它。
+- 关闭 start-tunnel 的控制台窗口不会停服务；停服务/隧道请双击 stop.bat。
+- 隧道是临时域名，不承诺稳定；换域名后旧页面 token 可能失效，用“房间码+恢复码”回座。
+- 0.9.0 版本号未改：本次只是启动脚本体验改进，不改协议；1.0.0 仍等 09D 真机发布矩阵。
+
+八、下一步
+- 09D 真机发布矩阵（D01–D20）：两台电脑 + 安卓/iPhone，局域网与隧道各打一局，覆盖刷新/断网/锁屏/重启/换域名恢复码。
+- 之后升 1.0.0、打 tag、把本文件并入 CHANGELOG 的对应版本说明。
