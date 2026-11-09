@@ -36,6 +36,9 @@ RichMan（大富翁联机版）的版本与变更记录。日期均为本地日�
   双 WS 加入/准备/开局 → backup → 删房间 → restore `--all`（房间暂停态） → uninstall/`--purge`。
   实测修出两处真 bug：unit 缺 `AF_NETLINK` 导致 systemd 沙箱里 `getifaddrs` 崩溃；
   `restore.sh` 漏传 `--backup` 导致恢复失败。均已补回归测试。
+- Linux 包干净构建（build-info gitCommit b4bdcc1、gitDirty=false）：35 文件 / 55,526,275 字节，
+  SHA256 `F9631B37CA34C941A43326943A15242CCA4EBA612F6E6A1E43747D80E3EDE5B4`；
+  已作为 v1.0.1 release 资产上传，服务端 digest 与本机一致。
 
 ## [1.0.0] - 2026-11-09
 
