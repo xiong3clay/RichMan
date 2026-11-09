@@ -1,0 +1,106 @@
+RichMan 单元 12B 复核修复规格（M1/M2）
+================================================
+日期：2026-11-09
+依据：handoff/复核-单元12B.txt（Qoder 只读复核）
+Lead 已独立复现，两个 must-fix 均成立。
+
+一、结论与范围
+- 只修发布验收脚本的假 PASS，不重新设计发布包，不改 build-release.ps1 的产物结构。
+- 只允许改：
+  scripts/release-lib.mjs
+  scripts/verify-release.mjs
+  scripts/release-lib.test.mjs
+  handoff/单元12-*.txt（只追加“复核修复”段与数字）
+  handoff/项目当前状态.txt（只更新 12B 状态/测试数）
+- 不改 packages/**、apps/**、协议、引擎、web、依赖、build-release.ps1；不 commit。
+
+二、M1：zip 缺文件仍 PASS
+现状：scripts/verify-release.mjs:228-249 的 zip_extract 只核对 zip 顶层目录、VERSION、server.mjs 三项；
+scripts/release-lib.mjs:159-161 的 REQUIRED 只约束 staging，没有约束解压后的 zip。
+复现：复制 release/RichMan-v0.9.0-win-x64，删除 app/server/backup-cli.mjs，重新压 zip，
+      写临时 SHA256SUMS.txt，再跑
+      node scripts/verify-release.mjs --dir <原始 staging> --zip <临时 zip>
+实际：exit 0、12 项 PASS；期望：exit 1，指出 zip 缺 backup-cli。
+修法（必须）：
+1) release-lib.mjs 新增并导出：
+   export async function comparePackageDirs(expectedDir, actualDir)
+   - 递归列出两边全部文件（相对路径、/ 分隔、排序）；
+   - 缺文件 -> problems.push("缺少文件：" + rel)
+   - 多文件 -> problems.push("多余文件：" + rel)
+   - 两边都有：先比 size，再比 SHA256（大写），不一致分别 push
+     "文件大小不一致：" + rel / "文件内容不一致：" + rel；
+   - 返回 { ok, files: actualFiles.length, bytes, problems }。
+2) verify-release.mjs 的 zip_extract 改为：
+   - 期望顶层目录名由版本推导：const expectedTop = "RichMan-v" + version + "-win-x64";
+     不再用 path.basename(options.dir)（这样 --dir 指向副本时也能正确校验）。
+   - Expand-Archive 后：
+     const extractedCheck = await validateStaging(extractedDir, { version, nodeVersion });
+     若 !ok，抛 "zip 内容不完整：" + problems 前 10 条。
+   - const diff = await comparePackageDirs(options.dir, extractedDir);
+     若 !ok，抛 "zip 与 staging 不一致：" + problems 前 10 条。
+   - 记录 detail 包含 topName、extractedCheck.files、extractedCheck.bytes、server.mjs 前 12 位 hash。
+   - 这样 zip 缺 backup-cli、缺 index.html、缺 bat、多文件、hash 被替换都会红。
+
+三、M2：无扩展名 LICENSE 写 token 仍 PASS
+现状：verify-release.mjs:182-188 只扫扩展名白名单，secretPattern 只匹配 JSON 键值。
+复现：复制 staging，向根 LICENSE 追加 {"sessionToken":"ABCDEFGH12345678"}，只更新副本
+      SHA256SUMS.txt 中 LICENSE 的 hash，再跑
+      node scripts/verify-release.mjs --dir <副本 RichMan-v0.9.0-win-x64> --zip <原 zip>
+实际：exit 0、secret_scan PASS；期望：exit 1，报 LICENSE 疑似明文。
+修法（必须）：
+1) release-lib.mjs 新增并导出：
+   const BINARY_EXTENSIONS = new Set([".exe",".dll",".node",".zip",".gz",".7z",".mp3",".wav",".ogg",".png",".jpg",".jpeg",".gif",".ico",".woff",".woff2",".ttf",".otf",".eot",".pdf"]);
+   const MAX_SCAN_BYTES = 2 * 1024 * 1024;
+   const SECRET_PATTERN = /(?:sessionToken|recoveryCode)["']?\s*[:=]\s*["']?[A-Za-z0-9_-]{8,}|(?:^|[^A-Za-z0-9_])token["']?\s*[:=]\s*["']?[A-Za-z0-9_-]{8,}/i;
+   export async function scanSecrets(dir)：
+   - 遍历全部文件；扩展名在 BINARY_EXTENSIONS 的跳过；size > MAX_SCAN_BYTES 跳过；
+   - 读 Buffer，含 0 字节跳过（二进制兜底）；
+   - 转 utf8，SECRET_PATTERN.test 命中则 push 相对路径；
+   - 返回命中数组。
+2) verify-release.mjs：
+   - 删除旧 textExtensions/secretPattern 块；
+   - 在 zip_extract 之后统一做：
+     let secretHits = await scanSecrets(options.dir);
+     if (extractedDir !== null) secretHits = secretHits.concat((await scanSecrets(extractedDir)).map(x => "zip:" + x));
+     if (secretHits.length > 0) record("secret_scan", false, "疑似明文 token/恢复码：" + secretHits.join(","));
+     else record("secret_scan", true, "staging 与 zip 均未发现 token/recovery 明文");
+   - 包内真实数据必须仍然 PASS（Lead 已预扫：扩展名+无扩展名全部文件，命中 0）。
+
+四、测试（全部加在 scripts/release-lib.test.mjs，旧 11 条不改）
+T1 zip 缺 backup-cli 且 SHA256SUMS 已重算：删文件后 writeSums，validateStaging 必须 false，
+   文本包含 "缺少必需文件：app/server/backup-cli.mjs"（证明 REQUIRED 不依赖 SUMS 覆盖）。
+T2 comparePackageDirs 相同目录：makeFixture 两次，expect ok=true、problems=[]。
+T3 comparePackageDirs 缺文件：B 删 app/server/backup-cli.mjs，expect false、
+   problems 含 "缺少文件：app/server/backup-cli.mjs"。
+T4 comparePackageDirs 多文件：B 写 extra.txt，expect false、problems 含 "多余文件：extra.txt"。
+T5 comparePackageDirs 内容不同：B 改 app/web/index.html，expect false、
+   problems 含 "文件内容不一致：app/web/index.html"。
+T6 scanSecrets 无扩展名 LICENSE：fixture 根写 LICENSE 含 sessionToken=ABCDEFGH12345678，
+   expect hits 含 "LICENSE"。
+T7 scanSecrets 干净 fixture：expect hits=[]。
+T8 build-info.protocolVersion 非 1：改 build-info.json 为 2，重写 SUMS，validateStaging false，
+   文本含 "protocolVersion"。
+T9 build-info.gitCommit 过短：改为 "abc"（<7），重写 SUMS，validateStaging false，
+   文本含 "gitCommit"。
+预期：release-lib.test.mjs 11 -> 20 条；全量 907 -> 916 条；旧 907 条一条不改。
+
+五、文档
+- handoff/单元12-运行与验收.txt 追加“复核后修复（2026-11-09）”：
+  M1/M2 的复现命令、修复点、T1–T9、916 条、typecheck/build 0、verify 12 PASS。
+  并把原“新增 11 条”改为“新增 20 条”。
+- handoff/单元12-成果报告.txt / 注意事项.txt / 下一阶段交接.txt / 项目当前状态.txt：
+  只改测试数 907->916、新增 11->20；注意事项补：
+  “build-info.gitDirty=true 来自未提交工作区，最终发布必须 clean commit 重建”；
+  “release:build 首次可能因上一轮 verify 的 node.exe 短暂占用失败，重试即可，非逻辑失败”。
+- 不要改已有的 hash/size（EE86127F…D79B82 / 44976792 / 47 文件 / 105846765B），最终干净重建后再统一更新。
+
+六、验收（Trae 交付时必须贴真实输出）
+1) corepack pnpm -s vitest run scripts/release-lib.test.mjs -> 20/20
+2) corepack pnpm -s test -> 74 文件 / 916 条（旧 907 不减少）
+3) corepack pnpm -s typecheck -> 0
+4) corepack pnpm -s build -> 0
+5) corepack pnpm -s release:verify -> exit 0、12 PASS、secret_scan 为 “staging 与 zip…” 新文案
+6) 重新做 Qoder 的 M1 复现：临时 zip 删 backup-cli -> verify exit 1，problems 含 backup-cli
+7) 重新做 Qoder 的 M2 复现：LICENSE 追加 token + 更新副本 SUMS -> verify exit 1，
+   problems 含 LICENSE
+8) 不 commit；不新增依赖；不改 build-release.ps1。
