@@ -112,3 +112,42 @@ git diff --check：EXIT 0
 - start-lan 发布模式自动识别只依赖 app/server/server.mjs 是否存在，不要求
   RICHMAN_MODE；开发模式行为保持不变。
 - 12A 未打包 zip，包体积/最终 SHA256 留 12B。
+
+================================================================
+12B 完成记录（2026-11-09，发布包收尾）
+================================================================
+代码基线：3053b05（12A 已提交）；类型：Windows PowerShell 5.1 / Node 24。
+本轮改动：
+- 新增 scripts/release-lib.mjs：REQUIRED/FORBIDDEN/parseVersionInfo/validateStaging；
+  校验必需文件、禁止项（node_modules/源码/测试/handoff/docs/data rooms/run/logs/.ts/.log 等）、
+  VERSION/build-info/node-VERSION、SHA256SUMS 覆盖/排序/大小写 hash。
+- 新增 scripts/release-lib.test.mjs（20 条）：版本不一致、缺 http VERSION、缺文件、
+  node_modules、data/rooms、SHA 缺项/坏 hash/未排序、node VERSION 不一致、合法 fixture。
+- vitest.config.ts include 追加 "scripts/**/*.test.mjs"。
+- 新增 scripts/build-release.ps1：真实产出 release/RichMan-v0.9.0-win-x64/ 与 zip；
+  校验 package.json 与 http.ts VERSION；pnpm build + dist/audio 检查；只清目标 staging/zip；
+  bundle-server、fetch-portable-node（缓存命中）；复制 dist/8 个 ps1/LICENSE/CHANGELOG；
+  生成 VERSION/build-info.json/使用说明/故障排查/第三方素材许可/licenses/data+tools README/7 个 .bat；
+  SHA256SUMS（相对路径 /、UTF-16 序、大写、两空格）；Compress-Archive；release/SHA256SUMS.txt；
+  调 verify-release.mjs；stdout 单行 JSON 并写 release-build.txt。
+- 新增 scripts/verify-release.mjs：真实目录/hash/禁止项/secret 扫描/.bat CRLF；
+  zip hash 与 release/SHA256SUMS、Expand-Archive 顶层目录/VERSION/server.mjs hash；
+  包内 node 启动 server.mjs（/health version、GET /、mp3 200、POST 201+房间码、端口释放）；
+  backup-cli create 空 data（exit 1/BACKUP_EMPTY）+ cleanup --dry-run exit 0；
+  包内 start-lan -CheckOnly（ok=true、node v24、webDist ok）；写 release-verify.txt。
+- package.json 增加 release:build / release:verify；README 追加发布包构建节。
+- scripts/start-lan.ps1 发布模式修复：Start-Process ArgumentList 不会自动给含空格
+  server.mjs 路径加引号，显式包一层引号；开发模式不变。
+
+真实产物：
+- release/RichMan-v0.9.0-win-x64/：47 文件，105846765 字节
+- release/RichMan-v0.9.0-win-x64.zip：44976792 字节（约 42.9MB）
+- zip SHA256：EE86127FA7EF6CC77B959D11CFD49BFBAB8746EA4C86BA734A80484728D79B82
+- release/SHA256SUMS.txt：一行 zip 名 + 大写 hash
+- verify：12 项检查全 PASS（staging/版本/secret/.bat/zip hash/解压/运行/端口/备份 CLI/包内 CheckOnly）
+- 测试：74 文件 / 916 条全通过（旧 896 未少，新增 release-lib 20 条），113.73s
+- typecheck 0；build 143 modules / 329ms / 0
+- 解压实测：%TEMP%\richman 12b 中文 空格 → 启动 0、/health 200、GET / 200、
+  POST /api/rooms 201 room 3821、stop 0；backup ok（rooms=1）；restore exit 0；
+  重启 /health 200 rooms=1；再次 stop 0、状态文件删除、端口释放。
+未 commit。

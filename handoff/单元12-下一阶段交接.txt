@@ -93,3 +93,41 @@ RichMan-v0.9.0-win-x64/
   fetch 脚本已用 Open()+CopyTo。12B 若自行解压 zip，沿用流式方法。
 - 用 Start-Process -Wait 跑 start-lan 会等待整棵进程树（服务不退出→挂起）；
   应使用 -PassThru + WaitForExit。12A 手工验证已踩过并规避。
+
+================================================================
+12B 完成记录（2026-11-09）
+================================================================
+一、已补齐
+- scripts/release-lib.mjs + release-lib.test.mjs（20 条）；vitest include 追加 scripts/**/*.test.mjs。
+- scripts/build-release.ps1：完整 3.4 流水线；stdout 单行 JSON；release-build.txt。
+- scripts/verify-release.mjs：12 项真实检查；release-verify.txt。
+- package.json release:build / release:verify。
+- README “发布包构建（Windows）”。
+- 包内 7 个 .bat（ASCII、CRLF、chcp 65001、pause）、使用说明/故障排查/第三方素材许可、
+  licenses/{node,ws,react,react-dom,zod}、data+tools README。
+- release/SHA256SUMS.txt（一行 zip 名+hash）已生成并纳入 verify。
+- scripts/start-lan.ps1 发布模式修复：启动 server.mjs 时显式给路径加引号，
+  否则含空格/中文目录会被 Start-Process ArgumentList 拆开。
+
+二、最终产物（基线 3053b05）
+- 目录 release/RichMan-v0.9.0-win-x64/：47 文件 / 105846765 字节
+- zip release/RichMan-v0.9.0-win-x64.zip：44976792 字节
+- zip SHA256 EE86127FA7EF6CC77B959D11CFD49BFBAB8746EA4C86BA734A80484728D79B82
+- verify 12/12 PASS；含空格/中文目录解压实测通过（start/health/建房/backup/restore/restart）。
+- 全量 74 文件/916 条，typecheck/build 0。
+
+三、下一入口
+- 09D 真机发布矩阵仍未执行：用这个 zip 做局域网 2/10 人、Android/iPhone、蜂窝隧道、
+  断网/锁屏、重启继续、恢复码换 token、销毁房间、多局资源释放、备份恢复。
+- 09D 全 PASS 后才把版本 0.9.0 → 1.0.0；本单元不得提前写 1.0.0。
+- 正式发布前重跑 `release:build`，核对 zip SHA256 与 release/SHA256SUMS.txt；
+  builtAtUtc 每次不同 → zip hash 每次不同是预期，不是构建不稳定（文件集合/server.mjs 稳定）。
+- 包内不含 cloudflared；发布页应提示玩家自备 tools/cloudflared.exe。
+- 维护注意：bundle-server 的产品校验（>50KB、ws 标记、无 tsx）、release-lib 的
+  REQUIRED/FORBIDDEN、verify 真实启动链路都是防回归门槛，不要为了构建速度跳过。
+
+四、已知边界
+- node.exe 未签名（93.5MB），杀软可能误报；已写故障排查。
+- 构建需要 Windows PowerShell 5.1；本机无 pwsh7，未测 pwsh7。
+- zip 解压包含顶层目录；SHA256SUMS 只覆盖目录内文件，不覆盖 zip 自身（zip hash 在 release/SHA256SUMS.txt）。
+- 路径含空格/中文已实测；超长路径/只读目录未单独压测。

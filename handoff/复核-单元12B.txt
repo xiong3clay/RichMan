@@ -1,0 +1,236 @@
+RichMan 单元 12B 发布包与内置便携 Node 独立复核
+================================================
+复核员：Qoder（只读复核；未改生产代码/测试/协议/交接，未 commit）
+日期：2026-11-09
+工作区：D:\Lianjunjie\biancheng\RichMan
+HEAD：3053b05（12A 已提交；12B 工作区未提交）
+唯一写入文件：handoff/复核-单元12B.txt
+
+一、结论
+需修复。
+发布包本身可运行、内容干净（47 文件/105846765B，zip 44976792B，SHA256 EE86127F...D79B82，
+真实解压/启动/health/建房/停止通过）；但 scripts/verify-release.mjs 的 12 项检查存在两个
+可复现的假 PASS：
+  M1 zip_extract 只核对 zip 的顶层目录、VERSION、server.mjs 三项；zip 缺
+     app/server/backup-cli.mjs 时 verify 仍 exit 0 / 12 PASS（staging 正常即可）。
+  M2 secret_scan 只扫描白名单扩展名且只匹配 JSON 风格键值；在无扩展名的 LICENSE 写入
+     sessionToken 并同步 SHA256SUMS 后，verify 仍 exit 0 / secret_scan PASS。
+这两个问题会让“发布验收全 PASS”不能证明交付 zip 完整/无明文凭据，必须修。
+其余 build-info 校验无单测、gitDirty=true、首次 build 的 node.exe 占用等列为 should-fix/nit，
+不单独阻塞；当前真实 release/ 内容本身未被发现 token、data/rooms、日志、源码、node_modules、
+handoff/docs。
+
+二、must-fix 列表
+
+M1 zip_extract 未校验 zip 全量文件，缺必需文件的 zip 仍 PASS
+   文件:行号：
+   - scripts/verify-release.mjs:228-249（zip_extract 仅检查顶层目录、VERSION、server.mjs hash）
+   - scripts/release-lib.mjs:159-161（REQUIRED 只在 staging 校验；没有对解压 zip 调 validateStaging）
+   问题：
+   `zip_extract` 只从 zip 解出一个 server.mjs 并核其 hash；没有把解压目录与
+   SHA256SUMS/REQUIRED 全量对照，也没有检查 app/server/backup-cli.mjs、app/web/*、scripts/* 是否在 zip 里。
+   而 server_runtime/backup_cli/packaged_check_only 使用的是 **staging**，不是 zip 解压副本，
+   所以 staging 正常 + zip 缺文件时 verify 仍绿。
+   复现命令（临时目录，不修改仓库）：
+   1. 复制 release/RichMan-v0.9.0-win-x64 到临时目录；
+   2. 删除临时副本 app/server/backup-cli.mjs；
+   3. Compress-Archive 该副本为临时 zip，写一份只含该 zip hash 的 release/SHA256SUMS.txt；
+   4. node scripts/verify-release.mjs --dir <原始 staging> --zip <临时 zip>。
+   期望：exit 1，报 zip 缺 app/server/backup-cli.mjs（或 SHA256SUMS 缺项/必需文件缺失）。
+   实际：exit 0，12 项全 PASS（staging_structure 47 files、zip_extract PASS、server_runtime PASS）。
+   建议改法：
+   - Expand-Archive 后对 extractedDir 调 `validateStaging(extractedDir, { version, nodeVersion })`，
+     让同一 REQUIRED/FORBIDDEN/SHA256SUMS 规则同时约束 staging 和 zip；
+   - 或至少遍历 extractedDir 全部文件，与 staging SHA256SUMS 的路径集合+hash 全量比较，并断言 REQUIRED 存在于 zip；
+   - 增加“zip 删除 backup-cli/ index.html/启动脚本”的负向单测，证明 verify 必红。
+
+M2 secret_scan 可漏无扩展名文本/非 JSON 写法的明文 token/recoveryCode
+   文件:行号：scripts/verify-release.mjs:182-188（textExtensions 白名单、secretPattern 仅 JSON 键值）。
+   问题：
+   `textExtensions` 只含 .txt/.md/.json/.js/.mjs/.html/.css/.ps1/.bat/.xml/.svg；
+   `LICENSE`、`licenses/ws/LICENSE`、`licenses/react/LICENSE` 等无扩展名文件被跳过。
+   secretPattern 只匹配 `{ "sessionToken"/"token"/"recoveryCode": "..." }`，不匹配
+   `sessionToken=...`、YAML/plain 文本或其它属性名。实际包中恰好没有密钥，但 gate 本身不完整。
+   复现命令（临时副本，不修改仓库）：
+   1. 复制 staging；
+   2. 向根 `LICENSE` 追加 `{"sessionToken":"ABCDEFGH12345678"}`；
+   3. 重新计算该 LICENSE 的 SHA256 并更新副本 SHA256SUMS；
+   4. node scripts/verify-release.mjs --dir <副本> --zip <原 zip>。
+   期望：exit 1，secret_scan FAIL（发现明文 sessionToken）。
+   实际：exit 0，secret_scan PASS（12 项全 PASS）。
+   建议改法：
+   - secret_scan 至少覆盖所有非二进制/小体积文件，包括无扩展名 LICENSE、licenses/**/LICENSE；
+     可按 magic/大小跳过 node.exe/mp3/wav，而不是按扩展名白名单跳过文本；
+   - 扩展模式到 `(sessionToken|recoveryCode|token)\s*[:=]\s*["']?[A-Za-z0-9_-]{8,}`，并覆盖 JSON/YAML/plain；
+   - 增加 extensionless LICENSE 负向测试；同时把 zip 解压副本也纳入 secret_scan（当前只扫 staging）。
+
+三、should-fix / nit 列表
+S1 build-info 六个校验没有负向单测，删除 protocolVersion 检查时 verify 和 11 条 lib 测试都不红
+   文件:行号：scripts/release-lib.mjs:190-201（version/nodeVersion/protocolVersion/builtAtUtc/gitCommit/gitDirty）；
+              scripts/release-lib.test.mjs:73-166（11 条，无 build-info 负向用例）。
+   实测：
+   - 把临时 staging 的 build-info.protocolVersion 改为 2（同步 SHA256SUMS）→ 原 verify exit1，
+     staging_structure 正确报 `build-info.protocolVersion 必须为 1`；
+   - 临时删除 release-lib 的 protocolVersion 检查后，同一坏 staging 的 verify **exit0、12 PASS**；
+     release-lib.test.mjs 仍 **11/11 通过**。
+   判断：这是测试覆盖缺口而非当前产品 bug（检查代码存在，基线能抓）；按用户问题归类 should-fix，
+   不是 must-fix。建议为六个字段各加坏 fixture，至少覆盖 protocolVersion、gitCommit、builtAtUtc、
+   gitDirty、version/nodeVersion；否则校验逻辑被删也无门禁。
+
+S2 build-info.gitDirty=true：当前 zip 来自未提交工作区，最终发布前必须从干净提交重建
+   事实：release/RichMan-v0.9.0-win-x64/build-info.json 的 gitDirty=true、gitCommit=3053b05；
+         这不是伪造（build-release.ps1:237-247 按 git status 计算），当前 12B 本身也未 commit。
+   建议：把“最终发布 zip 必须来自 clean commit，build-info.gitDirty=false”写进发布流程/验收；
+         当前 0.9.0 内部构建可以接受 true，但不应作为 09D/1.0.0 最终发布物。
+
+S3 release:build 的首次执行可能被上一轮 verify/包进程短暂占用 node.exe
+   事实：我第一次独立执行 corepack pnpm -s release:build 时，在复制
+         release/.../node/node.exe 处报“正由另一进程使用”，build exit1；
+         清理/等待后立即重跑 exit0，staging 47 files/105846765B，文件集合与大小稳定，
+         zip hash 因 builtAtUtc 变为 4C9C865E...（这是预期，不是内容漂移），随后已恢复原始
+         EE86127F... 产物。
+   判断：不是必然逻辑失败（第二次通过、大小/集合一致），但构建与上一个验证进程/服务存在文件锁竞争；
+         建议 build-release 在清 staging 前检查/提示正在运行的包进程，或对 node.exe 复制做短暂重试；
+         至少写进 release 运行说明。
+
+S4 release-lib 11 条未覆盖 FORBIDDEN 的源码/handoff/docs/logs、bundle 产物体积/ws/tsx
+   文件:行号：scripts/release-lib.test.mjs:73-166；对应实现 release-lib.mjs:44-60、validateStaging 未检查 server.mjs 大小/ws 标记。
+   现测只覆盖 node_modules、data/rooms、缺文件、SHA 缺项/坏 hash/未排序、node VERSION、合法 fixture；
+   建议补 source/handoff/docs/data/logs 禁止项，以及 server.mjs >50KB、含 WebSocketServer、
+   不含 tsx 的 bundle 校验（可放 release-lib 或 build-release 的独立测试）。低优先。
+
+S5 verify 的 zip_sha256 只与同目录 release/SHA256SUMS.txt 自洽，不是独立来源
+   文件:行号：scripts/verify-release.mjs:212-218。zip hash 与构建时写出的同一文件比较，
+   无法防御“zip 和 release/SHA256SUMS 同时被替换”；正式发布应在外部发布页/Release notes
+   固定独立 SHA256，并保留人工/签名校验。非本轮代码阻塞。
+
+S6 手工 backup/restore 未在本次复核中完整重跑
+   我独立完成了包内 start-lan -CheckOnly、真实 start、/health、POST /api/rooms、stop、
+   端口释放、状态文件删除；release:verify 覆盖 backup-cli 空 data BACKUP_EMPTY 与 cleanup --dry-run。
+   完整“备份一个真实房间→删房间→restore -All→重启”仍引用 Lead 的 12B 手工记录，本次未独立重做；
+   不把它当作独立证据。
+
+S7 文档/构建耗时与环境差异（nit）
+   - 交接记录 120.04s / 138.07s；我独立全量 123.77s，属环境差异。
+   - 交接记录 build 286/329ms；我独立 release build 内 pnpm build 206/299ms，均过。
+   - 首次 release:build 因 node.exe 占用失败属复核环境/上一验证进程，不是代码红灯；重跑输出
+     47 files/105846765B，zip hash 4C9C...，验证 12 PASS；随后已恢复原始 EE861... 产物。
+   - 交接没有写 build-info.gitDirty=true；建议在运行交接中记录实际值。
+
+四、A/B/C/D 逐条判定
+
+A. build-release.ps1 PASS（有 S2/S3 两个运维 caveat）
+   - 版本双源：build-release.ps1 读取 package.json 与 apps/server/src/http.ts 的 VERSION 并断言相等；
+     实际 package/http 均 0.9.0；parseVersionInfo 的 11 条测试覆盖一致/不一致/缺 VERSION。
+   - staging 清理：只 Remove 目标 release/<name> 与 <name>.zip（build-release.ps1:64、删除块），
+     不递归删 release 根；独立 build 后 staging 仍 47 files/105846765B。
+   - dist 检查：检查 index.html 存在、audio 至少 1 mp3 与 4 wav；实际包 audio 3 mp3/5 wav。
+   - 便携 Node：实际 node.exe SHA256
+     BA4E6D110E8C1592A1ECD390F6B05F3DA124B13871A5BE62B341A07A853C6C32，
+     与 artifacts/node-cache/node-v24.21.0-win-x64.zip 内 node.exe 完全一致；
+     node/VERSION v24.21.0、node/LICENSE.txt 存在；fetch 脚本校验官方 zip SHA
+     158F7685...E541。
+   - LICENSE 收集：LICENSE/CHANGELOG/使用说明/故障排查/第三方素材许可/licenses/{node,ws,react,
+     react-dom,zod}/LICENSE 均在 staging/zip；数据/tools 仅 README。
+   - 7 个 .bat：ASCII 名、无 BOM、全部 CRLF；chcp 65001、cd /d "%~dp0"、-File "%~dp0scripts\..."、pause
+     均在（PowerShell 实测 BOM=False、CRLF=True、LFONLY=False）。
+   - SHA256SUMS：包内 46 行（47 文件减自身），路径/大写 hash/两空格；我用 PowerShell 逐条复算
+     46/46 全匹配；路径集合与 staging 实际文件差集=0；排序（构建 .NET Ordinal，release-lib JS sort）一致。
+   - build-info：version/protocolVersion/nodeVersion/builtAtUtc/gitCommit/gitDirty 六字段存在；
+     gitDirty 按 git status 计算，当前 true；见 S2。
+   - zip：Compress-Archive 顶层只有 RichMan-v0.9.0-win-x64；zip 44976792B、SHA256
+     EE86127F...D79B82；zip 内 47 个文件（另含目录 entry）与 SHA256SUMS 全匹配（我用 PowerShell
+     逐个 entry 计算 hash；仅 SHA256SUMS 自身不在 SUMS 属预期）。
+   - 可重复性：独立重跑一次成功（第二次；第一次被 node.exe 占用，见 S3），文件集合/大小稳定，
+     zip hash 随 builtAtUtc 改变属规范允许；恢复原产物后 hash 仍 EE861...。
+   - 结论：A 通过；S2/S3 是发布流程/重复执行 caveat，不是算法错误。
+
+B. verify-release.mjs FAIL（两个假 PASS，见 M1/M2；其余项真实）
+   - staging_structure：用 validateStaging 真实检查 REQUIRED/FORBIDDEN/版本/node 版本/build-info/
+     SHA256SUMS；实际 47 文件/105846765B；反向 staging 追加 index.html 后 exit1 报 SHA256 不匹配。
+   - secret_scan：**FAIL**，见 M2；只扫白名单扩展名/JSON 键值，无扩展名 LICENSE 中的
+     sessionToken 仍 PASS。
+   - bat_files：实际 7 个 .bat 内容、CRLF；通过。
+   - zip_sha256：真实计算 zip hash 并与 release/SHA256SUMS 比对；通过，但该 SUMS 与 zip 同源（S5）。
+   - zip_extract：**FAIL/不完整**，见 M1；只核顶层/VERSION/server.mjs；缺 backup-cli 的 zip 仍 PASS。
+   - server_runtime：真实 spawn **包内 node/node.exe**（不是系统 node），cwd=options.dir，
+     RICHMAN_STATIC_DIR/RICHMAN_DATA_DIR=临时；health version/GET root/mp3/POST room/端口释放均真实；
+     我独立 release:verify 12 项全 PASS，room 0272，端口 64299。
+   - backup_cli：用包内 node 跑 backup-cli.mjs（staging 包内），空 data BACKUP_EMPTY exit1、
+     cleanup --dry-run exit0；真实。
+   - packaged_check_only：执行包内 scripts/start-lan.ps1 -CheckOnly，JSON ok/node v24/webDist ok；
+     真实；我另做包内完整启动/health/建房/stop（见 E）。
+   - 结论：12 项不是全自证，但 M1/M2 使“12 PASS”不足以证明交付 zip 完整/无明文；B 判 FAIL。
+
+C. release-lib.test.mjs 11 条 PASS（覆盖面应加强，build-info 六校验无单测为 should-fix）
+   - 11 条覆盖：版本相等/不一致、缺 http VERSION、缺必需文件、node_modules、data/rooms、
+     SHA256SUMS 缺项/坏 hash/未排序、node VERSION 不一致、合法 fixture；全绿。
+   - 没有覆盖 build-info 六字段（S1）；我删除 protocolVersion 检查后 lib 测试仍 11/11 绿，
+     说明这六个校验目前无门禁。按问题性质列 should-fix，不是当前代码的 must-fix。
+   - 未覆盖全部 FORBIDDEN 项与 bundle >50KB/ws/tsx（S4）；建议追加。
+   - 全量 74 文件/907 条真实通过；11 条新增，旧 896 条未减。
+
+D. 含空格/中文路径 PASS；start-lan 引号修复不影响开发模式
+   - 独立 Expand-Archive 到
+     `%TEMP%\richman 12b qoder e2e2 中文 空格\RichMan-v0.9.0-win-x64`；
+     CheckOnly exit0，node v24.21.0/webDist ok；真实 start-lan 后 /health 200 version 0.9.0，
+     POST /api/rooms 201 roomCode 1221；stop exit0、PORT_CLOSED=True、STATE_EXISTS=False。
+   - start-lan 的引号修复只在 `if ($layout.Portable)` 内（scripts/start-lan.ps1:154-158），
+     开发模式参数仍是 `--import tsx ... apps/server/src/http.ts`；git diff 只有该分支一行；
+     开发模式启动路径未被改。
+   - 备注：用 `Start-Process -Wait` 包住 start-lan 会等待服务子进程树（12A 已记录）；
+     复核改用不 Wait/poll health，避免把工具行为误判为启动卡死。
+
+E. 独立复跑/变异结果
+   1) corepack pnpm -s test：74 files / 907 tests passed，123.77s，exit0。
+   2) corepack pnpm -s typecheck：exit0。
+   3) corepack pnpm -s release:verify：12/12 PASS，exit0，room 0272/端口 64299；原始 zip。
+   4) corepack pnpm -s release:build：第一次因 node.exe 被上一轮验证进程短暂占用 exit1；
+      清理后重跑 exit0，47 files/105846765B，zip 4C9C865E...；verify 12 PASS；
+      已恢复原始 EE861... 产物/SUMS（hash 复核一致）。
+   5) PowerShell：staging 47 文件/105846765B；zip 44976792B；SHA256SUMS 46 行；逐条 hash 46/46 匹配；
+      zip 内 47 文件与 SUMS 全匹配（唯一额外条目是 SHA256SUMS 自身）；7 个 .bat 无 BOM/CRLF；
+      .ps1 均 BOM；node.exe 与缓存 zip 内 node.exe hash 相同。
+   6) 包内 e2e（中文/空格）：CheckOnly、真实 start、/health、建房、stop、端口释放/状态删除全部通过。
+   7) 变异/反向探针：
+      - build-release 去复制 CHANGELOG：build exit1，verify 报“缺少必需文件：CHANGELOG.md”（符合预期）。
+      - release-lib 跳过每文件 SHA 比对：lib 测试 `SHA256SUMS bad hash` 变红；但 staged tamper +
+        该变异下 verify 可 exit0（说明 verify 自身没有独立全量 hash 门禁；lib 测试能抓住）。
+      - 删除 release-lib 的 build-info.protocolVersion 检查：坏 protocolVersion 的 staging
+        verify exit0、lib 11/11 绿（S1 覆盖缺口；基线原代码会 exit1）。
+      - zip 删 app/server/backup-cli.mjs：原 verify exit0/12 PASS（M1）。
+      - LICENSE 无扩展名写 sessionToken + 更新 SUMS：原 verify exit0/secret_scan PASS（M2）。
+      - 正常反向 staging 追加字节 + 原 zip：原 verify exit1，staging_structure SHA256 不匹配（正常 gate 有效）。
+      - 所有临时改均立即逐字节还原；release 原产物 hash 已恢复为 EE86127F...；
+        scripts/release-lib.mjs / build-release.ps1 已恢复；未 commit。
+
+F. 包内容安全/隐私 PASS（真实包），但 M2 的验收 gate 不足
+   - 实际 staging 47 文件/zip 47 文件：无 node_modules、apps/server/src、apps/web/src、packages、
+     handoff、docs、.git、data/rooms/run/logs、*.ts、*.log、*.map、*.test.mjs；
+     我用 Node 递归扫描（含无扩展名 LICENSE）也未发现 token/recoveryCode 键值。
+   - data/ 只有 README.txt；tools/ 只有 README.txt；无备份/日志/真实房间；zip 无源码/测试。
+   - 但 M2 证明 verify 的 secret_scan 在无扩展名文本上会漏；实际包干净不能消除 gate 缺口。
+   - build-info.gitDirty=true 是当前未提交工作区的真实值（S2）；最终发布需 clean 构建。
+
+G. 文档真实性
+   - 交接的 907 条、47 文件/105846765B、44976792B、EE861...、12 项 PASS、旧 896+新 11、包内
+     e2e/备份 CLI 检查均与实物/实测一致；PowerShell 5.1 描述与用户修正一致。
+   - 我独立 build 得到 zip 4C9C... 与 docs 的 EE861... 不同，原因是 builtAtUtc 每次不同（文档已说明）；
+     随后恢复原始产物；不视为文档错误。
+   - 文档未写 build-info.gitDirty=true / release:build 首次 node.exe 占用；建议补运行说明（S2/S3）。
+   - 第一次 release:build 的 node.exe 占用不是产品规则失败；第二次已通过，需在交接按“环境/运维 caveat”记录。
+
+五、独立复跑的实际命令摘要
+- corepack pnpm -s test → 74 passed / 907 passed，123.77s，exit0。
+- corepack pnpm -s typecheck → exit0。
+- corepack pnpm -s release:verify → 12 checks PASS，exit0（health 0.9.0/GET 200/mp3 200/room 0272/端口 64299）。
+- corepack pnpm -s release:build → 首次 node.exe 占用 exit1；清理后 exit0，47 files/105846765B，
+  zip 4C9C...，verify 12 PASS；随后恢复原始 EE861... 产物。
+- 包内 e2e：CheckOnly exit0；start/health 200/room 1221/stop exit0/端口关闭/状态删除。
+- 反向正常 staging 篡改：verify exit1（SHA256 不匹配），证明正常验真不是恒真。
+- 两条 must-fix 的复现均在临时副本完成，未修改 release/ 原产物。
+
+复核结论：发布包内容本身可运行且未发现实际凭据/数据泄露，但 scripts/verify-release.mjs 的
+zip 全量完整性和 secret_scan 覆盖存在两个可复现假 PASS，必须修复后才能把“release:verify 12 PASS”
+作为发布验收证据；其余 build-info 无单测/gitDirty/重复构建锁为 should-fix 或 nit。本次未修改
+生产代码/测试/协议/交接，未 commit，只新增本报告。

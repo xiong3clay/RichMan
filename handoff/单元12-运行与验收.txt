@@ -173,3 +173,136 @@ git diff --stat：10 files changed，+164/−19（另两份新脚本未跟踪）
    index-Cs5Nm0o4.js 427.55kB）；git diff --check 仅 CRLF 提示、无空白错误。
 说明：用管道捕获 start-lan 输出会因服务子进程继承句柄而阻塞（09B 已记录的 E3）；
 本次以 start exit 0 + /health + stop exit 0 为证据，不是产品回归。
+
+================================================================
+12B 运行与验收（2026-11-09）
+================================================================
+一、测试/类型/构建
+corepack pnpm -s test
+  Test Files  74 passed (74)
+       Tests  916 passed (916)
+    Duration  113.73s
+    TEST_EXIT=0
+  说明：旧 896 条未减少；新增 scripts/release-lib.test.mjs 20 条。
+  日志：artifacts/test-logs/release-12b-full-test.txt
+corepack pnpm -s typecheck → TSC_EXIT=0（release-12b-typecheck.txt）
+corepack pnpm -s build → 143 modules，built in 329ms，BUILD_EXIT=0（release-12b-build-web.txt）
+
+二、完整构建（真实产出）
+命令：
+  powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1
+stdout 单行 JSON：
+  {"ok":true,"version":"0.9.0",
+   "staging":"...\\release\\RichMan-v0.9.0-win-x64",
+   "zip":"...\\release\\RichMan-v0.9.0-win-x64.zip",
+   "zipSha256":"EE86127FA7EF6CC77B959D11CFD49BFBAB8746EA4C86BA734A80484728D79B82",
+   "files":47,"bytes":105846765}
+BUILD_RELEASE_EXIT=0；日志 release-12b-build.txt、release-build.txt。
+- zip 实际 44976792 字节（约 42.9MB）。
+- release/SHA256SUMS.txt = EE86127F…D79B82  RichMan-v0.9.0-win-x64.zip。
+- 构建过程中 bundle-server 473640B / backup-cli 227116B；便携 node 缓存命中
+  （SHA 158F7685…E541，v24.21.0）；dist 143 modules。
+
+三、verify-release 结果（12 项全 PASS）
+  PASS staging_exists
+  PASS zip_exists
+  PASS staging_structure   47 files / 105846765 bytes
+  PASS version_matches_package 0.9.0
+  PASS secret_scan         未发现 token/recovery 明文键值
+  PASS bat_files            7 个 .bat 内容与 CRLF 正常
+  PASS zip_sha256           EE86127F…D79B82
+  PASS zip_extract          RichMan-v0.9.0-win-x64 / server.mjs 8E8CCC529640
+  PASS server_runtime       health 0.9.0 / GET 200 / mp3 200 / room 4902
+  PASS port_released        52455
+  PASS backup_cli           create BACKUP_EMPTY exit 1；cleanup dry-run exit 0
+  PASS packaged_check_only  node v24.21.0 / webDist ok
+PROBLEMS=[]；日志 release-verify.txt。
+
+四、含空格/中文目录解压实测
+路径：%TEMP%\richman 12b 中文 空格\RichMan-v0.9.0-win-x64
+  EXTRACT_TOP=RichMan-v0.9.0-win-x64
+  START_EXIT=0
+  HEALTH=200 {"ok":true,"service":"richman","version":"0.9.0",...,"rooms":0}
+  GET_ROOT=200
+  POST_ROOMS=201 {"ok":true,"roomCode":"3821"}
+  ROOM_SNAPSHOT_EXISTS=True
+  STOP_EXIT=0 / STATE_EXISTS=False
+  BACKUP_RESULT=ok_json
+  BACKUP_JSON={"ok":true,"script":"backup","rooms":1,"skipped":0,"pruned":0,
+               "out":"...\\data\\backups\\richman-backup-20261109-110419"}
+  ROOM_REMOVED=True
+  RESTORE_EXIT=0
+  RESTORE_OUT={"ok":true,"script":"restore","restored":[{"code":"3821","keptPath":null}],
+               "pausedHint":true}
+  RESTORED_SNAPSHOT_EXISTS=True
+  RESTART_START_EXIT=0
+  RESTART_HEALTH=200 {"ok":true,...,"rooms":1}
+  STOP2_EXIT=0 / STATE_EXISTS=False / RESTART_PORT_RELEASED=True
+日志 release-12b-extract.txt。
+
+五、git 范围（写交接前）
+  M README.md
+  M package.json
+  M scripts/start-lan.ps1（仅发布模式 exe/server 路径引号）
+  M vitest.config.ts
+  ?? scripts/build-release.ps1
+  ?? scripts/release-lib.mjs
+  ?? scripts/release-lib.test.mjs
+  ?? scripts/verify-release.mjs
+  ?? handoff/单元12-*.txt（本四份更新）
+release/ 与 artifacts/ 已 gitignore；未 commit。
+
+================================================================
+复核后修复（2026-11-09，Qoder M1/M2）
+================================================================
+依据：handoff/复核-单元12B.txt、handoff/单元12B-复核修复.txt。
+范围：只改 scripts/release-lib.mjs、scripts/verify-release.mjs、scripts/release-lib.test.mjs；
+未改 build-release.ps1/产物结构/协议/依赖；未重新生成 zip，既有 hash/size 不变
+（EE86127F…D79B82 / 44976792 字节 / 47 文件 / 105846765 字节）。
+
+一、修复点
+M1 zip 全量完整性：
+- release-lib 新增 comparePackageDirs(expectedDir, actualDir)：比较全部相对路径、大小、SHA256，
+  输出“缺少文件/多余文件/文件大小不一致/文件内容不一致”。
+- verify-release 的 zip_extract：顶层目录名由版本推导 RichMan-v<version>-win-x64（不再取
+  --dir basename）；解压后先 validateStaging(extractedDir)，再 comparePackageDirs(staging, zip)；
+  任一失败即 zip_extract FAIL，detail 汇总前 10 条。
+M2 secret_scan 覆盖：
+- release-lib 新增 scanSecrets(dir)：遍历全部文件（含无扩展名 LICENSE），跳过
+  .exe/.dll/.node/.zip/.mp3/.wav 等二进制扩展名、>2MB 文件与含 NUL 字节文件；
+  正则匹配 sessionToken/recoveryCode/token 的 JSON、key=value 与 plain 形态。
+- verify-release 删除旧扩展名白名单扫描；在 zip_extract 后同时扫 staging 与解压目录，
+  zip 命中加 “zip:” 前缀合并报告。
+
+二、真实复现（临时副本，未改仓库产物）
+M1：复制 staging、删除 app/server/backup-cli.mjs、重新压 zip、写临时 release/SHA256SUMS；
+  node scripts/verify-release.mjs --dir <原 staging> --zip <临时 zip>
+  → exit 1；problems 含
+  “zip_extract：zip 内容不完整：缺少必需文件：app/server/backup-cli.mjs；
+   zip 与 staging 不一致：缺少文件：app/server/backup-cli.mjs”。
+M2：复制 staging、LICENSE 追加 {"sessionToken":"ABCDEFGH12345678"}、只更新副本 LICENSE hash；
+  node scripts/verify-release.mjs --dir <副本> --zip <原 zip>
+  → exit 1；problems 含
+  “secret_scan：疑似明文 token/恢复码：LICENSE”。
+日志：artifacts/test-logs/release-12b-fix-negative.txt。
+
+三、测试
+- release-lib.test.mjs 追加 T1–T9（旧 11 条未改）：
+  T1 zip 缺 backup-cli 且 SUMS 已重算仍因 REQUIRED 变红；
+  T2 comparePackageDirs 相同目录；T3 缺文件；T4 多文件；T5 相同大小但内容不同；
+  T6 scanSecrets 命中无扩展名 LICENSE；T7 干净 fixture 无命中；
+  T8 build-info.protocolVersion 非 1；T9 build-info.gitCommit 过短。
+- 单文件：20/20 通过（2.54s）。
+- 全量：74 文件 / 916 条通过，113.73s，TEST_EXIT=0（旧 907 条未减少）。
+- typecheck TSC_EXIT=0；build 143 modules / 320ms / BUILD_EXIT=0。
+
+四、正向 verify（原产物）
+corepack pnpm -s release:verify → exit 0、12 项全 PASS：
+  staging_structure 47 files / 105846765 bytes
+  zip_sha256 EE86127F…D79B82
+  zip_extract RichMan-v0.9.0-win-x64 / 47 files / 105846765 bytes / server.mjs 8E8CCC529640
+  secret_scan “staging 与 zip 均未发现 token/recovery 明文”
+  server_runtime health 0.9.0 / GET 200 / mp3 200 / room 6894；port_released 52923
+  backup_cli create BACKUP_EMPTY exit 1；cleanup dry-run exit 0
+  packaged_check_only node v24.21.0 / webDist ok
+日志：artifacts/test-logs/release-12b-fix-{lib-test,verify,full-test,typecheck,build}.txt。

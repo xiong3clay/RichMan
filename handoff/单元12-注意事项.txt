@@ -75,3 +75,78 @@
   token/恢复码/备份/日志；release/ 与 artifacts/node-cache/ 不进 git。
 - 四份 handoff 单元12 记录 12A 边界与 12B 清单；12B 完成后再补最终包
   大小、zip SHA256、解压实测与禁止项扫描结果。
+
+================================================================
+12B 注意事项（2026-11-09）
+================================================================
+一、Windows 路径含空格的坑（已修，必须保留）
+- Start-Process -ArgumentList 不会自动给数组里的含空格路径加引号；发布包在
+  “richman 12b 中文 空格”目录曾启动失败，报 Cannot find module '...\richman'。
+- 修复：start-lan 发布模式把 serverEntry 包成 `"<abs path>"` 再传给 Start-Process；
+  开发模式参数不变。以后新增任何 Start-Process 传文件路径，都要显式加引号。
+- 用 Start-Process -Wait 跑 start-lan 会等待整棵进程树→挂起；用 -PassThru + WaitForExit。
+  包内手工演练用单字符串 ArgumentList 调 powershell，避免数组拆路径。
+
+二、PowerShell 5.1 原生参数引号
+- 把多行 JS 用 `node -e $code` 传时，PS5.1 会剥掉内嵌双引号，导致
+  `require.resolve(moduleName + /package.json)` 语法错。
+- 修复：build-release 把 licenses 解析代码写到临时 .mjs 文件再 `node <file>`；
+  不要在 PowerShell 里拼复杂 JS 作为 -e 参数。
+- fetch 的 ZipArchiveEntry 没有 ExtractToFile 方法，仍用 Open()+CopyTo。
+
+三、哈希与排序口径
+- SHA256SUMS 必须是“64 位大写 hash + 两个空格 + 相对路径”，路径用 /。
+- 排序必须是 UTF-16 序：构建用 .NET Ordinal，release-lib 用 JS 默认 sort()；
+  不要一边 Ordinal 一边 localeCompare，否则合法包会被 verify 判“未排序”。
+- SHA256SUMS 只覆盖目录内文件，不覆盖自身；zip 自身 hash 单独写
+  release/SHA256SUMS.txt（一行 zip 名+hash）。
+- builtAtUtc 每次构建不同 → zip hash 每次不同是预期；文件集合与 server.mjs 应稳定。
+  发布时以最后一次构建的 zip hash 为准，并同步 release/SHA256SUMS.txt。
+
+四、构建脚本行为
+- stdout 必须只有最后那一行 JSON；所有进度/子命令输出走 stderr（Log 用 Console.Error）。
+  Run-Native 会捕获并转 stderr；不要在构建脚本里随手 Write-Output。
+- 只清 release/<name>/ 与 release/<name>.zip，不能递归清 release 根。
+- 复制 scripts 时只复制包内 8 个 ps1，不要把 fetch/bundle/verify/test 脚本带进包。
+- 包内 .bat 必须 ASCII 文件名、CRLF、chcp 65001、cd /d "%~dp0"、pause。
+- build-release 的 verify 必须真实启动 server.mjs；不能为了快只查文件。
+- verify 的 secret_scan 只匹配 JSON 风格 token/recoveryCode 键值；文档里出现“token”
+  单词不算，但不能因此把真实凭据写进包。
+- 12B 已把 start-lan 发布路径引号修复纳入包；若回退该行，含空格目录再次启动失败。
+
+五、最终产物与范围
+- 当前 zip：release/RichMan-v0.9.0-win-x64.zip，44976792 字节，
+  SHA256 EE86127FA7EF6CC77B959D11CFD49BFBAB8746EA4C86BA734A80484728D79B82。
+- release/ 与 artifacts/node-cache/ 已在 .gitignore；不要提交 zip/缓存/解压目录。
+- 版本仍 0.9.0；09D 真机矩阵通过前不得改 1.0.0。
+- node.exe 未签名，杀软误报是已知风险；不绕过校验/不换非官方包。
+- 12B 只改发布工具+README/package.json/vitest/start-lan 引号；引擎/协议/前端未动。
+
+六、复核后修复补充（2026-11-09）
+- build-info.gitDirty=true 来自当前未提交工作区（build-release.ps1 按 git status 计算）。
+  0.9.0 内部构建可接受；最终发布/09D 之前必须从 clean commit 重建，要求
+  build-info.gitDirty=false 且 gitCommit 指向该 clean commit，否则不当作发布物。
+- release:build 首次可能因上一轮 verify/包内进程短暂占用 node/node.exe 而失败
+  （文件“正由另一进程使用”），重试即可；这是文件锁竞争，不是逻辑失败。
+  构建前先确认包内服务已 stop、没有残留 node.exe 再跑。
+- verify 的 zip 完整性现在由 validateStaging(解压目录) + comparePackageDirs(staging, zip)
+  双重保证：缺 backup-cli/index.html/脚本、多文件、大小或 hash 不同都会红。
+  不要回退成“只核顶层/VERSION/server.mjs 三项”。
+- secret_scan 覆盖全部非二进制/≤2MB 文件（含无扩展名 LICENSE 与 licenses/**/LICENSE），
+  正则含 sessionToken/recoveryCode/token 的 JSON 与 key=value/plain；
+  并同时扫描 staging 与 zip 解压目录。不要恢复扩展名白名单。
+- 既有产物 hash/size 不变：EE86127F…D79B82 / 44976792 字节 / 47 文件 / 105846765 字节；
+  本轮未重新构建 zip，只改验收脚本与测试。
+
+七、发布前验收顺序（本机执行，必须照做）
+1) 全量回归：corepack pnpm -s test（期望 74 文件 / 916 条）+ typecheck + build。
+2) 反向探针三条（临时目录操作，不碰真实产物）：
+   M1 复制 staging → 删 app/server/backup-cli.mjs → 重压 zip → verify --zip 该 zip 必须 exit 1；
+   M2 复制 staging → LICENSE 追加 {"sessionToken":"…"} → 只更新副本 SUMS 的 LICENSE 行 → 必须 exit 1；
+   M3 重压 zip 时多加一个文件并改 index.html 一个字节 → 必须 exit 1。
+   注意：PowerShell 5.1 的 Set-Content 会把中文 SHA256SUMS 写成问号，重写 SUMS 必须用 [IO.File]::WriteAllText(路径, 文本, New-Object System.Text.UTF8Encoding($false))。
+3) 正向：node scripts/verify-release.mjs（原 staging + 原 zip）必须 exit 0、12 项 PASS。
+4) 提交后干净重建：git commit（工作区 clean）→ corepack pnpm -s release:build → 确认 build-info.json 的 gitDirty=false 且 gitCommit 指向该提交。
+5) 解压到含中文与空格的目录，跑 start-lan → /health → 建房 → 备份 → stop → restore -All → 再 start-lan，最后核对解压文件逐个 SHA256 与 SHA256SUMS 一致。
+6) 只有 1)–5) 全过，才允许把 hash/size 回写四份 12B 交接与 项目当前状态，并进入 09D 真机矩阵；09D 通过前版本号保持 0.9.0。
+
