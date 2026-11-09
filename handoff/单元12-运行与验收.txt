@@ -446,3 +446,22 @@ corepack pnpm -s release:verify → exit 0、12 项全 PASS：
 七、产物未变
   release/RichMan-v0.9.0-win-x64/：47 文件 / 105846765 字节
   zip：44976792 字节，SHA256 EE86127FA7EF6CC77B959D11CFD49BFBAB8746EA4C86BA734A80484728D79B82
+
+十、提交后干净重建（2026-11-09 19:55，最终发布物）
+  HEAD f53a903（feat e1b47f9 + docs f53a903），git status 为空 → corepack pnpm -s release:build
+  exit 0，24.4s，143 modules；staging 47 文件 / 105846766 字节；zip 44976792 字节，SHA256
+  FC99E163221BFEE42C38E75EA96AB5572AA35A1AD0CEBDC7A62C0CF5AADEFFE2；build-info.json：version 0.9.0 / protocolVersion 1 / node v24.21.0 /
+  builtAtUtc 2026-11-09T11:55:01.4605149Z / gitCommit f53a90305bc3d97eb6279f9c9d65fb4b18722fce / gitDirty false。
+  构建内置 verify 12 项 PASS。此前各节的 EE86127F…D79B82 / 105846765 字节属提交前 dirty 构建，
+  与最终产物只差 build-info 的 builtAtUtc 与 gitDirty 两个字段。
+  最终 zip 重新解压到含中文与空格的目录（%TEMP%\richman-12b-final\中文 空格）：顶层
+  RichMan-v0.9.0-win-x64、47 文件，使用说明/故障排查/第三方素材许可 三个中文文件名完好；
+  46 个登记文件逐个 SHA256 与包内 SHA256SUMS.txt 比对 bad=0、missing=0（其余为试跑生成的
+  data/logs、data/backups 运行时文件）。
+  实测链路：start-lan -Port 57446 exit 0 → /health ok/0.9.0/协议 1 → POST /api/rooms 201（房间 3213）
+  → GET / 200 → backup.ps1 -Json exit 0（rooms=1，备份 20261109-195813）→ stop.ps1 exit 0
+  → 删除 data/rooms/3213 → restore.ps1 -Backup … -All -Json exit 0（restored 3213、pausedHint true）
+  → start-lan -Port 57448 exit 0 → /api/rooms 显示 3213 paused=true → stop.ps1 exit 0，端口释放。
+  环境坑（非发布包缺陷）：用空环境变量启动 powershell.exe（缺 windir/ComSpec/PATHEXT）时，
+  start-lan 的 node 版本探测会得到空串并误报 NODE_MISSING_OR_OLD；补全系统环境变量后
+  -CheckOnly 返回 ok=true、node v24.21.0。

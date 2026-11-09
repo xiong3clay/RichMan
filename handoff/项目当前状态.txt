@@ -15,18 +15,18 @@
 【单元12A/12B最新验证】
 - 12A 已提交 9045ea8：http.ts RICHMAN_STATIC_DIR、bundle-server.mjs、fetch-portable-node.ps1、
   Get-RichManLayout、发布模式脚本分支；73 文件/896 条。
-- 12B 工作区未提交：新增 build-release.ps1、verify-release.mjs、release-lib.mjs/test（27 条），
-  vitest include scripts/**/*.test.mjs，package.json release:build/verify，README 发布节；
-  start-lan 发布模式补 server.mjs 路径引号（含空格/中文目录修复）。
-- 全量 74 文件/923 条（116.77s），typecheck/build 0。
-- 产物 release/RichMan-v0.9.0-win-x64/：47 文件/105846765 字节；
-  zip 44976792 字节，SHA256 EE86127FA7EF6CC77B959D11CFD49BFBAB8746EA4C86BA734A80484728D79B82；
+- 12B 已提交 e1b47f9（实现：build-release.ps1、verify-release.mjs、release-lib.mjs/test 27 条、
+  package.json release:build/verify、vitest include、README 发布节、start-lan 引号修复）+
+  f53a903（四份 12 交接与两份复核报告）；全量 74 文件/923 条，typecheck/build 0。
+- 产物 release/RichMan-v0.9.0-win-x64/：47 文件/105846766 字节（提交后干净重建，
+  build-info gitDirty=false、gitCommit f53a90305bc3d97eb6279f9c9d65fb4b18722fce）；
+  zip 44976792 字节，SHA256 FC99E163221BFEE42C38E75EA96AB5572AA35A1AD0CEBDC7A62C0CF5AADEFFE2；
   release/SHA256SUMS.txt 一行 zip 名+hash。
 - verify-release 12/12 PASS：目录/版本/secret/.bat CRLF/zip hash/解压/server 运行/
   GET 200+mp3 200+POST 201/端口释放/backup BACKUP_EMPTY/cleanup dry-run/包内 CheckOnly。
 - 含空格+中文临时目录实测：start 0、health 200、建房 201、stop 0、backup rooms=1、
   restore exit 0、restart health 200 rooms=1、stop 0、端口释放。
-- 未 commit；09D 真机矩阵仍是 1.0.0 前唯一未完成门槛。
+- 12B 已在干净工作区重建发布物（gitDirty=false）；09D 真机矩阵仍是 1.0.0 前唯一未完成门槛。
 
 【版本】
 方案版本：V1.3.3（V1.3.2 + 引导式界面 + 连接实测）

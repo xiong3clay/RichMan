@@ -112,9 +112,11 @@ RichMan-v0.9.0-win-x64/
   否则含空格/中文目录会被 Start-Process ArgumentList 拆开。
 
 二、最终产物（基线 3053b05）
-- 目录 release/RichMan-v0.9.0-win-x64/：47 文件 / 105846765 字节
+- 目录 release/RichMan-v0.9.0-win-x64/：47 文件 / 105846766 字节（提交后干净重建）
 - zip release/RichMan-v0.9.0-win-x64.zip：44976792 字节
-- zip SHA256 EE86127FA7EF6CC77B959D11CFD49BFBAB8746EA4C86BA734A80484728D79B82
+- zip SHA256 FC99E163221BFEE42C38E75EA96AB5572AA35A1AD0CEBDC7A62C0CF5AADEFFE2
+  （build-info：gitCommit f53a90305bc3d97eb6279f9c9d65fb4b18722fce、gitDirty=false、
+   builtAtUtc 2026-11-09T11:55:01Z；提交前 dirty 构建为 EE86127F…D79B82）
 - verify 12/12 PASS；含空格/中文目录解压实测通过（start/health/建房/backup/restore/restart）。
 - 全量 74 文件/923 条，typecheck/build 0。
 

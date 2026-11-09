@@ -142,9 +142,11 @@ git diff --check：EXIT 0
   server.mjs 路径加引号，显式包一层引号；开发模式不变。
 
 真实产物：
-- release/RichMan-v0.9.0-win-x64/：47 文件，105846765 字节
+- release/RichMan-v0.9.0-win-x64/：47 文件，105846766 字节（提交后干净重建）
 - release/RichMan-v0.9.0-win-x64.zip：44976792 字节（约 42.9MB）
-- zip SHA256：EE86127FA7EF6CC77B959D11CFD49BFBAB8746EA4C86BA734A80484728D79B82
+- zip SHA256：FC99E163221BFEE42C38E75EA96AB5572AA35A1AD0CEBDC7A62C0CF5AADEFFE2
+  （提交前的 dirty 构建为 EE86127F…D79B82 / 105846765 字节，仅 build-info 的 builtAtUtc 与 gitDirty 不同；
+   最终产物在 f53a903 干净工作区重建，build-info.gitDirty=false、gitCommit=f53a903…）
 - release/SHA256SUMS.txt：一行 zip 名 + 大写 hash
 - verify：12 项检查全 PASS（staging/版本/secret/.bat/zip hash/解压/运行/端口/备份 CLI/包内 CheckOnly）
 - 测试：74 文件 / 923 条全通过（旧 896 未少，新增 release-lib 27 条），116.77s

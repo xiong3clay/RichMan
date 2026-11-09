@@ -118,15 +118,18 @@
 - 12B 已把 start-lan 发布路径引号修复纳入包；若回退该行，含空格目录再次启动失败。
 
 五、最终产物与范围
-- 当前 zip：release/RichMan-v0.9.0-win-x64.zip，44976792 字节，
-  SHA256 EE86127FA7EF6CC77B959D11CFD49BFBAB8746EA4C86BA734A80484728D79B82。
+- 当前 zip（提交后干净重建）：release/RichMan-v0.9.0-win-x64.zip，44976792 字节，
+  SHA256 FC99E163221BFEE42C38E75EA96AB5572AA35A1AD0CEBDC7A62C0CF5AADEFFE2；目录 47 文件 / 105846766 字节；build-info.gitDirty=false、
+  gitCommit f53a90305bc3d97eb6279f9c9d65fb4b18722fce（builtAtUtc 2026-11-09T11:55:01Z）；
+  提交前 dirty 构建的 EE86127F…D79B82 / 105846765 字节只作历史记录。
 - release/ 与 artifacts/node-cache/ 已在 .gitignore；不要提交 zip/缓存/解压目录。
 - 版本仍 0.9.0；09D 真机矩阵通过前不得改 1.0.0。
 - node.exe 未签名，杀软误报是已知风险；不绕过校验/不换非官方包。
 - 12B 只改发布工具+README/package.json/vitest/start-lan 引号；引擎/协议/前端未动。
 
 六、复核后修复补充（2026-11-09）
-- build-info.gitDirty=true 来自当前未提交工作区（build-release.ps1 按 git status 计算）。
+- 构建时若工作区不干净，build-info.gitDirty=true（build-release.ps1 按 git status 计算）；
+  本次最终产物已在干净工作区重建，gitDirty=false。
   0.9.0 内部构建可接受；最终发布/09D 之前必须从 clean commit 重建，要求
   build-info.gitDirty=false 且 gitCommit 指向该 clean commit，否则不当作发布物。
 - release:build 首次可能因上一轮 verify/包内进程短暂占用 node/node.exe 而失败
