@@ -1,0 +1,100 @@
+RichMan 1.0.1 三处小修与固定地址入口（2026-11-09）
+===
+
+一、背景
+1.0.0 发布后用户在真机使用中发现三点：
+A. 大厅刚打开、还没连接时，footer 就显示“连接断开，自动重连中”，像故障。
+B. start-tunnel 生成的 trycloudflare 域名在校园网常被 DNS 缓存否定，脚本却立刻打开浏览器，
+   看到的是 NXDOMAIN 错误页；用户以为隧道失败。
+C. 发布包只有临时隧道（每次重启换域名），用户需要固定地址；此前 start-fixed.ps1 只在
+   Lead 本机草稿里，没有进源码也没有进包。
+本版只修这三点，不改规则、协议、存档格式。
+
+二、改动
+A. 大厅断线文案
+- apps/web/src/App.tsx：footer 改为条件渲染
+  {status !== "closed" || roomCode !== null ? (<footer …>) : null}
+  大厅首次打开（status 初始为 closed、无房间）不再显示状态条；进入房间或正在连接/重连时照旧。
+- 新增 apps/web/tests/app-footer.test.ts：挂载 App 后断言页面含“RichMan 联机大厅”，
+  且不含“连接断开”“自动重连中”“连接中”。修复前会红。
+
+B. start-tunnel DNS 预检
+- scripts/start-tunnel.ps1 新增 Wait-TunnelDns($Url,$TimeoutSec=30)：
+  取 ([Uri]$Url).Host，用 [System.Net.Dns]::GetHostAddresses 每 2 秒探测一次，最长 30 秒。
+- Show-TunnelBanner 仅当 -not $NoBrowser 且解析成功时才 Start-Process 打开浏览器。
+- 解析失败打印 WARN 与建议（地址已复制、等 1～3 分钟刷新、换热点、DNS 改 1.1.1.1/223.5.5.5），
+  不打开浏览器，也不改变退出码（隧道本身成功）。
+- T31/T32 都传 -NoBrowser，因此不会额外等待，旧测试耗时不增加。
+
+C. start-fixed 固定地址
+- 新增 scripts/start-fixed.ps1（UTF-8 BOM，PS5.1 可解析）：
+  参数 -Port（默认 8000）、-DataDir、-Tailscale、-NoBrowser、-CheckOnly。
+  * Get-TailscalePath：显式 -Tailscale → 环境变量 RICHMAN_TAILSCALE →
+    $env:ProgramFiles\Tailscale\tailscale.exe → LOCALAPPDATA → PATH。
+  * Get-FunnelUrl：tailscale status --json 读 Self.DNSName，返回 https://<dns>。
+  * -CheckOnly：只做 5 秒 health 探测与 Tailscale 探测，输出单行 JSON
+    {ok,reason,port,dataDir,localServer,tailscale,funnel}；reason 优先级
+    TAILSCALE_NOT_FOUND > LOCAL_SERVER_DOWN；ok=true 才 exit 0。
+  * 真实路径：先探测本地服务；没起则调用 start-lan.ps1 起服并最多等 30 秒；
+    找不到 Tailscale 时给出安装链接与 RICHMAN_TAILSCALE 用法；
+    执行 tailscale funnel --bg <端口>（幂等）；失败提示 Funnel 启用页
+    https://login.tailscale.com/f/funnel；成功复制地址并打印，DNS 轮询 15 秒后开浏览器。
+- scripts/build-release.ps1：打包 start-fixed.ps1，生成 start-fixed.bat；
+  使用说明新增“三、固定公网地址（可选，需安装并登录 Tailscale）”，其后章节顺延；
+  故障排查新增 Funnel/502 条目。
+- scripts/release-lib.mjs：REQUIRED 增加 scripts/start-fixed.ps1、scripts/start-fixed.bat。
+- scripts/verify-release.mjs：.bat 名单增加 start-fixed.bat（共 8 个）。
+
+三、文件清单
+改动：apps/web/src/App.tsx、scripts/start-tunnel.ps1、scripts/build-release.ps1、
+      scripts/release-lib.mjs、scripts/verify-release.mjs、apps/server/tests/scripts.test.ts、
+      README.md、CHANGELOG.md、五个 package.json、apps/server/src/http.ts。
+新增：scripts/start-fixed.ps1、apps/web/tests/app-footer.test.ts、本文件。
+
+四、测试
+- 新增 7 条：app-footer 1 条；scripts T33（缺 Tailscale → exit 1 + TAILSCALE_NOT_FOUND）、
+  T34（假 tailscale + 真 health → ok=true）、T35（BOM 与入口/参数存在）、
+  T36（release-lib/verify-release 固定清单含 start-fixed 两项与 8 个 .bat）；
+  release-lib T24（缺 start-fixed.ps1 或 start-fixed.bat 时 validateStaging 必须红）、
+  T25（REQUIRED 固定包含两项）。
+- 全量：75 文件 / 932 条通过；typecheck 0；build 0。
+
+四之二、Qoder 复核与 M3 修复
+- Qoder 只读复核 handoff/复核-1.0.1.txt 结论「需修复」，唯一 must-fix：
+  M3 —— 从 scripts/release-lib.mjs 的 REQUIRED 删掉 "start-fixed.bat" 后，
+  release-lib 测试仍 27/27 全绿，发布包必需清单失去保护。
+- 核实成立：makeFixture 按 REQUIRED 动态生成文件，valid fixture 只断言文件数，
+  没有任何测试锁住清单内容或单项缺失。
+- 修复：release-lib.test.mjs 增 T24/T25；apps/server/tests/scripts.test.ts 增 T36。
+- 修复后自验变异：删掉 REQUIRED 的 "start-fixed.bat" → release-lib 2 条红
+  （T24/T25），恢复后 release-lib.mjs sha256 仍为
+  6c7840dc80daf2396c8179387eb37f77de43b391158cd2e454c799c1133bc9c8，与变异前一致。
+- Qoder 的 S1（footer 只测首次）、S2（DNS 门无直接断言）、S3（尾点/幂等无单测）
+  判 should-fix，本补丁接受为已知测试缺口，不阻塞 1.0.1；S4（dirty 构建）由提交后
+  干净重建解决。
+- 真实探针：本机 -CheckOnly 输出 tailscale.path=C:\Program Files\Tailscale\tailscale.exe、
+  funnel.url=https://laptop-g5ftl95e.tailbb114d.ts.net；当时 8000 未起，reason=LOCAL_SERVER_DOWN，
+  与预期一致（探针环境未带 ProgramFiles 时会误报 TAILSCALE_NOT_FOUND，属调用环境缺变量）。
+
+五、兼容性与回滚
+- 协议版本仍为 1，快照/存档 schema 未变；1.0.0 的房间目录可直接被 1.0.1 读取。
+- 回滚只需还原上述文件；start-fixed 是新增入口，不调用则完全不影响旧流程。
+- 固定地址依赖 Tailscale 账号与本机常开；关闭 Tailscale 或服务停止会 502/无法访问，
+  这是预期，不是本版 bug。
+
+六、发布步骤（Lead）
+1) 全量测试 + typecheck + build 通过后提交实现与文档。
+2) corepack pnpm -s release:build 干净重建 1.0.1 包（gitDirty 必须为 false）。
+3) deploy-release 到桌面，start-fixed.bat 验证固定地址。
+4) gh release create v1.0.1 上传 zip，填写 SHA256 与变更说明。
+
+七、已知边界
+- Tailscale Funnel 需要账号侧启用；脚本只能提示，不能代用户登录/授权。
+- 大厅 footer 只在“已进入房间”或“连接中/重连中”显示；若未来希望大厅也展示在线人数，
+  应另做独立状态位，不能复用 closed。
+- DNS 预检只代表本机解析成功，不代表手机侧解析成功；手机仍可能受运营商 DNS 缓存影响。
+- 已知测试缺口（Qoder S1–S3，不阻塞）：footer 未覆盖“进房后断开/重连”；
+  DNS 解析失败“不开浏览器”只有代码路径、无直接夹具；start-fixed 的 DNSName 尾点与
+  funnel --bg 幂等无单测。后续单元再补。
+- Wait-TunnelDns 的 30 秒是循环目标，单次同步 GetHostAddresses 的底层 resolver 超时
+  可能略超；不宣称“严格 30 秒上界”。

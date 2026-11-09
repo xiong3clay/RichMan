@@ -1,4 +1,4 @@
-﻿RichMan 项目当前状态
+RichMan 项目当前状态
 更新日期：2026-11-09
 更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复；07A/07B/07C 由 Trae 实现，Qoder 三轮复核，Lead 验收；08A/08B/08C 由 Trae 实现并完成复核修复；09A 已提交 eeec8ca，第四轮测试补强已提交 bb7c2f2（交接 1ebdbe0，Qoder 复核 PASS）；09B 已提交 6491fe9（文档 39dc1b9），Qoder 复核 FAIL(M1/M2)；第五/六轮修复 bcb9aae、文档 71e099a，Qoder 第六轮验证 code PASS、文档硬伤已改并提交 59c00f0；09C-B 规格已写（handoff/单元09C-B-备份恢复清理脚本.txt，含 Qoder S1–S6 补强）；09C-A 由 Trae 实现、Lead 验收并提交 2bd84cd，Qoder 复核判可提交（66 文件/813 条）；09C-B 已提交 70b18a0（Qoder 两轮复核：M1/M2 修复后 code PASS，文档 M-DOC 已改）；09C-C 已提交 7c8fd7d，Qoder 复核可提交（无 must-fix，S1 文档计数已改）；09C-D 已提交 839c3c6（0.9.0 LICENSE/CHANGELOG/README，typecheck/build 0）；09D 起服时发现 /health 仍硬编码 0.0.0，已改为 0.9.0 并加测试（66 文件/835 条，已提交 d07e13d）；单元 10A D6 多请求引擎已实现并提交 a8016c2，Qoder 只读复核可提交（无 must-fix，S1–S5 已处置），69 文件/866 条；10B 多请求界面与请求截止已提交 1ffe107，Qoder 复核可提交（无 must-fix，S1/S2 已按 Lead 裁决补强），71 文件/881 条；单元11由Codex完成11A/11B自动化，新增12条；Qoder只读复核「可提交、无must-fix」，Lead按S1–S4补强T3/I12/destroyed/T9/T10后全量73文件/893条（168.69s）、typecheck/build 0；两处破产一致性修复；已提交 7d079d1（feat）+696d7a6（docs），工作区干净）
 
@@ -49,11 +49,11 @@
 方案版本：V1.3.3（V1.3.2 + 引导式界面 + 连接实测）
 规则版本：V1.3.2（本轮未改规则）
 协议版本：1（05D/05E/05F/06 均未改协议版本号，只新增 resume_game 与 paused 字段）
-游戏版本：正式版 1.0.0（2026-11-09 发布；Windows 便携包 release/RichMan-v1.0.0-win-x64.zip）
+游戏版本：正式版 1.0.1（2026-11-09 发布；Windows 便携包 release/RichMan-v1.0.1-win-x64.zip；规则/协议仍为 1.0.0 的 1）
 
 【进度与范围】
 已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（已提交 eeec8ca，第四轮补强 bb7c2f2，交接 1ebdbe0）、09B（首版 6491fe9/39dc1b9；第五、六轮复核修复已提交 bcb9aae，文档 71e099a）、09C-A（实现 2bd84cd，规格 c522bb4，Qoder 复核可提交）、09C-B（实现 70b18a0，Qoder 复核 M1/M2 修复后 code PASS）、09C-C（实现 7c8fd7d，Qoder 复核可提交）、09C-D（发布文档 0.9.0，839c3c6；/health 版本号修复 d07e13d）、10A（D6 多请求引擎/阶段末等待，实现 a8016c2，Qoder 复核可提交）、10B（多请求引导卡/请求截止倒计时/过期守卫，实现 1ffe107，Qoder 复核可提交）、11（稳定性与故障演练，已提交 7d079d1/696d7a6，Qoder复核可提交，Lead补强后73文件/893条）、12A（发布包基础，实现已提交 9045ea8，Lead验收 73文件/896条）、12B（发布包收尾，已提交 e1b47f9/f53a903/76fd73f，74文件/923条）、12C（隧道一键化，已提交 db7574f/545c8ba，74文件/925条）。
-当前子任务：1.0.0 已发布（24ef9da；zip SHA256 3DA98941…1341；verify 12/12 PASS；桌面已解压 v1.0.0）。剩余：09D 真机发布矩阵由用户在真机执行、Lead 登记，不阻塞 1.0.0。
+当前子任务：1.0.1 小修（大厅 footer 误报断线、start-tunnel DNS 预检、start-fixed 固定地址入包）已实现并通过 75 文件/932 条、typecheck/build 0；Qoder 复核提出 M3（发布清单删项无门禁），已补 T24/T25/T36 并自验变异变红，待 Qoder 复验 M3 后提交并重建发布包。09D 真机发布矩阵仍由用户在真机执行、Lead 登记。
 09C-B 完成（70b18a0）：backup.ps1/restore.ps1/cleanup.ps1 + README 备份节 + 09C-A S1/S2 补强；
 Qoder 首轮 M1（父路径 junction 写穿）/M2（显式已存在空 Out）已修复，复验 code PASS，M-DOC（pwsh7 未复现声明）由 Lead 改文档。
 09C 拆分：A 核心库与 CLI（已提交 2bd84cd）→ B PowerShell 包装与备份节（已提交 70b18a0）→
@@ -448,3 +448,23 @@ https://diego-rotary-inclusive-hughes.trycloudflare.com（2026-11-06 21:5x 重�
   包内 backup create 1 房、cleanup --dry-run failed=[]；包内 -Build exit 1（预期文案）；移走 node/ 后 CheckOnly exit 1/NODE_MISSING_OR_OLD。
 - 已知边界：start-lan 在管道捕获下仍会因句柄继承阻塞（09B E3，非产品回归）；便携 node 未签名；cloudflared 不捆绑。
 - 12B 待办：build-release.ps1、verify-release.mjs、release-lib.mjs+测试、7 个 .bat、使用说明/故障排查/第三方许可/licenses/SHA256SUMS、zip 与解压实测。
+
+【1.0.1 三处小修（2026-11-09）】
+- 用户 m07469：“应该不难吧？改完让Qorder复查一下就行了” → 三处补丁：A 大厅 footer 误报断线；B start-tunnel 打开浏览器前等 DNS；
+  C start-fixed.ps1/bat 固定地址入源码与发布包。规则、协议、快照 schema 未改。
+- A：apps/web/src/App.tsx footer 改为 {status !== "closed" || roomCode !== null ? … : null}；新增 apps/web/tests/app-footer.test.ts。
+- B：scripts/start-tunnel.ps1 新增 Wait-TunnelDns（Dns.GetHostAddresses，每 2 秒、最长 30 秒）；-NoBrowser 不等待；
+  解析失败打印 WARN + 等待/热点/DNS 建议，不打开浏览器；T31/T32 不受影响。
+- C：新增 scripts/start-fixed.ps1（-Port/-DataDir/-Tailscale/-NoBrowser/-CheckOnly；tailscale status --json 取 DNSName，
+  tailscale funnel --bg；-CheckOnly 输出 ok/reason/localServer/tailscale/funnel）；build-release.ps1 打包并生成 start-fixed.bat；
+  release-lib REQUIRED +2；verify-release .bat 名单改为 8 个；使用说明/故障排查同步。
+- 测试：首轮新增 4 条（app-footer 1、scripts T33/T34/T35），全量 75 文件/929 条（141.07s）；Qoder 复核后补 T24/T25/T36 共 7 条，全量 75 文件/932 条（205.78s）、typecheck 0、build 0
+  （index--JyM_5JG.css 18.07kB、index-0URYyLZn.js 427.58kB）。
+- 过程中发现并修复：tools.edit 写 start-tunnel.ps1/build-release.ps1 时丢失 UTF-8 BOM，PS5.1 按 ANSI 读中文导致语法错误，
+  T1/T7/T31/T32 红；两文件补 BOM 后定向 4 条全绿，再跑全量 929 全绿。
+- 真实 CheckOnly（带 ProgramFiles）：tailscale.path=C:\Program Files\Tailscale\tailscale.exe、
+  funnel.url=https://laptop-g5ftl95e.tailbb114d.ts.net；当时 8000 未起，reason=LOCAL_SERVER_DOWN。
+- Qoder 复核 handoff/复核-1.0.1.txt 结论「需修复」，唯一 must-fix M3：删 REQUIRED 的 start-fixed.bat 后 release-lib 仍全绿。
+  已补 release-lib T24/T25 与 scripts T36；变异删除 REQUIRED 项 → 2 条红，release-lib.mjs 还原 sha256 6c7840dc…与变异前一致。
+- 交接：handoff/单元1.0.1-三处小修与固定地址.txt。下一步：Qoder 复验 M3 → 提交 feat/docs → release:build 干净重建 →
+  桌面部署 + start-fixed 实测 → GitHub v1.0.1。

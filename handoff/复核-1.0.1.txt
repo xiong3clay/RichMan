@@ -1,0 +1,197 @@
+RichMan 1.0.1 三处小修独立复核
+================================================
+复核员：Qoder（只读复核；未改源码/测试/协议/交接，未 commit）
+日期：2026-11-09
+工作区：D:\Lianjunjie\biancheng\RichMan
+HEAD：b34a9a1
+唯一新增文件：handoff/复核-1.0.1.txt
+
+一、结论
+需修复。
+三块功能本身基本正确：大厅 footer 首次不再误报断线；start-tunnel 的 DNS 等待只在打开浏览器分支；
+start-fixed 的 CheckOnly/reason/DataDir/路径查找/funnel URL 实际可用；版本、发布包、BOM、
+release:verify 都通过。
+但有一项必须修复的测试门禁缺口：
+  **M3：从 scripts/release-lib.mjs 的 REQUIRED 删除 "start-fixed.bat" 后，
+  release-lib.test.mjs 仍 27/27 全绿。**
+这正是用户要求 M3 必须变红的场景；当前没有任何测试断言 REQUIRED 包含
+scripts/start-fixed.ps1 / start-fixed.bat，valid fixture 又按 REQUIRED 动态生成文件，
+所以删掉条目不会被发现。发布包缺少 start-fixed.bat 时 release-lib/verify 的 REQUIRED 约束
+会静默消失，必须在提交前补测试（或等价固定清单断言）。
+其余 App footer 覆盖不足、DNS 预检缺直接断言、start-fixed 的 funnel 幂等/尾点无测试列 should-fix。
+
+二、must-fix 列表
+
+M3 REQUIRED 删除 start-fixed.bat 不被任何测试发现
+   文件:行号：
+   - scripts/release-lib.mjs:23（"start-fixed.bat" 条目；同文件 :15 的 start-fixed.ps1 同理）
+   - scripts/release-lib.test.mjs:42-63（makeFixture 按 REQUIRED 动态生成；删条目后 fixture 自动少它）
+   - scripts/release-lib.test.mjs:160-168（valid fixture 只断言 result.files === REQUIRED.length）
+   问题：
+   REQUIRED 是 release-lib/verify 的必需文件清单；删除某个条目后 makeFixture 也跟着少生成，
+   valid fixture 仍通过，现有 27 条测试没有固定断言清单内容。T35 只检查 start-fixed.ps1
+   文本含 start-fixed.bat 字符串，不检查 REQUIRED 数组。
+   复现命令（临时改，跑完立即还原；不改测试本身）：
+   1) 从 scripts/release-lib.mjs:23 删除 `"start-fixed.bat",`；
+   2) corepack pnpm -s vitest run scripts/release-lib.test.mjs。
+   期望：至少 1 条失败，指出 REQUIRED 缺 start-fixed.bat（或 zip/fixture 必需文件缺失）。
+   实际：Test Files 1 passed(1)；Tests 27 passed(27)，exit0。
+   建议改法（不改本轮生产行为，只补门禁）：
+   - 在 release-lib.test.mjs 加固定断言：
+     `expect(REQUIRED).toEqual(expect.arrayContaining(["scripts/start-fixed.ps1", "start-fixed.bat"]))`；
+   - 或加一个固定 missing 用例：临时从 fixture 删除 start-fixed.bat 并断言 validateStaging
+     报“缺少必需文件：start-fixed.bat”；
+   - 同时锁住 verify-release.mjs 的 8 个 .bat 名单，防止只删 REQUIRED 不删 verify 名单造成假绿。
+   当前代码的 REQUIRED 实际包含两项；缺的是测试，不是当前清单。
+
+三、should-fix / nit 列表
+S1 app-footer 测试只覆盖首次打开，没有覆盖进房后断开/重连；条件也并非严格“仅首次”
+   文件:行号：apps/web/src/App.tsx:400-401；apps/web/tests/app-footer.test.ts:10-20。
+   行为：
+   - 首次 status=closed、roomCode=null → footer 隐藏（T1 覆盖）。
+   - 进入房间后 roomCode!==null，即使 status=closed（断开）或 connecting（重连）→ footer 显示；
+     代码满足“进房后断开/重连仍显示”。
+   - 但 `status==="closed" && roomCode===null` 也会隐藏，包括加入失败回到入口、backToLobby
+     主动回大厅；这些不是“首次打开、从未连接”。是否可接受取决于产品口径；如要严格“仅首次”，
+     应引入 everConnected 标记或把 footer 可见性抽成纯函数。
+   测试缺口：没有用可控 client/状态构造“进房后 closed/connecting”的 DOM 用例；
+   现有 T1 只能证明初始隐藏。建议加：
+   - 抽出 pure `shouldShowFooter(status, roomCode, everConnected)` 并单测四个分支；或
+   - 复用 07C 的真实 client/DOM 夹具，断言进房后 onStatus("closed") 和 onStatus("connecting")
+     仍显示 footer，backToLobby 后按产品决策隐藏/显示。
+   不判 must-fix：roomCode 非空路径的代码正确，当前用户可见的“大厅初始误报”已修。
+
+S2 DNS 预检没有直接断言“解析失败不开浏览器”；30 秒不是严格上界
+   文件:行号：scripts/start-tunnel.ps1:43-60（Wait-TunnelDns 同步 GetHostAddresses 循环）、
+          :78-93（Show-TunnelBanner 的 if -not NoBrowser → Wait → Start-Process/else WARN）。
+   行为：
+   - Wait-TunnelDns 只在 Show-TunnelBanner 的“非 -NoBrowser”分支被调用，只影响打开浏览器；
+     解析失败走 WARN，不 exit、不改隧道成功/退出码（后续 post-banner 健康检查仍可能 WARN，
+     最后 exit 0）。代码路径正确。
+   - `-NoBrowser` 完全跳过新 DNS 等待，但 **不会跳过原有 post-banner
+     `Wait-HttpHealth($url+'/health') 30` 健康检查**；如果产品把“完全不等待”定义为连这个
+     旧检查也不做，需要再明确/门控（这是既有行为，非本补丁新增）。
+   - Wait-TunnelDns 的 30 秒由 Get-Date 循环控制，但单次 `[Net.Dns]::GetHostAddresses`
+     是同步调用，底层 resolver 超时不被该 deadline 中断；最坏可超过 30 秒，不能严格宣称“只阻塞 30 秒”。
+   - T31/T32 都带 -NoBrowser，DNS 等待路径没有被自动化覆盖；没有直接断言“解析失败不调用
+     Start-Process/浏览器”。
+   判定：**should-fix，不是 must-fix**——产品行为代码正确且无已知真实用户故障，缺的是测试/边界明确。
+   最小补测方案（不改当前测试，供后续实现）：
+   - 将“等待 DNS + 是否打开浏览器”抽成可注入 resolver/launcher 的纯 helper
+     （如 `Get-TunnelBrowserDecision(url,noBrowser,dnsResolver)` 返回 skip/warn/open；
+      生产默认 resolver 为 `[Net.Dns]::GetHostAddresses`，launcher 为 Start-Process）；
+     测试注入 resolver=false，断言 decision=warn 且 launcher 调用次数 0；resolver=true 时 open=1。
+   - 或增加测试专用 `-DnsResolver`/`-BrowserOpener` 参数（默认生产实现），在 scripts.test 中
+     用 fake resolver + fake opener；不要用真实默认浏览器。
+   - 30 秒上界建议改为 async DNS + Wait/超时或 `Resolve-DnsName -QuickTimeout`，并用
+     不存在的域名/不可达 DNS 测一个上界；若保留同步 DNS，在交接写“30 秒是循环目标，
+     单次 DNS 调用可能更久”。
+
+S3 start-fixed 的 funnel --bg 幂等、DNSName 尾点、真实路径未单测
+   文件:行号：scripts/start-fixed.ps1:44-60（Get-FunnelUrl TrimEnd('.')）、:160-190（funnel --bg、
+          Show-FixedBanner）。
+   代码：Get-FunnelUrl 对 `status --json` 的 Self.DNSName 做 TrimEnd('.')；funnel --bg 是
+         tailscale 的幂等命令；我真实 CheckOnly 读到
+         `https://laptop-g5ftl95e.tailbb114d.ts.net`，路径 C:\Program Files\Tailscale\tailscale.exe。
+   缺口：没有自动化 mock `tailscale status --json` 的 DNSName 带尾点/大小写/空值；
+         `funnel --bg` 重复执行没有集成断言；真实 start-fixed（非 CheckOnly）未在本轮执行。
+   建议：给 Get-FunnelUrl 增加纯解析测试（输入 JSON 固定字符串），用 fake tailscale 脚本
+         （PowerShell/cmd）返回 DNSName 带点、空、非 JSON 三种；funnel 幂等用 fake exe
+         记录调用次数。非阻塞。
+
+S4 发布包 v1.0.1 是 dirty 构建，不能作为最终发布指纹
+   事实：release/RichMan-v1.0.1-win-x64 49 文件/105867563 字节，8 个 .bat，start-fixed
+         也在；release:verify 12 PASS；build-info.gitDirty=true（当前工作区未提交）。
+         zip SHA D6FDF84B…FF19A1 只是本次 dirty 产物，不能写进发布页/最终 CHANGELOG。
+   建议：按 1.0.1 交接的步骤，提交实现/文档后在 clean commit 上 release:build，
+         确认 gitDirty=false、重新记录 zip SHA；不要用当前 dirty hash 对外。
+   不判 must-fix：交接已说明 dirty 构建，且 verify 12 项真实通过。
+
+S5 release-lib.test 的 T35 只检查 start-fixed.ps1 文本，不检查 REQUIRED/8 个 .bat 清单
+   文件:行号：apps/server/tests/scripts.test.ts:901-923（T35）与 release-lib.test.mjs。
+   T35 断言 start-fixed.ps1 BOM/param/$CheckOnly/字符串 start-fixed.bat，但不锁
+   REQUIRED 数组和 verify names 列表；与 M3 同一覆盖缺口。补 M3 时一并加固定清单断言。
+
+S6 start-fixed 的 CheckOnly `localServer` 5 秒健康探测 + 真实 Tailscale status 未限时
+   文件:行号：scripts/start-fixed.ps1:154-185；检查项按规格是 5 秒 health；Get-FunnelUrl
+          调 tailscale status 没有 timeout；若 tailscale CLI 卡住，CheckOnly 可能超过 5 秒。
+   实际本机 CheckOnly 很快返回；列为 nit，建议 status 调用加超时或记录 timeout 边界。
+
+四、A/B/C 三块判定
+
+A. 大厅 footer：**PASS（行为），测试覆盖不足**
+   - App.tsx:400-401 条件 `status !== "closed" || roomCode !== null`：
+     初始 closed/null 隐藏；进房 roomCode 非空，closed/connecting 都显示；符合用户主诉。
+   - 但“仅首次打开、从未连接”并非严格成立：closed/null 的任何状态（加入失败回入口、
+     backToLobby）都会隐藏；如产品要求严格 only-first，需要 everConnected 标记。
+   - app-footer.test.ts 只测首次打开，未测进房后断开/重连；见 S1。
+   - M1（改回无条件渲染）→ T1 红，说明现有测试能保护初始隐藏，但不能保护进房分支。
+
+B. start-tunnel DNS 预检：**PASS（行为），直接测试/边界缺失**
+   - Wait-TunnelDns 只在 Show-TunnelBanner 的 `if (-not $NoBrowser)` 内调用；-NoBrowser 跳过
+     新 DNS 等待；解析失败只 WARN，不改隧道成功/退出码；代码符合规格。
+   - 缺点：30 秒不是严格上界（同步 GetHostAddresses 可超出）；-NoBrowser 仍执行既有
+     post-banner health 检查；没有“解析失败不打开浏览器”的直接测试。见 S2，判 should-fix。
+   - T31/T32 都 -NoBrowser，未走 DNS；T33/T34 是 start-fixed，不覆盖 start-tunnel DNS。
+
+C. start-fixed：**PASS（CheckOnly/路径/DataDir/URL/退出码），幂等/尾点/真实启动为 should/nit**
+   - CheckOnly 实测（无本地服务）：
+     exit1，reason=LOCAL_SERVER_DOWN，tailscale.path=C:\Program Files\Tailscale\tailscale.exe，
+     funnel.url=https://laptop-g5ftl95e.tailbb114d.ts.net，dataDir=临时目录（我传入的 -DataDir
+     原样出现在 JSON）；-Tailscale 不存在 → exit1、reason=TAILSCALE_NOT_FOUND。
+   - reason 优先级 ts missing > local down；M2 反转后 T33 红，证明测试有效。
+   - tailscale 查找顺序：显式 > RICHMAN_TAILSCALE > ProgramFiles > LOCALAPPDATA > PATH；代码符合。
+   - funnel URL 使用 Self.DNSName 并 TrimEnd('.')；真实地址无尾点，代码有处理；无单测（S3）。
+   - funnel --bg 无显式状态检查，依赖 Tailscale 幂等；无测试（S3）。
+   - -DataDir 真正进入 Resolve-DataDir/CheckOnly dataDir/start-lan 的路径；实测有效。
+   - 未执行真实非 CheckOnly start-fixed（会启动服务/Funnel）；只验证 CheckOnly；发布前手工步骤
+     仍由 Lead 执行（S4）。
+
+五、独立复跑/版本/编码/发布包
+1) corepack pnpm -s test
+   Test Files 75 passed；Tests 929 passed；Duration 145.40s；exit0。
+   预期 75/929；旧 925 条未减少。
+2) corepack pnpm -s typecheck → exit0。
+3) corepack pnpm -s build → 143 modules；index-0URYyLZn.js 427.58kB；exit0。
+4) 编码：scripts/*.ps1 共 11 个，全部 EF BB BF BOM；
+   `[ScriptBlock]::Create` 解析 start-tunnel.ps1、start-fixed.ps1 均 OK（未执行动作）。
+5) 版本：5 个 package.json（root/server/web/game-core/shared）+ apps/server/src/http.ts 均为
+   1.0.1；README/CHANGELOG 均 1.0.1；release-lib REQUIRED 含 start-fixed.ps1 与 start-fixed.bat；
+   verify-release names 为 8 个 .bat。
+6) release/RichMan-v1.0.1-win-x64：
+   49 文件 / 105867563 字节；8 个 .bat；start-fixed.ps1/.bat 均在；VERSION=1.0.1；
+   build-info.gitDirty=true（dirty 构建，SHA 非最终）。
+   corepack pnpm -s release:verify → exit0；12/12 PASS；
+   zip SHA D6FDF84BEC67870E83812C4D0B9E4201AF71D1C935B3AD24367749971EFF19A1；
+   仅作 dirty 构建证据，不作最终发布指纹。
+7) 旧测试范围：git diff --numstat apps/server/tests/scripts.test.ts = 47 增 / 0 删；
+   app-footer.test.ts 为新文件；未删除任何旧断言。全套 929 全绿。
+8) 真实 start-fixed CheckOnly：
+   - 正常：exit1，reason=LOCAL_SERVER_DOWN，tailscale.path 存在，funnel.url 有固定域名，
+     dataDir=临时目录。
+   - -Tailscale 不存在：exit1，reason=TAILSCALE_NOT_FOUND，localServer.ok=false，funnel.url=""。
+9) 变异：
+   M1 App.tsx footer 无条件渲染 → app-footer T1 红；
+   M2 start-fixed reason 优先级反转 → T33 红；
+   M3 删除 REQUIRED 的 start-fixed.bat → **release-lib 27/27 仍绿（must-fix）**；
+   M4 禁用 start-fixed 的 CheckOnly 分支 → T33/T34 红。
+   临时改均逐字节还原；还原后 App.tsx=2652f695…、start-fixed.ps1=e695715e…、
+   release-lib.mjs=6c7840dc…；未 commit。
+
+六、文档/未覆盖
+- README、CHANGELOG、项目当前状态的 1.0.1/929/发布包说明与实物一致；CHANGELOG/README
+  对 start-fixed、DNS 预检、footer 的描述与代码一致；release:verify 12 项实际通过。
+- 交接写的真实 CheckOnly（tailscale path/funnel、LOCAL_SERVER_DOWN）、75/929、发布包
+  说明与我实测一致；耗时 141.07s 与我的 145.40s 属环境差异，不是假数据。
+- 未执行真实 start-fixed 非 CheckOnly（会起服务/Funnel），也未在 09D 手机上验证固定地址；
+  这是交接已列的发布前手工步骤。
+- 未在非常慢/不可达 DNS 环境实测 Wait-TunnelDns 的严格 30 秒上界；同步 DNS 的
+  resolver 超时可能超过 30s（S2）。
+- 未验证 cloudflared/DNS 失败时浏览器确实未打开的直接自动化；只有代码路径检查（S2）。
+- M3 修复前，REQUIRED 对 start-fixed.bat 的保护没有回归测试；提交前应补（must-fix）。
+- 发布包为 dirty 构建；最终发布须 clean commit 重建（S4）。
+
+复核结论：功能实现基本正确，版本/编码/全量/release verify 均通过；但 M3 是明确的
+测试门禁缺口（required 列表删项无红），按用户验收要求必须修复后才可提交。修复 M3
+（补 REQUIRED 固定清单断言/缺失 fixture）后，App footer 覆盖与 DNS 直测可作 should-fix。
+本次未修改源码/测试/协议/交接，未 commit，只新增本报告。

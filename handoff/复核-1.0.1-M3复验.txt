@@ -1,0 +1,78 @@
+RichMan 1.0.1 三处小修：M3 复验
+================================================
+复核员：Qoder（只读复核；未改源码/测试/协议/交接，未 commit）
+日期：2026-11-09
+工作区：D:\Lianjunjie\biancheng\RichMan
+HEAD：b34a9a1
+唯一新增文件：handoff/复核-1.0.1-M3复验.txt
+
+结论：M3 已修复。
+
+一、复验对象
+上一轮 handoff/复核-1.0.1.txt 的 must-fix M3：
+从 scripts/release-lib.mjs 的 REQUIRED 删除 "start-fixed.bat" 后，
+scripts/release-lib.test.mjs 仍全绿；本轮 Lead 追加：
+- T24：缺 scripts/start-fixed.ps1 / start-fixed.bat 时 validateStaging 必须红；
+- T25：REQUIRED 固定包含 start-fixed 两个入口；
+- apps/server/tests/scripts.test.ts T36：release-lib 两项 + verify-release 8 个 .bat 清单。
+
+二、当前新增测试
+文件:行号：
+- scripts/release-lib.test.mjs:170-180（T24：对两个相对路径分别 rm、writeSums、
+  validateStaging，并断言“缺少必需文件：<relative>”）
+- scripts/release-lib.test.mjs:181-184（T25：REQUIRED arrayContaining
+  "scripts/start-fixed.ps1", "start-fixed.bat"）
+- apps/server/tests/scripts.test.ts:901-915（T36：读 release-lib 文本固定两项，
+  读 verify-release 的 names 并断言 8 个 .bat 排序清单）
+- scripts/release-lib.mjs:15 / :23 当前确实包含两个 start-fixed 入口
+- scripts/verify-release.mjs:173 当前 names 确有 start-fixed.bat（共 8 个）
+
+三、独立验证结果
+1) 单文件基线：
+   corepack pnpm -s vitest run scripts/release-lib.test.mjs
+   Test Files 1 passed；Tests 29 passed (29)；3.50s；exit0。
+2) M3a：删除 REQUIRED 的 "start-fixed.bat"
+   临时改 scripts/release-lib.mjs:23，运行 release-lib.test.mjs：
+   红条：
+   - T24 start-fixed 入口缺失必须被 REQUIRED 拦下
+   - T25 REQUIRED 固定包含 start-fixed 两个入口
+   Test Files 1 failed (1)；exit1。
+   还原后 sha256 6c7840dc80daf2396c8179387eb37f77de43b391158cd2e454c799c1133bc9c8。
+3) M3b：删除 REQUIRED 的 "scripts/start-fixed.ps1"
+   临时改 scripts/release-lib.mjs:15，同样运行：
+   红条：
+   - T24 start-fixed 入口缺失必须被 REQUIRED 拦下
+   - T25 REQUIRED 固定包含 start-fixed 两个入口
+   Test Files 1 failed (1)；exit1。
+   还原后 sha256 与上面一致（6c7840dc…）。
+4) T36 变异：
+   临时删除 scripts/verify-release.mjs:173 names 中的 "start-fixed.bat"，运行
+   corepack pnpm -s vitest run apps/server/tests/scripts.test.ts -t "T36"
+   红条：T36 release_manifests_lock_start_fixed_entries；Test Files 1 failed；exit1。
+   还原后 scripts/verify-release.mjs sha256 恢复（本次临时还原校验通过）。
+5) 全量：
+   corepack pnpm -s test
+   Test Files 75 passed (75)；Tests 932 passed (932)；134.94s；exit0。
+6) 旧 925 条完整性：
+   git diff --numstat：
+   - apps/server/tests/scripts.test.ts = 59 增 / 0 删
+   - scripts/release-lib.test.mjs = 15 增 / 0 删
+   只有追加，无删除旧断言；app-footer.test.ts 仍为新文件；全量 932 = 925 + 7
+   （app-footer 1 + scripts T33/T34/T35/T36 + release-lib T24/T25 等新增；旧 925 未减少）。
+7) 范围/状态：
+   git status 仍只有 1.0.1 的 15 个已跟踪改动 + app-footer.test.ts、start-fixed.ps1、
+   1.0.1 说明与本复验文件；未改其它源码/测试；未 commit、未 git add。
+   git diff --check exit0；没有删除旧测试断言。
+8) 还原：
+   所有变异都临时改、逐字节还原；release-lib.mjs 最终 sha256
+   6c7840dc80daf2396c8179387eb37f77de43b391158cd2e454c799c1133bc9c8
+   （与 Lead 记录一致）；verify-release.mjs 还原校验通过；无残留临时改。
+
+四、判定
+- M3 的原始缺口已修复：删除任一 start-fixed 入口都会使 T24/T25 至少一条红；
+  删除 verify-release 的 start-fixed.bat 会使 T36 红。
+- T24/T25/T36 均真实读取实际清单/脚本内容，不是固定字符串自证；T25 直接锁 REQUIRED，
+  T36 同时锁 release-lib 两项与 verify 8 个 .bat。
+- 全量 932 全绿，旧 925 条无删除/削弱，符合用户“M3 已修复”的验收。
+
+结论：M3 已修复。本次未修改源码/测试/协议/交接，未 commit，只新增本报告。
