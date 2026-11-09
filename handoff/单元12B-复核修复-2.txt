@@ -1,0 +1,85 @@
+RichMan 单元 12B 复核修复（第二轮：顶层额外文件）
+================================================
+日期：2026-11-09
+依据：handoff/复核-单元12B-修复验证.txt（Qoder 只读复核，结论“需修复”）
+Lead 已独立复现：顶层多一个 extra.txt 时 verify exit 0、12 项 PASS（假 PASS 成立）。
+
+一、范围（与上一轮相同，只加一处断言 + 补测试）
+只允许改：
+  scripts/release-lib.mjs
+  scripts/verify-release.mjs
+  scripts/release-lib.test.mjs
+  handoff/单元12-*.txt（把旧口径改成与修复后一致；允许追加）
+  handoff/项目当前状态.txt（只更新 12B 状态/测试数）
+不改 build-release.ps1 的产物结构、packages/**、apps/**、协议、引擎、web、依赖；不 commit。
+
+二、M1（必须）：zip 顶层带额外文件/目录时仍 PASS
+现状：
+  scripts/verify-release.mjs:208-213
+    const top = (await readdir(extracted, { withFileTypes: true })).filter(entry => entry.isDirectory());
+    if (top.length !== 1 || top[0].name !== expectedTop) throw ...
+  只过滤目录，顶层若还有 extra.txt（文件）就被忽略；
+  scripts/release-lib.mjs:268-310 的 comparePackageDirs 只比较 expectedDir 内部，看不到顶层多余项。
+复现（Lead 已跑通，作为验收基线）：
+  1) 复制 release/RichMan-v0.9.0-win-x64 到临时目录 $base/RichMan-v0.9.0-win-x64；
+  2) 在 $base 下写 extra.txt；
+  3) Compress-Archive -Path @($base/RichMan-v0.9.0-win-x64, $base/extra.txt) -DestinationPath $base/RichMan-v0.9.0-win-x64.zip；
+  4) 写 $base/SHA256SUMS.txt（该 zip 名 + hash，UTF8 无 BOM、CRLF）；
+  5) node scripts/verify-release.mjs --dir <原始 staging> --zip $base/RichMan-v0.9.0-win-x64.zip
+  实际：exit 0、12 项 PASS；期望：exit 1，zip_extract 报“zip 顶层多余项：extra.txt”。
+
+修法（必须）：
+1) scripts/verify-release.mjs 的 zip_extract 里，把顶层判定改为“整个根目录有且只有一个条目，
+   且它是名为 expectedTop 的目录”：
+     const rootEntries = await readdir(extracted, { withFileTypes: true });
+     const expectedTop = "RichMan-v" + version + "-win-x64";
+     const names = rootEntries.map(entry => entry.name + (entry.isDirectory() ? "/" : ""));
+     if (rootEntries.length !== 1 || !rootEntries[0].isDirectory() || rootEntries[0].name !== expectedTop) {
+       throw new Error("zip 顶层只允许 " + expectedTop + "/，实际：" + names.sort().join(","));
+     }
+   任何额外文件、额外目录、大小写变体、多个目录都必须变红。
+   该判定必须在 record("zip_extract", ...) 之前，使 problems 里能看到这条。
+2) 不要改 comparePackageDirs 的语义（它比较目录内部，仍然需要）；顶层约束在 verify 层做。
+3) 保持正向仍 PASS：真实 release/RichMan-v0.9.0-win-x64.zip 顶层只有 RichMan-v0.9.0-win-x64/。
+
+三、测试（必须补，旧 20 条一条不改，只追加）
+在 scripts/release-lib.test.mjs 追加（保持现有 fixture 工具函数风格）：
+  T10 zip 顶层额外文件：在临时目录解压 zip 后，于解压根下再写 extra.txt，
+      调用新增导出的 verifyTopLevel(extractedRoot, expectedTop)（或等价导出的顶层校验函数）
+      → ok=false，problems 含 "zip 顶层" 与 "extra.txt"。
+  T11 顶层额外目录：解压根下多一个 other/ 目录 → ok=false。
+  T12 顶层正确：只有 RichMan-v0.9.0-win-x64/ → ok=true。
+  T13 大小不一致分支（Qoder S1）：comparePackageDirs 两目录同一 relative 但长度不同
+      （如 x.txt "abcd" vs "abcde"）→ ok=false，problems 含 "文件大小不一致"。
+实现建议：把顶层校验抽成 release-lib.mjs 导出函数
+  export function checkZipTopLevel(rootEntries, expectedTop) -> { ok, problems }
+  （rootEntries 为 readdir(withFileTypes) 的结果，纯函数便于测试），
+  verify-release.mjs 调用它，错误文案统一以 "zip 顶层" 开头。
+预期：release-lib.test.mjs 20 → 24 条；全量 916 → 920 条；旧 916 一条不改。
+
+四、文档（必须，Qoder S6）
+1) handoff/单元12-注意事项.txt:113 现写“verify 的 secret_scan 只匹配 JSON 风格 token/recoveryCode 键值”，
+   与修复后不符；改为描述现行行为（全部非二进制/≤2MB 文件，含无扩展名 LICENSE；JSON 与 key=value/plain；
+   staging 与 zip 双向）。
+2) handoff/单元12-成果报告.txt:134 与 handoff/单元12-下一阶段交接.txt:47 只写
+   “Expand-Archive 顶层目录/VERSION/server.mjs hash”；改为：顶层只允许 RichMan-v<version>-win-x64/ 一个目录
+   （加本轮顶层断言）→ VERSION → validateStaging → comparePackageDirs 全量比对 → server.mjs hash。
+3) handoff/单元12-运行与验收.txt 追加“复核后修复 2（顶层额外文件，Qoder M1）”段：
+   复现命令、修复前 exit0/修复后 exit1 的实际输出、T10–T13、24/24、全量条数与耗时、release:verify 12 PASS。
+4) 四份 12B 交接与 handoff/项目当前状态.txt 的测试数同步为 920（核实后再写实际值）。
+5) 既有产物 hash/size 不变：EE86127F…D79B82 / 44976792 字节 / 47 文件 / 105846765 字节；本轮不重建 zip。
+
+五、验收（交付时必须附真实输出）
+- corepack pnpm -s vitest run scripts/release-lib.test.mjs → 24 passed
+- corepack pnpm -s test → 74 文件 / 920 条全绿（写明实际耗时）
+- corepack pnpm -s typecheck → exit 0；corepack pnpm -s build → exit 0
+- 正向：node scripts/verify-release.mjs（原 staging + 原 zip）→ exit 0、12 PASS
+- 负向（必须逐条给出 code 与 problems 首行）：
+  a) 顶层 extra.txt（第二节复现步骤）→ exit 1
+  b) 顶层 extra 目录 → exit 1
+  c) 上一轮 M1（zip 删 app/server/backup-cli.mjs）→ exit 1
+  d) 上一轮 M2（副本 LICENSE 追加 {"sessionToken":"ABCDEFGH12345678"}）→ exit 1
+- 变异（改完立即还原，报还原前后 sha256）：
+  a) 让 checkZipTopLevel 恒返回 ok:true → T10/T11 红且顶层探针变 exit 0
+  b) 让 comparePackageDirs 的 size 分支不 push → T13 红
+- 不 commit；交付后由 Qoder 只读复核。
