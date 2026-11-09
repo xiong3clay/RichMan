@@ -170,7 +170,7 @@ async function main() {
   else record("version_matches_package", true, version);
 
   try {
-    const names = ["start-lan.bat", "start-tunnel.bat", "stop.bat", "status.bat", "backup.bat", "restore.bat", "cleanup.bat"];
+    const names = ["start-lan.bat", "start-tunnel.bat", "start-fixed.bat", "stop.bat", "status.bat", "backup.bat", "restore.bat", "cleanup.bat"];
     for (const name of names) {
       const text = await readFile(path.join(options.dir, name), "utf8");
       const required = ["@echo off", "chcp 65001>nul", "cd /d \"%~dp0\"", "powershell.exe -NoProfile", "pause"];
@@ -179,7 +179,7 @@ async function main() {
       }
       if (!text.includes("\r\n")) throw new Error(name + " 不是 CRLF");
     }
-    record("bat_files", true, "7 个 .bat 内容与 CRLF 正常");
+    record("bat_files", true, "8 个 .bat 内容与 CRLF 正常");
   } catch (error) {
     record("bat_files", false, error instanceof Error ? error.message : String(error));
   }

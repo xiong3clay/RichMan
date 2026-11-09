@@ -167,6 +167,21 @@ describe("12B release-lib", () => {
     expect(result.files).toBe(REQUIRED.length);
   });
 
+  it("T24 start-fixed 入口缺失必须被 REQUIRED 拦下", async () => {
+    for (const relative of ["scripts/start-fixed.ps1", "start-fixed.bat"]) {
+      const fixture = await makeFixture();
+      await rm(path.join(fixture.dir, relative));
+      await writeSums(fixture.dir);
+      const result = await validateStaging(fixture.dir, fixture);
+      expect(result.ok, relative).toBe(false);
+      expect(textOf(result)).toContain("缺少必需文件：" + relative);
+    }
+  });
+
+  it("T25 REQUIRED 固定包含 start-fixed 两个入口", () => {
+    expect(REQUIRED).toEqual(expect.arrayContaining(["scripts/start-fixed.ps1", "start-fixed.bat"]));
+  });
+
   it("T1 zip 缺 backup-cli 且 SHA256SUMS 已重算仍因 REQUIRED 变红", async () => {
     const fixture = await makeFixture();
     await rm(path.join(fixture.dir, "app/server/backup-cli.mjs"));

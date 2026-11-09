@@ -40,6 +40,23 @@ function Show-CloudflaredHelp {
     Write-Output '  下载：https://github.com/cloudflare/cloudflared/releases'
 }
 
+function Wait-TunnelDns {
+    param([string]$Url, [int]$TimeoutSec = 30)
+    $hostName = ''
+    try { $hostName = ([Uri]$Url).Host } catch { return $false }
+    if ([string]::IsNullOrWhiteSpace($hostName)) { return $false }
+    Write-Output ('正在确认域名解析：' + $hostName + '（最多 ' + [string]$TimeoutSec + ' 秒）……')
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $addresses = [System.Net.Dns]::GetHostAddresses($hostName)
+            if ($addresses -ne $null -and $addresses.Length -gt 0) { return $true }
+        } catch { }
+        Start-Sleep -Seconds 2
+    }
+    return $false
+}
+
 function Show-TunnelBanner {
     param([string]$Url)
     Write-Output ''
@@ -59,11 +76,17 @@ function Show-TunnelBanner {
         Write-Output '剪贴板不可用，请手动复制上面的地址。'
     }
     if (-not $NoBrowser) {
-        try {
-            Start-Process -FilePath $Url -ErrorAction Stop | Out-Null
-            Write-Output '已用默认浏览器打开。'
-        } catch {
-            Write-Output '打开浏览器失败，请手动复制上面的地址。'
+        if (Wait-TunnelDns -Url $Url -TimeoutSec 30) {
+            try {
+                Start-Process -FilePath $Url -ErrorAction Stop | Out-Null
+                Write-Output '已用默认浏览器打开。'
+            } catch {
+                Write-Output '打开浏览器失败，请手动复制上面的地址。'
+            }
+        } else {
+            Write-Output 'WARN：域名暂时还解析不到（校园 DNS 可能缓存了否定结果）。'
+            Write-Output '      地址已复制到剪贴板，先不要关这个窗口：等 1～3 分钟后在浏览器里刷新即可。'
+            Write-Output '      急着用可让手机开热点给电脑，或把 DNS 换成 1.1.1.1 / 223.5.5.5。'
         }
     }
     Write-Output '玩法：一台电脑建房 → 其他设备打开该地址 → 输入 4 位房间码加入。'

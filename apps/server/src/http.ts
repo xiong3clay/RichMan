@@ -19,7 +19,7 @@ import { loadAllRooms } from './rooms/recovery.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_STATIC_DIR = path.resolve(HERE, "../../../apps/web/dist");
-const VERSION = "1.0.0"; // 发布版本：与根 package.json、CHANGELOG 同步
+const VERSION = "1.0.1"; // 发布版本：与根 package.json、CHANGELOG 同步
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",

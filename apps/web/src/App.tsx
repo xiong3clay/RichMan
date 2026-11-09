@@ -397,15 +397,18 @@ export default function App() {
         </section>
       )}
 
-      <footer className="footer">
-        <span className={"dot " + status}>{statusText}</span>
-        {statusDetail !== null && status !== "replaced" ? <span>{statusDetail}</span> : null}
-        {roomCode !== null && !replaced ? (
-          <button type="button" className="link" onClick={backToLobby}>
-            退出房间
-          </button>
-        ) : null}
-      </footer>
+      {/* 大厅首次打开时并没有连接，status 仍是初值 closed；只有进入房间后才显示连接状态，避免误报断线。 */}
+      {status !== "closed" || roomCode !== null ? (
+        <footer className="footer">
+          <span className={"dot " + status}>{statusText}</span>
+          {statusDetail !== null && status !== "replaced" ? <span>{statusDetail}</span> : null}
+          {roomCode !== null && !replaced ? (
+            <button type="button" className="link" onClick={backToLobby}>
+              退出房间
+            </button>
+          ) : null}
+        </footer>
+      ) : null}
 
       {audioOpen ? <AudioPanel controller={audio} onClose={() => setAudioOpen(false)} /> : null}
       {tutorialOpen ? <TutorialOverlay onFinish={finishTutorial} /> : null}

@@ -850,4 +850,63 @@ describe.skipIf(!onWindows)('12B+ tunnel one-click', () => {
       await killAndWait(fake);
     }
   }, 60000);
+
+  it('T33 start_fixed_check_reports_missing_tailscale', async () => {
+    const dir = await makeTempDir();
+    const port = await freePort();
+    const missing = path.join(dir, 'no-such-tailscale.exe');
+    const result = runScript('start-fixed.ps1', [
+      '-CheckOnly', '-Tailscale', missing, '-Port', String(port), '-DataDir', dir,
+    ]);
+    expect(result.status, failureMessage(result)).toBe(1);
+    expect(singleScriptJson(result)).toMatchObject({
+      ok: false,
+      reason: 'TAILSCALE_NOT_FOUND',
+      localServer: { ok: false },
+      tailscale: { ok: false },
+    });
+  }, 30000);
+
+  it('T34 start_fixed_check_ok_with_local_server_and_tailscale_file', async () => {
+    const dir = await makeTempDir(), fakeDir = await makeTempDir();
+    const port = await freePort();
+    const fakePath = path.join(fakeDir, 'tailscale.exe');
+    await copyFile(process.execPath, fakePath);
+    spawnRichmanHealth(port);
+    await waitHealthReady(port);
+    const result = runScript('start-fixed.ps1', [
+      '-CheckOnly', '-Tailscale', fakePath, '-Port', String(port), '-DataDir', dir,
+    ]);
+    expect(result.status, failureMessage(result)).toBe(0);
+    expect(singleScriptJson(result)).toMatchObject({
+      ok: true,
+      reason: '',
+      localServer: { ok: true },
+      tailscale: { ok: true, path: fakePath },
+      funnel: { url: '' },
+    });
+  }, 30000);
+
+  it('T35 start_fixed_ps1_is_utf8_bom_and_param_entry', async () => {
+    const filePath = path.join(scriptsDir, 'start-fixed.ps1');
+    expect(existsSync(filePath)).toBe(true);
+    const buffer = await readFile(filePath);
+    expect(buffer.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf]))).toBe(true);
+    const text = buffer.toString('utf8').replace(/^\uFEFF/, '').trimStart();
+    expect(text).toMatch(/^(?:\[CmdletBinding\(\)\]\s*)?param\(/);
+    expect(text).toContain('$CheckOnly');
+    expect(text).toContain('start-fixed.bat');
+  });
+
+  it('T36 release_manifests_lock_start_fixed_entries', async () => {
+    const lib = await readFile(path.join(root, 'scripts/release-lib.mjs'), 'utf8');
+    expect(lib).toContain('"scripts/start-fixed.ps1"');
+    expect(lib).toContain('"start-fixed.bat"');
+    const verify = await readFile(path.join(root, 'scripts/verify-release.mjs'), 'utf8');
+    const names = [...verify.matchAll(/"([a-z-]+\.bat)"/g)].map(match => match[1]).sort();
+    expect(names).toEqual([
+      'backup.bat', 'cleanup.bat', 'restore.bat', 'start-fixed.bat',
+      'start-lan.bat', 'start-tunnel.bat', 'status.bat', 'stop.bat',
+    ]);
+  });
 });

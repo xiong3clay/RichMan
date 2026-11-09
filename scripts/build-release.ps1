@@ -80,7 +80,7 @@ try {
     $packageScripts = Join-Path $staging 'scripts'
     New-Item -ItemType Directory -Path $packageScripts -Force | Out-Null
     $scriptNames = @(
-        'richman-common.ps1', 'start-lan.ps1', 'start-tunnel.ps1', 'stop.ps1',
+        'richman-common.ps1', 'start-lan.ps1', 'start-tunnel.ps1', 'start-fixed.ps1', 'stop.ps1',
         'status.ps1', 'backup.ps1', 'restore.ps1', 'cleanup.ps1'
     )
     foreach ($scriptName in $scriptNames) {
@@ -151,18 +151,24 @@ for (const moduleName of ["ws", "react", "react-dom", "zod"]) {
         '3. 首次下载约 40MB，需要联网；下载失败时局域网仍可玩，可稍后重试或手动放 tools/cloudflared.exe。',
         '4. 域名每次重启都会变；换域名后用“房间码 + 恢复码”回座，旧页面 token 可能失效。',
         '',
-        '三、停止 / 状态',
+        '三、固定公网地址（可选，需安装并登录 Tailscale）',
+        '1. 安装 Tailscale 并登录，首次需在 https://login.tailscale.com/f/funnel 启用 Funnel。',
+        '2. 双击 start-fixed.bat：本地服务没开会自动启动，然后打印并复制固定的 https://<设备>.<tailnet>.ts.net 地址。',
+        '3. 固定地址重启不变；但电脑必须保持开机、联网且 Tailscale 已登录。',
+        '4. 页面 502 表示本机服务停了：重新双击 start-fixed.bat；stop.bat 不会关闭 Funnel。',
+        '',
+        '四、停止 / 状态',
         '- stop.bat：只停止服务自己记录 pid 的进程；状态文件损坏/不匹配时退出码 2。',
         '- status.bat：查看本机/隧道健康；-Json 可输出一行 JSON。',
         '',
-        '四、备份 / 恢复 / 清理',
+        '五、备份 / 恢复 / 清理',
         '- backup.bat：在 data/backups/ 生成备份；备份含身份摘要与私有账务，不得外传。',
         '- restore.bat：必须先 stop，脚本会拒绝在服务运行时恢复；恢复后房间是暂停态，',
         '  由房主在界面点“继续游戏”。',
         '- cleanup.bat：默认保留每类日志 20、备份 10、损坏隔离 5、.tmp 24 小时；',
         '  先加 -DryRun 查看，再正式清理。',
         '',
-        '五、数据与版本',
+        '六、数据与版本',
         '- 数据都在 data/；升级/换机前先备份 data/ 或使用 backup.bat。',
         '- 版本：' + $version + '；协议版本：1；无账号系统、无自动更新。',
         '- 隧道是临时域名，不是固定公网服务；校园网客户端隔离下手机请走隧道。',
@@ -199,7 +205,12 @@ for (const moduleName of ["ws", "react", "react-dom", "zod"]) {
         '   stop/status 退出码 2 表示需要人工确认；不要直接删 run/server.json，',
         '   先确认 pid 与启动时间，必要时人工停止后再清理状态。',
         '',
-        '8. 日志在哪',
+        '8. 固定地址打不开 / 502（Tailscale Funnel）',
+        '   502 表示本机游戏服务没在跑：双击 start-fixed.bat 重新起服。',
+        '   域名解析不到：确认 Tailscale 已登录、Funnel 已启用；等 1～2 分钟再试。',
+        '   未安装 Tailscale 时固定地址不可用，局域网和 start-tunnel.bat 仍可用。',
+        '',
+        '9. 日志在哪',
         '   data/logs/server-*.log、data/logs/tunnel-*.log；反馈前先脱敏。'
     ) -join "`r`n"
     Write-Text (Join-Path $staging '故障排查.txt') ($trouble + "`r`n")
@@ -222,6 +233,7 @@ for (const moduleName of ["ws", "react", "react-dom", "zod"]) {
     $batScripts = @(
         @{ Name = 'start-lan.bat'; Script = 'start-lan.ps1' },
         @{ Name = 'start-tunnel.bat'; Script = 'start-tunnel.ps1' },
+        @{ Name = 'start-fixed.bat'; Script = 'start-fixed.ps1' },
         @{ Name = 'stop.bat'; Script = 'stop.ps1' },
         @{ Name = 'status.bat'; Script = 'status.ps1' },
         @{ Name = 'backup.bat'; Script = 'backup.ps1' },
