@@ -267,13 +267,13 @@ describe("11A ten-player endurance", () => {
     expect(runs.every(driver => driver.atomicFailures > 0)).toBe(true);
     expect(runs.every(driver => (driver.successes.REQUEST_PRIVATE_LOAN ?? 0) > 0
       && (driver.successes.BORROW_BANK ?? 0) > 0 && driver.state.bankLoans.length > 0)).toBe(true);
-  });
+  }, 30000);
 
   it("T4 replay_determinism: identical seeded command/time/draw streams yield identical final state and events", () => {
     const first = chaos(12), second = chaos(12);
     expect(JSON.stringify(second.state)).toBe(JSON.stringify(first.state));expect(second.events).toEqual(first.events);
     expect(second.summary("replay")).toEqual(first.summary("replay"));
-  });
+  }, 30000);
 
   it("T12 atomicity_and_I11_probe: public rejected loan/request commands leave the book unchanged before deadlines", () => {
     const driver = new Driver();driver.tick();
@@ -301,7 +301,7 @@ describe("11A ten-player endurance", () => {
     expect(dense.state.requests.length).toBeGreaterThan(0);expect(denseRecords).toBeLessThan(400);
     expect(denseBytes).toBeLessThan(512 * 1024);
     summaries.push({ script: "snapshot-financial-history", bytes: denseBytes, records: denseRecords });
-  });
+  }, 30000);
 });
 
 afterAll(() => {

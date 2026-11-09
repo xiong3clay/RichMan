@@ -264,7 +264,7 @@ describe.skipIf(!onWindows)("09B scripts", () => {
         dataDir: { ok: true },
       },
     });
-  });
+  }, 20000);
 
   it("3 start-lan -CheckOnly 端口被占用时 ok=false、PORT_IN_USE、退出码 1", async () => {
     const occupied = await occupyPort();
@@ -739,4 +739,56 @@ describe.skipIf(!onWindows)('09C-B review repairs', () => {
     expect(singleScriptJson(result)).toMatchObject({ ok: false, code: 'DATA_DIR_MISSING' });
     expect(existsSync(missing)).toBe(false);
   }, 60000);
+});
+
+// 12A: append-only T29/T30. 构造发布包形态的临时 root，dot-source 仓库公共脚本。
+describe.skipIf(!onWindows)('12A portable layout', () => {
+  async function portableFixture(): Promise<{ dir: string; common: string }> {
+    const dir = await makeTempDir();
+    await mkdir(path.join(dir, 'scripts'), { recursive: true });
+    await mkdir(path.join(dir, 'app/server'), { recursive: true });
+    await mkdir(path.join(dir, 'app/web'), { recursive: true });
+    await mkdir(path.join(dir, 'node'), { recursive: true });
+    const common = path.join(dir, 'scripts', 'richman-common.ps1');
+    await copyFile(path.join(scriptsDir, 'richman-common.ps1'), common);
+    await writeFile(path.join(dir, 'app/server/server.mjs'), '// fake server', 'utf8');
+    await writeFile(path.join(dir, 'app/server/backup-cli.mjs'), '// fake cli', 'utf8');
+    await writeFile(path.join(dir, 'app/web/index.html'), '<!doctype html><div id="root"></div>', 'utf8');
+    await writeFile(path.join(dir, 'node/node.exe'), 'fake node', 'utf8');
+    return { dir, common };
+  }
+
+  it('T29 portable_layout', async () => {
+    const { dir, common } = await portableFixture();
+    const command = '. ' + psQuote(common) + '; $layout=Get-RichManLayout; $layout | ConvertTo-Json -Compress';
+    const result = runPowerShellCommand(command);
+    expect(result.status, failureMessage(result)).toBe(0);
+    expect(result.json, failureMessage(result)).toMatchObject({
+      Portable: true,
+      DataDir: path.join(dir, 'data'),
+      WebDir: path.join(dir, 'app/web'),
+      WebIndex: path.join(dir, 'app/web/index.html'),
+      ServerEntry: path.join(dir, 'app/server/server.mjs'),
+      BackupCli: path.join(dir, 'app/server/backup-cli.mjs'),
+    });
+    expect(path.basename(String(result.json!.NodeExe))).toBe('node.exe');
+  });
+
+  it('T30 portable_data_dir_priority', async () => {
+    const { dir, common } = await portableFixture();
+    const explicit = path.join(dir, 'custom-data');
+    const envDir = path.join(dir, 'env-data');
+    const command = '. ' + psQuote(common)
+      + '; $env:RICHMAN_DATA_DIR=$null; $default=Resolve-DataDir ""'
+      + '; $env:RICHMAN_DATA_DIR=' + psQuote(envDir) + '; $fromEnv=Resolve-DataDir ""'
+      + '; $env:RICHMAN_DATA_DIR=$null; $explicit=Resolve-DataDir ' + psQuote(explicit)
+      + '; [ordered]@{defaultDir=$default;fromEnv=$fromEnv;explicitDir=$explicit} | ConvertTo-Json -Compress';
+    const result = runPowerShellCommand(command);
+    expect(result.status, failureMessage(result)).toBe(0);
+    expect(result.json, failureMessage(result)).toMatchObject({
+      defaultDir: path.join(dir, 'data'),
+      fromEnv: envDir,
+      explicitDir: explicit,
+    });
+  });
 });

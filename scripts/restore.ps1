@@ -12,6 +12,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'richman-common.ps1')
 $root = Get-RichManRoot
+$layout = Get-RichManLayout
 $restored = @()
 
 function Fail-Restore {
@@ -36,7 +37,14 @@ function Invoke-BackupCli {
             $nativePreference = $ErrorActionPreference
             try {
                 $ErrorActionPreference = 'Continue'
-                $lines = @(& node --import tsx (Join-Path $root 'apps/server/src/storage/backup-cli.ts') @Arguments 2> $errorFile)
+                $commandArgs = @()
+                if ($layout.Portable) {
+                    $commandArgs = @($layout.BackupCli)
+                } else {
+                    $commandArgs = @('--import', 'tsx', $layout.BackupCli)
+                }
+                $commandArgs += $Arguments
+                $lines = @(& $layout.NodeExe @commandArgs 2> $errorFile)
                 $cliExit = $LASTEXITCODE
             } finally { $ErrorActionPreference = $nativePreference }
         } finally { Pop-Location }

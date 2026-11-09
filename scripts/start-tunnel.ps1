@@ -13,6 +13,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'richman-common.ps1')
 
+$layout = Get-RichManLayout
 $dataPath = Resolve-DataDir $DataDir
 $runDir = Join-Path $dataPath 'run'
 $logDir = Join-Path $dataPath 'logs'
@@ -61,7 +62,11 @@ if ($alreadyRunning) {
 
 if ($cloudflaredPath -eq $null) {
     Write-Output '未找到 cloudflared。请任选一种：'
-    Write-Output '  1) 放到 D:\Lianjunjie\tools\cloudflared.exe'
+    if ($layout.Portable) {
+        Write-Output ('  1) 放到 ' + (Join-Path $layout.Root 'tools/cloudflared.exe'))
+    } else {
+        Write-Output '  1) 放到 D:\Lianjunjie\tools\cloudflared.exe'
+    }
     Write-Output '  2) 设置环境变量 RICHMAN_CLOUDFLARED 指向该 exe'
     Write-Output '  3) winget install Cloudflare.cloudflared'
     Write-Output '  下载：https://github.com/cloudflare/cloudflared/releases'

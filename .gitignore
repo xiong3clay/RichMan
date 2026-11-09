@@ -8,9 +8,13 @@ coverage/
 # 测试产物
 artifacts/test-logs/*.log
 artifacts/test-logs/*.txt
+artifacts/node-cache/
 test-results/
 playwright-report/
 blob-report/
+
+# 发布包
+release/
 
 # 存档与备份（绝不提交、绝不外露）
 data/

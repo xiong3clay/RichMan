@@ -14,22 +14,30 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'richman-common.ps1')
 
 $root = Get-RichManRoot
+$layout = Get-RichManLayout
 $dataPath = Resolve-DataDir $DataDir
 $runDir = Join-Path $dataPath 'run'
 $logDir = Join-Path $dataPath 'logs'
 $serverStatePath = Join-Path $runDir 'server.json'
-$distIndex = Join-Path $root 'apps/web/dist/index.html'
+$distIndex = $layout.WebIndex
 $healthUrl = 'http://127.0.0.1:' + [string]$Port + '/health'
+
+if ($layout.Portable -and $Build) {
+    Write-Output '发布包不含源码，不能构建前端'
+    exit 1
+}
 
 # ---- 检查项 ----
 $nodeOk = $false
 $nodeVersion = ''
 try {
-    $nodeVersion = (& node --version 2>$null)
-    if ($nodeVersion -ne $null) { $nodeVersion = $nodeVersion.Trim() }
-    if ($nodeVersion -match '^v([0-9]+)') {
-        $major = [int]$Matches[1]
-        if ($major -ge 22) { $nodeOk = $true }
+    if (-not ($layout.Portable -and $layout.NodeExe -eq 'node')) {
+        $nodeVersion = (& $layout.NodeExe --version 2>$null)
+        if ($nodeVersion -ne $null) { $nodeVersion = $nodeVersion.Trim() }
+        if ($nodeVersion -match '^v([0-9]+)') {
+            $major = [int]$Matches[1]
+            if ($major -ge 22) { $nodeOk = $true }
+        }
     }
 } catch {
     $nodeOk = $false
@@ -101,7 +109,11 @@ if ($alreadyRunning) {
 }
 
 if (-not $nodeOk) {
-    Write-Output ('未找到可用的 node（需要 v22 及以上），请先安装 Node.js。当前：' + $nodeVersion)
+    if ($layout.Portable) {
+        Write-Output ('发布包缺少可用的 node/node.exe（需要 v22 及以上），请重新解压完整的发布包。当前：' + $nodeVersion)
+    } else {
+        Write-Output ('未找到可用的 node（需要 v22 及以上），请先安装 Node.js。当前：' + $nodeVersion)
+    }
     exit 1
 }
 
@@ -138,12 +150,17 @@ $logErr = Join-Path $logDir ('server-' + $stamp + '-err.log')
 
 $env:PORT = [string]$Port
 $env:RICHMAN_DATA_DIR = $dataPath
+$startArgs = @('--import', 'tsx', '--no-warnings', 'apps/server/src/http.ts')
+if ($layout.Portable) {
+    $env:RICHMAN_STATIC_DIR = $layout.WebDir
+    $startArgs = @($layout.ServerEntry)
+}
 
 $process = $null
 $startedAtUtc = ''
 try {
-    $process = Start-Process -FilePath 'node' `
-        -ArgumentList @('--import', 'tsx', '--no-warnings', 'apps/server/src/http.ts') `
+    $process = Start-Process -FilePath $layout.NodeExe `
+        -ArgumentList $startArgs `
         -WorkingDirectory $root -WindowStyle Hidden `
         -RedirectStandardOutput $logOut -RedirectStandardError $logErr -PassThru
 

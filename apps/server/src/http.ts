@@ -339,7 +339,10 @@ function lanAddresses(): string[] {
 
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 if (isMain) {
-  startServer({ dataDir: process.env['RICHMAN_DATA_DIR'] ?? path.resolve(HERE, '../data') })
+  startServer({
+    dataDir: process.env['RICHMAN_DATA_DIR'] ?? path.resolve(HERE, '../data'),
+    staticDir: process.env['RICHMAN_STATIC_DIR'],
+  })
     .then((started) => {
       console.log("[richman] 服务已启动，监听 " + started.host + ":" + started.port);
       console.log("[richman] 本机： http://localhost:" + started.port + "/");

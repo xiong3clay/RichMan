@@ -38,6 +38,17 @@ describe("静态资源与音频 Range", () => {
     expect(body.equals(MP3_BYTES.subarray(10, 20))).toBe(true);
   });
 
+  it("GET / 返回 staticDir 的 index，未知无扩展名路径走 SPA 回退", async () => {
+    const base = await open();
+    const rootResponse = await fetch(base + "/");
+    expect(rootResponse.status).toBe(200);
+    expect(rootResponse.headers.get("content-type")).toContain("text/html");
+    expect(await rootResponse.text()).toContain("<title>richman</title>");
+    const fallback = await fetch(base + "/missing");
+    expect(fallback.status).toBe(200);
+    expect(await fallback.text()).toContain("<title>richman</title>");
+  });
+
   it("mp3 无 Range 返回 200 全量；越界 Range 返回 416", async () => {
     const base = await open();
     const full = await fetch(base + "/bgm.mp3");

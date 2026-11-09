@@ -10,6 +10,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'richman-common.ps1')
 $root = Get-RichManRoot
+$layout = Get-RichManLayout
 
 function Fail-Backup {
     param([string]$Code, [string]$Message, [int]$ExitCode = 1)
@@ -41,8 +42,11 @@ try {
             Fail-Backup 'BACKUP_OUT_EXISTS' ('输出目录已存在，请换一个不存在的目录：' + $outPath) 2
         }
     }
-    $cliPath = Join-Path $root 'apps/server/src/storage/backup-cli.ts'
-    $cliArgs = @('--import', 'tsx', $cliPath, 'create', '--data', $dataPath, '--out', $outPath)
+    if ($layout.Portable) {
+        $cliArgs = @($layout.BackupCli, 'create', '--data', $dataPath, '--out', $outPath)
+    } else {
+        $cliArgs = @('--import', 'tsx', $layout.BackupCli, 'create', '--data', $dataPath, '--out', $outPath)
+    }
     if ($WithAudit) { $cliArgs += '--with-audit' }
     if ($keepValue -gt 0) { $cliArgs += @('--keep', [string]$keepValue) }
     $errorFile = [System.IO.Path]::GetTempFileName()
@@ -52,7 +56,7 @@ try {
             $nativePreference = $ErrorActionPreference
             try {
                 $ErrorActionPreference = 'Continue'
-                $lines = @(& node @cliArgs 2> $errorFile)
+                $lines = @(& $layout.NodeExe @cliArgs 2> $errorFile)
                 $cliExit = $LASTEXITCODE
             } finally { $ErrorActionPreference = $nativePreference }
         }

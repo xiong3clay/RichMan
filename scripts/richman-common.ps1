@@ -13,6 +13,35 @@ function Get-RichManRoot {
     return (Split-Path -Parent $scriptDir)
 }
 
+function Get-RichManLayout {
+    $root = Get-RichManRoot
+    $serverEntry = Join-Path $root 'app/server/server.mjs'
+    if (Test-Path -LiteralPath $serverEntry) {
+        $nodeExe = Join-Path $root 'node/node.exe'
+        if (-not (Test-Path -LiteralPath $nodeExe)) { $nodeExe = 'node' }
+        return [pscustomobject]@{
+            Portable = $true
+            Root = $root
+            NodeExe = $nodeExe
+            ServerEntry = $serverEntry
+            BackupCli = Join-Path $root 'app/server/backup-cli.mjs'
+            WebDir = Join-Path $root 'app/web'
+            WebIndex = Join-Path $root 'app/web/index.html'
+            DataDir = Join-Path $root 'data'
+        }
+    }
+    return [pscustomobject]@{
+        Portable = $false
+        Root = $root
+        NodeExe = 'node'
+        ServerEntry = Join-Path $root 'apps/server/src/http.ts'
+        BackupCli = Join-Path $root 'apps/server/src/storage/backup-cli.ts'
+        WebDir = Join-Path $root 'apps/web/dist'
+        WebIndex = Join-Path $root 'apps/web/dist/index.html'
+        DataDir = Join-Path $root 'apps/server/data'
+    }
+}
+
 function Resolve-DataDir {
     param([string]$Value = '')
     if (-not [string]::IsNullOrWhiteSpace($Value)) {
@@ -21,8 +50,8 @@ function Resolve-DataDir {
     if (-not [string]::IsNullOrWhiteSpace($env:RICHMAN_DATA_DIR)) {
         return [System.IO.Path]::GetFullPath($env:RICHMAN_DATA_DIR)
     }
-    $root = Get-RichManRoot
-    return [System.IO.Path]::GetFullPath((Join-Path $root 'apps/server/data'))
+    $layout = Get-RichManLayout
+    return [System.IO.Path]::GetFullPath($layout.DataDir)
 }
 
 function Read-RunState {
@@ -111,6 +140,11 @@ function Get-CloudflaredPath {
             return (Resolve-Path -LiteralPath $env:RICHMAN_CLOUDFLARED).Path
         }
     }
+    $root = Get-RichManRoot
+    $packaged = Join-Path $root 'tools/cloudflared.exe'
+    if (Test-Path -LiteralPath $packaged) { return (Resolve-Path -LiteralPath $packaged).Path }
+    $packagedRoot = Join-Path $root 'cloudflared.exe'
+    if (Test-Path -LiteralPath $packagedRoot) { return (Resolve-Path -LiteralPath $packagedRoot).Path }
     $command = Get-Command cloudflared -ErrorAction SilentlyContinue
     if ($command -ne $null) {
         if ($command.PSObject.Properties['Source'] -ne $null) { return $command.Source }

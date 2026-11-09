@@ -12,6 +12,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'richman-common.ps1')
 $root = Get-RichManRoot
+$layout = Get-RichManLayout
 
 function Fail-Cleanup {
     param([string]$Code, [string]$Message)
@@ -31,7 +32,13 @@ try {
     if (-not (Test-Path -LiteralPath $dataPath -PathType Container)) {
         Fail-Cleanup 'DATA_DIR_MISSING' ('数据目录不存在：' + $dataPath)
     }
-    $cliArgs = @('--import', 'tsx', (Join-Path $root 'apps/server/src/storage/backup-cli.ts'), 'cleanup', '--data', $dataPath,
+    $cliArgs = @()
+    if ($layout.Portable) {
+        $cliArgs = @($layout.BackupCli)
+    } else {
+        $cliArgs = @('--import', 'tsx', $layout.BackupCli)
+    }
+    $cliArgs += @('cleanup', '--data', $dataPath,
         '--keep-logs', [string]$values[0], '--keep-backups', [string]$values[1], '--keep-corrupt', [string]$values[2], '--tmp-hours', [string]$values[3])
     if ($DryRun) { $cliArgs += '--dry-run' }
     $errorFile = [System.IO.Path]::GetTempFileName()
@@ -41,7 +48,7 @@ try {
             $nativePreference = $ErrorActionPreference
             try {
                 $ErrorActionPreference = 'Continue'
-                $lines = @(& node @cliArgs 2> $errorFile)
+                $lines = @(& $layout.NodeExe @cliArgs 2> $errorFile)
                 $cliExit = $LASTEXITCODE
             } finally { $ErrorActionPreference = $nativePreference }
         }
