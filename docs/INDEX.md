@@ -22,7 +22,7 @@
 
 ## 交付物在哪里
 
-- 代码：apps/（服务端与网页）、packages/（共享协议与规则引擎），当前开发版 0.9.0
+- 代码：apps/（服务端与网页）、packages/（共享协议与规则引擎），当前正式版 1.0.0
 - 版本记录：CHANGELOG.md；许可证：LICENSE（MIT，含自制音频声明）
 - 交接：handoff/单元NN-*.txt（四类）与 handoff/复核-单元NN*.txt（Qoder 复核）
 - 测试证据：artifacts/test-logs/ 与 apps/web/artifacts/mobile-metrics.txt

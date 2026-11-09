@@ -5,21 +5,23 @@
 
 ## 当前状态
 
-**开发版 0.9.0，尚未正式发布（目标 V1.0）。**
+**正式版 1.0.0（Windows 便携包，解压即玩）。**
 
 - 方案版本：V1.3.3（施工版）；协议版本：1
-- 已实现单元：00～09C-D、10A。规则引擎、同源服务端、引导式网页 UI、教程/规则页、
-  手机适配、三首轮播背景音乐与 8-bit 音效、债务中心、存档与重启恢复、备份/恢复/清理、服务加固与限流、
-  下注结算传输层隐私、D6 多请求借贷规则均已完成
-- 测试：69 文件 / 866 条（core、server、web）；`pnpm typecheck`、`pnpm build` 均通过
+- 已完成单元：00～12C（含 09A/09B/09C、10A/10B、11、12/12B/12C）。规则引擎、同源服务端、
+  引导式网页 UI、教程/规则页、手机适配、背景音乐与 8-bit 音效、债务中心、D6 多请求借贷、
+  存档与重启恢复、备份/恢复/清理、服务加固与限流、下注结算传输层隐私、稳定性演练、便携发布包均已交付
+- 测试：74 文件 / 925 条（core、server、web）；`pnpm typecheck`、`pnpm build` 均通过
 - 双客户端冒烟：`pnpm smoke:lan`
-- 发布前剩余：10B 多请求界面与文案、09D 真机发布矩阵、单元 11 稳定性演练、单元 12 发布包
+- 发布包：`release/RichMan-v1.0.0-win-x64.zip`（内置 Node v24.21.0；`start-lan.bat` 开局，
+  `start-tunnel.bat` 开公网临时隧道）
+- 发布后待办：09D 真机发布矩阵（两台电脑 + Android/iPhone），见 `handoff/单元09D-真机发布矩阵.txt`
 - 已知限制见 [CHANGELOG.md](CHANGELOG.md) 与 `handoff/项目当前状态.txt`
 
 ## 快速开始
 
     pnpm install
-    pnpm test          # 69 文件 / 866 条测试
+    pnpm test          # 74 文件 / 925 条测试
     pnpm smoke:lan     # 双客户端冒烟（真实服务 + 两个 WS）
     pnpm typecheck
     pnpm build
@@ -168,7 +170,7 @@ richman-backup-<时间戳>/
 corepack pnpm -s release:build
 ```
 
-- 产物：`release/RichMan-v0.9.0-win-x64/` 与 `release/RichMan-v0.9.0-win-x64.zip`。
+- 产物：`release/RichMan-v1.0.0-win-x64/` 与 `release/RichMan-v1.0.0-win-x64.zip`。
 - 首次会从 `https://nodejs.org/dist/v24.21.0/` 下载 `node-v24.21.0-win-x64.zip` 与 `SHASUMS256.txt`，
   校验 SHA256 后缓存到 `artifacts/node-cache/`；离线时把这两个文件放进该目录再重跑即可。
 - 包内自带 `node/node.exe`，玩家不需要安装 Node、pnpm 或 Git；解压后双击 `start-lan.bat`。
@@ -177,6 +179,6 @@ corepack pnpm -s release:build
   `Compress-Archive` 后计算 zip SHA256，再调用 `scripts/verify-release.mjs` 做真实启动/建房/备份校验。
 - 验证单个产物：`corepack pnpm -s release:verify`（默认验证当前版本目录与 zip）。
 - zip 的 SHA256 写在构建输出 JSON 与 `release/SHA256SUMS.txt`；发布页应同时提供该值。
-- 版本仍为 **0.9.0**：09D 真机发布矩阵通过后再改 1.0.0；本单元不得在包名或文档写 1.0.0。
+- 当前版本 **1.0.0**；规则或协议变更时同步升版并更新 CHANGELOG 与 `apps/server/src/http.ts`。
 - `release/` 与 `artifacts/node-cache/` 已加入 `.gitignore`，不得提交；发布包不得包含 node_modules、
   源码、测试、handoff、docs、data/rooms、token/恢复码/备份/日志。

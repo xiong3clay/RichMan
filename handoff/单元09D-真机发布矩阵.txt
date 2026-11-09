@@ -1,12 +1,12 @@
 单元 09D 真机发布验收矩阵（执行清单）
-日期：2026-11-08
+日期：2026-11-08 编写；2026-11-09 随 1.0.0 发布更新入口
 执行：用户（真机/多设备操作） + Lead（记录与判定）
-版本：开发版 0.9.0（HEAD 含健康版本号修复；/health 应返回 "version":"0.9.0"）
+版本：正式版 1.0.0（/health 应返回 "version":"1.0.0"）
 
 一、当前可用入口（本轮已起服务，计划任务托管）
-- 本机/局域网：http://10.25.243.87:8000/   （另一台电脑同一 Wi-Fi 也用这个）
-- 隧道（蜂窝/外网）：https://excel-metallic-reported-walnut.trycloudflare.com
-- 健康：/health 返回 ok=true、service=richman、version=0.9.0、protocolVersion=1、rooms、connections。
+- 本机/局域网：http://localhost:8000/ 与启动日志打印的 LAN 地址（示例 10.25.197.164:8000；IP 随 Wi-Fi 变化）
+- 隧道（蜂窝/外网）：双击包内 start-tunnel.bat 后打印的 https://xxx.trycloudflare.com
+- 健康：/health 返回 ok=true、service=richman、version=1.0.0、protocolVersion=1、rooms、connections。
 - 隧道域名每次重启隧道都会变；换域名后用「房间码 + 恢复码」恢复。
 - 状态与停止：
     powershell -ExecutionPolicy Bypass -File scripts/status.ps1 -Json
