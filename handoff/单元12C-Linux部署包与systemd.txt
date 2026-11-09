@@ -1,0 +1,109 @@
+RichMan 单元 12C-Linux 部署包与 systemd 交接
+更新日期：2026-11-10
+作者：Lead（DSH）
+状态：实现、发布库测试、WSL 真机（模拟云服务器）端到端验收已通过；尚未提交，待 Qoder 只读复核。
+
+一、本轮目标
+- 为 Linux x64 云服务器提供与 Windows 便携包同源的发布物：自带 Node，解压后用 install.sh 注册 systemd 服务。
+- 复用 1.0.1 版本号与协议版本 1；不升版本，作为 v1.0.1 的第二个资产发布。
+- 不修改引擎、协议、server/web 生产代码；只新增发布构建/校验/部署脚本与文档。
+
+二、新增与修改文件
+- scripts/linux-release-lib.mjs（新增）：linux-x64 发布库。REQUIRED_FILES 24 项、禁止清单、权限规则、
+  SHA256SUMS 生成/解析、手写 ustar + gzip 打包、readTarGz 校验读回。
+- scripts/build-linux-release.mjs（新增）：读版本并校验 package.json 与 http.ts 一致 → pnpm build（可 --skip-build）
+  → bundle-server.mjs 打平 server.mjs/backup-cli.mjs → 复制 dist、linux 脚本、systemd unit、licenses
+  → 下载/校验 node-v24.21.0-linux-x64.tar.xz（缓存 artifacts/node-cache）→ 生成说明/版本/SHA256SUMS
+  → validateStaging → 生成 tar.gz → 调 verify-linux-release.mjs → 输出 JSON。
+- scripts/verify-linux-release.mjs（新增）：13 项校验（归档大小、根目录名、24 项必需文件、禁止文件、
+  权限位、LF、server.mjs 含 ws 且无 tsx、backup-cli、index.html+音频、Node ELF、SHA256SUMS 一致、
+  systemd unit 关键指令、install.sh 关键约定）。
+- scripts/linux-release.test.mjs（新增 10 条）：权限、校验和格式/解析、tar 往返（内容+权限）、>100 字节路径
+  prefix、缺文件/禁止文件、unit 占位符与最小权限、三脚本严格模式、env 示例、AF_NETLINK、restore 传 --backup。
+- scripts/linux/richman.service（新增）：User=richman、EnvironmentFile=-/etc/richman/richman.env、
+  ExecStart=@NODE@ @PREFIX@/app/server/server.mjs、Restart=on-failure、NoNewPrivileges、PrivateTmp、
+  ProtectSystem=strict、ProtectHome、ReadWritePaths=@DATA_DIR@、
+  RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK。
+- scripts/linux/install.sh（新增）：root、端口、包完整性、Node v22+、systemd 检查；创建 richman 用户；
+  原子替换 $PREFIX；写 /etc/richman/richman.env；渲染 unit；enable + restart；轮询 /health 30 秒，
+  失败打印 journalctl 并 exit 4；成功打印本机/公网地址与运维命令。
+- scripts/linux/uninstall.sh（新增）：默认停服务、删 unit 与应用，保留数据与配置；--purge 连数据、配置、
+  系统用户一起删。
+- scripts/linux/status.sh（新增）：读 env 的 PORT，systemctl is-active + /health；--json 单行输出。
+- scripts/linux/backup.sh（新增）：root；默认备份到 $DATA_DIR/backups/richman-backup-<时间戳>；
+  支持 --out/--with-audit/--keep/--data-dir；调用包内 backup-cli.mjs create。
+- scripts/linux/restore.sh（新增）：root；--backup 必需，--room 可重复或 --all；先停服务，逐房调用
+  backup-cli restore --backup ... --data ... --room ...；完成后按原状态重启；房间为暂停态。
+- scripts/linux/richman.env.example（新增）：PORT、RICHMAN_DATA_DIR、RICHMAN_STATIC_DIR 与安全限额注释。
+- package.json：新增 release:linux、release:linux:verify。
+- README.md：当前状态、测试计数、目录说明、新增“Linux 服务器部署（可选）”、Linux 包构建/验证。
+- CHANGELOG.md：1.0.1 新增 Linux 包、验证计数 942、WSL 实测与两处 bug。
+- handoff/项目当前状态.txt：登记本轮。
+
+三、包布局（release/RichMan-v1.0.1-linux-x64.tar.gz）
+  RichMan-v1.0.1-linux-x64/
+    app/server/{server.mjs,backup-cli.mjs}
+    app/web/dist/{index.html,assets/,audio/}
+    node/bin/node、node/LICENSE.txt
+    scripts/{install.sh,uninstall.sh,status.sh,backup.sh,restore.sh,richman.env.example}
+    systemd/richman.service
+    licenses/{node,ws,react,react-dom,zod}/
+    VERSION、build-info.json、SHA256SUMS.txt、LICENSE、CHANGELOG.md
+    使用说明-Linux.txt、故障排查-Linux.txt、第三方素材许可.txt
+- SHA256SUMS.txt 内是相对路径（标准 sha256sum -c 可用），不包含 SHA256SUMS.txt 自身。
+- tar 包 36 个条目（含根目录），约 55.5MB；staging 35 个文件。
+
+四、构建与验证（Lead 实际执行）
+- corepack pnpm -s release:linux → 首次下载 node-v24.21.0-linux-x64.tar.xz，校验 SHASUMS256 通过。
+- 13 项 verify 全 PASS；本机日志：
+  archiveBytes=55526151、files=35、archiveSha256=D650B991AC321E8681EED78909D68512957CF156C1A42E826B103BAA55730AB7
+  （该值来自未提交工作区，gitDirty=true，不能作为最终发布指纹；提交后需干净重建）。
+- 单测 scripts/linux-release.test.mjs 10/10；typecheck 0。
+- 全量测试：76 文件 / 942 条（2026-11-10，见提交前最终复跑）。
+
+五、WSL Ubuntu 26.04 端到端实测（systemd 已开启）
+环境：WSL2 Ubuntu 26.04.1 LTS，/etc/wsl.conf 有 [boot] systemd=true；全程 root。
+1) 解压到 /root/richman-test/RichMan-v1.0.1-linux-x64，install.sh --check 输出 node=v24.21.0、systemd=yes。
+2) sudo bash scripts/install.sh --port 18080 --force：
+   创建 richman 用户 → /opt/richman → /var/lib/richman → /etc/richman/richman.env →
+   /etc/systemd/system/richman.service → enable/restart → 30 秒内 /health 通过 → 打印地址与命令。
+3) systemctl is-active richman=active；GET / = 200；/health:
+   {"ok":true,"service":"richman","version":"1.0.1","protocolVersion":1,...}
+4) POST /api/rooms → 201 {"ok":true,"roomCode":"4443"}。
+5) 双 WS 真实客户端（包内 node + ws 库）：建房 → join 两人（seat 1/2）→ ready → start →
+   收到同一 gameId 与 snapshot（version=1、phase=ACTION、seat=1、cents=10000）→ WS_E2E_PASS。
+6) backup.sh --out /root/backup1 → {"ok":true,"command":"create","rooms":1}；
+   systemctl stop → 删 /var/lib/richman/rooms/4443 → restore.sh --backup /root/backup1 --all：
+   {"ok":true,"command":"restore","code":"4443"} → 自动重启服务 → /api/rooms
+   返回房间 4443、paused:true；/health rooms=1。
+7) uninstall.sh：应用删除，数据与 /etc/richman 保留；再 uninstall.sh --purge：数据、配置、richman 用户
+   全部删除，systemctl is-enabled richman=not-found。
+
+六、实测发现并修复的两处真 bug
+- M1（systemd 沙箱崩溃）：unit 的 RestrictAddressFamilies 只允许 AF_INET/AF_INET6/AF_UNIX。
+  服务打印局域网地址时 Node 调 getifaddrs，Linux 下走 netlink，被沙箱拒绝 →
+  "uv_interface_addresses returned Unknown system error 97"，进程退出、systemd 每 3 秒重启、
+  /health 永远不通。修复：加入 AF_NETLINK；新增测试断言完整一行。
+- M2（恢复必失败）：restore.sh 调 backup-cli restore 时漏传 --backup，CLI 返回
+  BAD_ARGUMENT 缺少参数 --backup，房间未恢复且服务停着。修复：ARGS 增加 --backup "$BACKUP"；
+  新增测试断言完整命令行。
+- 这两个 bug 都是 Windows 侧单测/静态 verify 抓不到的，必须真 Linux + systemd 才能暴露。
+
+七、已知限制与边界
+- 只在 WSL2 Ubuntu 26.04 验证，未在真实云厂商 ECS/轻量服务器、Debian 12、Rocky/Alma 实测；
+  脚本按 POSIX shell + systemd 编写，非 systemd 系统（容器/OpenRC）会以 SYSTEMD_MISSING exit 3。
+- 只支持 x64；ARM64 需另做 Node 与构建目标。
+- 包内不带 HTTPS/域名/反向代理；直接 http://公网IP:8000 可用但明文，绑域名走 HTTPS 需备案或反代。
+- 云安全组/防火墙需自行放行端口；install.sh 只打印 ufw/firewalld 示例，不自动改防火墙。
+- 恢复必须停服；restore.sh 会短暂停服，恢复后房间为暂停态，需房主点“继续游戏”。
+- backup 含身份摘要与私有账务，不得公开；/var/lib/richman 权限归 richman，不要给 web 暴露。
+- 首次构建需联网下载 Linux Node；离线可把 tar.xz 放入 artifacts/node-cache 并保证 SHASUMS256.txt 存在。
+- 构建脚本在 Windows 上用系统 tar.exe 抽 node；该 tar 来自 Windows 10+。若在 Linux 上构建，可直接用系统 tar。
+- 版本仍为 1.0.1，协议 1；本轮不涉及规则/协议/存档格式变化。
+
+八、下一步
+- Qoder 只读复核（建议重点：install.sh 幂等/失败回收、unit 权限、restore 参数与失败路径、
+  SHA256SUMS 相对路径、构建脚本禁止项）。
+- 复核通过后提交 feat(linux-release) + docs，随后干净重建（gitDirty=false）、记录最终 tar.gz SHA256，
+  在 GitHub v1.0.1 release 追加 linux-x64 资产，README/CHANGELOG 回写指纹。
+- 剩余技术债：真实云厂商 + 域名/HTTPS 部署演练；ARM64；非 systemd 发行版支持。

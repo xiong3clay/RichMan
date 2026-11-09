@@ -5,23 +5,24 @@
 
 ## 当前状态
 
-**正式版 1.0.1（Windows 便携包，解压即玩）。**
+**正式版 1.0.1（Windows 便携包解压即玩；另有 Linux x64 服务器部署包）。**
 
 - 方案版本：V1.3.3（施工版）；协议版本：1
 - 已完成单元：00～12C（含 09A/09B/09C、10A/10B、11、12/12B/12C）。规则引擎、同源服务端、
   引导式网页 UI、教程/规则页、手机适配、背景音乐与 8-bit 音效、债务中心、D6 多请求借贷、
   存档与重启恢复、备份/恢复/清理、服务加固与限流、下注结算传输层隐私、稳定性演练、便携发布包均已交付
-- 测试：75 文件 / 932 条（core、server、web）；`pnpm typecheck`、`pnpm build` 均通过
+- 测试：76 文件 / 942 条（core、server、web、发布脚本）；`pnpm typecheck`、`pnpm build` 均通过
 - 双客户端冒烟：`pnpm smoke:lan`
 - 发布包：`release/RichMan-v1.0.1-win-x64.zip`（内置 Node v24.21.0；`start-lan.bat` 开局，
-  `start-tunnel.bat` 开公网临时隧道，`start-fixed.bat` 开 Tailscale 固定地址）
+  `start-tunnel.bat` 开公网临时隧道，`start-fixed.bat` 开 Tailscale 固定地址）；
+  `release/RichMan-v1.0.1-linux-x64.tar.gz`（systemd 服务，见下文 Linux 部署）
 - 真机验收：09D 真机发布矩阵已由用户于 2026-11-10 确认可用（无 P0 阻断；逐项证据口径见 `handoff/单元09D-真机发布矩阵.txt` 第七节）
 - 已知限制见 [CHANGELOG.md](CHANGELOG.md) 与 `handoff/项目当前状态.txt`
 
 ## 快速开始
 
     pnpm install
-    pnpm test          # 75 文件 / 932 条测试
+    pnpm test          # 76 文件 / 942 条测试
     pnpm smoke:lan     # 双客户端冒烟（真实服务 + 两个 WS）
     pnpm typecheck
     pnpm build
@@ -113,7 +114,7 @@
     packages/game-core/    规则引擎、阶段机、视图投影
     apps/server/            HTTP + WebSocket 服务、房间/会话/命令队列/调度、存档与备份
     apps/web/              React + Vite 引导式界面、教程、音频、手机适配
-    scripts/               启停/状态/备份/恢复/清理（PowerShell）与冒烟脚本
+    scripts/               启停/状态/备份/恢复/清理（PowerShell）、Linux 部署与冒烟脚本
     apps/server/data/      默认存档目录（不入 Git，绝不公网可访问）
     artifacts/test-logs/   测试日志（不入 Git）
 
@@ -171,6 +172,34 @@ richman-backup-<时间戳>/
 [`apps/web/public/audio/CREDITS.txt`](apps/web/public/audio/CREDITS.txt)。替换 BGM 必须同步更新
 `apps/web/src/audio/manifest.ts`、CREDITS 与本段。备份文件含身份摘要与私有账务，不得公开、上传或贴到聊天。
 
+## Linux 服务器部署（可选）
+
+适合把游戏放到一台常开的 Linux 云服务器（Ubuntu/Debian/CentOS 等，需 systemd）。包内自带 Node v24.21.0，
+服务器不用装 Node。构建与验证：
+
+    corepack pnpm -s release:linux
+    corepack pnpm -s release:linux:verify
+
+产物是 `release/RichMan-v1.0.1-linux-x64.tar.gz`。上传到服务器后：
+
+    tar -xzf RichMan-v1.0.1-linux-x64.tar.gz
+    cd RichMan-v1.0.1-linux-x64
+    sudo bash scripts/install.sh                    # 默认 /opt/richman、端口 8000、数据 /var/lib/richman
+    sudo bash scripts/install.sh --port 8080        # 换端口；--check 只体检不安装
+
+安装会创建无登录权限的 `richman` 用户、写 `/etc/richman/richman.env`、注册并启动 `richman.service`，
+然后轮询 `/health`；30 秒内不健康会打印 `journalctl` 并返回非零。常用命令：
+
+    systemctl status richman
+    journalctl -u richman -f
+    sudo bash scripts/status.sh --json
+    sudo bash scripts/backup.sh                     # 备份到 /var/lib/richman/backups/
+    sudo bash scripts/restore.sh --backup <备份目录> --all
+    sudo bash scripts/uninstall.sh                  # 保留数据；--purge 连数据/配置/用户一起删
+
+云服务器记得在安全组放行对应 TCP 端口；直接访问 `http://公网IP:8000` 不需要备案，绑域名走 HTTPS 才需要。
+数据目录是 `/var/lib/richman`（房间、快照、事件、备份），不要公开。恢复后房间为暂停态，由房主在界面点“继续游戏”。
+
 ## 发布包构建（Windows）
 
 只支持 Windows PowerShell 5.1（不使用 pwsh 7），首次构建需要联网下载官方便携 Node；之后的构建走缓存。
@@ -189,5 +218,7 @@ corepack pnpm -s release:build
 - 验证单个产物：`corepack pnpm -s release:verify`（默认验证当前版本目录与 zip）。
 - zip 的 SHA256 写在构建输出 JSON 与 `release/SHA256SUMS.txt`；发布页应同时提供该值。
 - 当前版本 **1.0.1**；规则或协议变更时同步升版并更新 CHANGELOG 与 `apps/server/src/http.ts`。
+- Linux 包单独构建：`corepack pnpm -s release:linux`，验证：`release:linux:verify`（13 项，含权限位、LF、
+  ELF、SQL/协议关键字、systemd 单元与 SHA256SUMS 一致性）。
 - `release/` 与 `artifacts/node-cache/` 已加入 `.gitignore`，不得提交；发布包不得包含 node_modules、
   源码、测试、handoff、docs、data/rooms、token/恢复码/备份/日志。

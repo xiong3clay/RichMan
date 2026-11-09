@@ -1,6 +1,21 @@
 RichMan 项目当前状态
-更新日期：2026-11-09
+更新日期：2026-11-10
 更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复；07A/07B/07C 由 Trae 实现，Qoder 三轮复核，Lead 验收；08A/08B/08C 由 Trae 实现并完成复核修复；09A 已提交 eeec8ca，第四轮测试补强已提交 bb7c2f2（交接 1ebdbe0，Qoder 复核 PASS）；09B 已提交 6491fe9（文档 39dc1b9），Qoder 复核 FAIL(M1/M2)；第五/六轮修复 bcb9aae、文档 71e099a，Qoder 第六轮验证 code PASS、文档硬伤已改并提交 59c00f0；09C-B 规格已写（handoff/单元09C-B-备份恢复清理脚本.txt，含 Qoder S1–S6 补强）；09C-A 由 Trae 实现、Lead 验收并提交 2bd84cd，Qoder 复核判可提交（66 文件/813 条）；09C-B 已提交 70b18a0（Qoder 两轮复核：M1/M2 修复后 code PASS，文档 M-DOC 已改）；09C-C 已提交 7c8fd7d，Qoder 复核可提交（无 must-fix，S1 文档计数已改）；09C-D 已提交 839c3c6（0.9.0 LICENSE/CHANGELOG/README，typecheck/build 0）；09D 起服时发现 /health 仍硬编码 0.0.0，已改为 0.9.0 并加测试（66 文件/835 条，已提交 d07e13d）；单元 10A D6 多请求引擎已实现并提交 a8016c2，Qoder 只读复核可提交（无 must-fix，S1–S5 已处置），69 文件/866 条；10B 多请求界面与请求截止已提交 1ffe107，Qoder 复核可提交（无 must-fix，S1/S2 已按 Lead 裁决补强），71 文件/881 条；单元11由Codex完成11A/11B自动化，新增12条；Qoder只读复核「可提交、无must-fix」，Lead按S1–S4补强T3/I12/destroyed/T9/T10后全量73文件/893条（168.69s）、typecheck/build 0；两处破产一致性修复；已提交 7d079d1（feat）+696d7a6（docs），工作区干净）
+
+
+【Linux 部署包（12C-Linux，2026-11-10）】
+- 新增 Linux x64 发布链：scripts/{build-linux-release,verify-linux-release,linux-release-lib}.mjs、
+  scripts/linux-release.test.mjs（10 条）、scripts/linux/{install,uninstall,status,backup,restore}.sh、
+  richman.env.example、systemd/richman.service；package.json 增 release:linux / release:linux:verify。
+- 构建：corepack pnpm -s release:linux（自带 Node v24.21.0，缓存 artifacts/node-cache）；
+  13 项 verify 全 PASS；工作区版本 archiveBytes=55526151、files=35；未提交时 gitDirty=true，
+  最终指纹以提交后干净重建为准。
+- WSL2 Ubuntu 26.04（systemd）真机：install --port 18080 → /health 200 → 建房 4443 → 双 WS 加入/准备/开局 →
+  backup → 删房间 → restore --all（房间 paused:true）→ uninstall（保数据）→ uninstall --purge（清数据/配置/用户）全通过。
+- 实测修出两处真 bug：unit 缺 AF_NETLINK 导致 systemd 沙箱下 getifaddrs 崩溃（Unknown system error 97）；
+  restore.sh 漏传 --backup 导致恢复 BAD_ARGUMENT。均已修复并补回归测试。
+- 文档：handoff/单元12C-Linux部署包与systemd.txt；README“Linux 服务器部署（可选）”；CHANGELOG 1.0.1 增补。
+- 待办：Qoder 只读复核 → 提交 → 干净重建并记录 tar.gz SHA256 → GitHub v1.0.1 追加 linux-x64 资产 → 回写文档。
 
 【单元11最新验证】
 - 实现基线ae334a9，规格纠正8bb3fb4；未commit。四份交接：handoff/单元11-{成果报告,运行与验收,下一阶段交接,注意事项}.txt。
@@ -49,11 +64,11 @@ RichMan 项目当前状态
 方案版本：V1.3.3（V1.3.2 + 引导式界面 + 连接实测）
 规则版本：V1.3.2（本轮未改规则）
 协议版本：1（05D/05E/05F/06 均未改协议版本号，只新增 resume_game 与 paused 字段）
-游戏版本：正式版 1.0.1（2026-11-09 发布；Windows 便携包 release/RichMan-v1.0.1-win-x64.zip；规则/协议仍为 1.0.0 的 1）
+游戏版本：正式版 1.0.1（2026-11-09 发布；Windows 便携包 release/RichMan-v1.0.1-win-x64.zip；Linux x64 部署包 release/RichMan-v1.0.1-linux-x64.tar.gz；规则/协议仍为 1.0.0 的 1）
 
 【进度与范围】
 已完成代码单元：00、01、02、03、04A、04B、05A、05C、05D、05E、05F、06、07A、07B、07C、08A、08B、08C、09A（已提交 eeec8ca，第四轮补强 bb7c2f2，交接 1ebdbe0）、09B（首版 6491fe9/39dc1b9；第五、六轮复核修复已提交 bcb9aae，文档 71e099a）、09C-A（实现 2bd84cd，规格 c522bb4，Qoder 复核可提交）、09C-B（实现 70b18a0，Qoder 复核 M1/M2 修复后 code PASS）、09C-C（实现 7c8fd7d，Qoder 复核可提交）、09C-D（发布文档 0.9.0，839c3c6；/health 版本号修复 d07e13d）、10A（D6 多请求引擎/阶段末等待，实现 a8016c2，Qoder 复核可提交）、10B（多请求引导卡/请求截止倒计时/过期守卫，实现 1ffe107，Qoder 复核可提交）、11（稳定性与故障演练，已提交 7d079d1/696d7a6，Qoder复核可提交，Lead补强后73文件/893条）、12A（发布包基础，实现已提交 9045ea8，Lead验收 73文件/896条）、12B（发布包收尾，已提交 e1b47f9/f53a903/76fd73f，74文件/923条）、12C（隧道一键化，已提交 db7574f/545c8ba，74文件/925条）。
-当前子任务：方案内单元 00～12 已全部完成，1.0.1 已发布；09D 真机发布矩阵已由用户于 2026-11-10 真机确认可用（无 P0 阻断，逐项证据口径见 handoff/单元09D-真机发布矩阵.txt 第七节）。再开工属于新需求或技术债。
+当前子任务：方案内单元 00～12 已全部完成，1.0.1 已发布；Linux x64 部署包已实现并通过 WSL 实机验收，待 Qoder 复核/提交/发布资产。09D 真机发布矩阵已由用户于 2026-11-10 真机确认可用（无 P0 阻断，逐项证据口径见 handoff/单元09D-真机发布矩阵.txt 第七节）。
 09C-B 完成（70b18a0）：backup.ps1/restore.ps1/cleanup.ps1 + README 备份节 + 09C-A S1/S2 补强；
 Qoder 首轮 M1（父路径 junction 写穿）/M2（显式已存在空 Out）已修复，复验 code PASS，M-DOC（pwsh7 未复现声明）由 Lead 改文档。
 09C 拆分：A 核心库与 CLI（已提交 2bd84cd）→ B PowerShell 包装与备份节（已提交 70b18a0）→

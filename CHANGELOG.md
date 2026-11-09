@@ -20,13 +20,22 @@ RichMan（大富翁联机版）的版本与变更记录。日期均为本地日�
   复制并打印 `https://<设备名>.<tailnet>.ts.net`。地址固定，但需电脑常开；
   502 表示本机服务已停。`-CheckOnly` 输出单行 JSON，便于脚本探活。
 - 发布包内置上述脚本，使用说明新增“固定公网地址”一节，故障排查补充 Funnel/502。
+- Linux x64 服务器部署包：`release/RichMan-v1.0.1-linux-x64.tar.gz`。自带 Node v24.21.0，
+  提供 `install.sh`（systemd 服务、专用 richman 用户、/opt/richman + /var/lib/richman、
+  /etc/richman/richman.env）、`uninstall.sh`（默认保留数据，`--purge` 全删）、`status.sh`、
+  `backup.sh`、`restore.sh` 与加固后的 `richman.service`。构建 `pnpm release:linux`，验证
+  `pnpm release:linux:verify`（13 项：权限位、LF、ELF、打平产物、systemd 指令、SHA256SUMS 一致性）。
 
 ### 验证
 - 新增大厅 footer 测试 1 条、start-fixed 脚本测试 3 条、发布清单门禁测试 3 条；
-  全量 75 文件 / 932 条通过，`pnpm typecheck`、`pnpm build` 均为 0。
+  全量 76 文件 / 942 条通过（含 Linux 发布库 10 条），`pnpm typecheck`、`pnpm build` 均为 0。
 - Qoder 只读复核提出 M3（发布必需清单删项无测试拦截），已补 release-lib T24/T25 与
   scripts T36；变异删除 REQUIRED 项会变红。
 - 发布包 `release/RichMan-v1.0.1-win-x64.zip`，构建后由 `verify-release.mjs` 做 12 项真实校验。
+- Linux 包在 WSL Ubuntu 26.04（systemd）实测：解压 → install → `/health` 200 → 建房 →
+  双 WS 加入/准备/开局 → backup → 删房间 → restore `--all`（房间暂停态） → uninstall/`--purge`。
+  实测修出两处真 bug：unit 缺 `AF_NETLINK` 导致 systemd 沙箱里 `getifaddrs` 崩溃；
+  `restore.sh` 漏传 `--backup` 导致恢复失败。均已补回归测试。
 
 ## [1.0.0] - 2026-11-09
 
