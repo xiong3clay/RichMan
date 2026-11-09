@@ -157,3 +157,24 @@ richman-backup-<时间戳>/
 *Fluffing a Duck*、*Monkeys Spinning Monkeys*、*Silly Fun*；完整署名、来源链接与替换要求见
 [`apps/web/public/audio/CREDITS.txt`](apps/web/public/audio/CREDITS.txt)。替换 BGM 必须同步更新
 `apps/web/src/audio/manifest.ts`、CREDITS 与本段。备份文件含身份摘要与私有账务，不得公开、上传或贴到聊天。
+
+## 发布包构建（Windows）
+
+只支持 Windows PowerShell 5.1（不使用 pwsh 7），首次构建需要联网下载官方便携 Node；之后的构建走缓存。
+
+```powershell
+corepack pnpm -s release:build
+```
+
+- 产物：`release/RichMan-v0.9.0-win-x64/` 与 `release/RichMan-v0.9.0-win-x64.zip`。
+- 首次会从 `https://nodejs.org/dist/v24.21.0/` 下载 `node-v24.21.0-win-x64.zip` 与 `SHASUMS256.txt`，
+  校验 SHA256 后缓存到 `artifacts/node-cache/`；离线时把这两个文件放进该目录再重跑即可。
+- 包内自带 `node/node.exe`，玩家不需要安装 Node、pnpm 或 Git；解压后双击 `start-lan.bat`。
+- 构建脚本会调用 `scripts/bundle-server.mjs` 打平服务端与备份 CLI、调用
+  `scripts/fetch-portable-node.ps1`，生成 `.bat`、说明文档、`licenses/` 与 `SHA256SUMS.txt`，
+  `Compress-Archive` 后计算 zip SHA256，再调用 `scripts/verify-release.mjs` 做真实启动/建房/备份校验。
+- 验证单个产物：`corepack pnpm -s release:verify`（默认验证当前版本目录与 zip）。
+- zip 的 SHA256 写在构建输出 JSON 与 `release/SHA256SUMS.txt`；发布页应同时提供该值。
+- 版本仍为 **0.9.0**：09D 真机发布矩阵通过后再改 1.0.0；本单元不得在包名或文档写 1.0.0。
+- `release/` 与 `artifacts/node-cache/` 已加入 `.gitignore`，不得提交；发布包不得包含 node_modules、
+  源码、测试、handoff、docs、data/rooms、token/恢复码/备份/日志。

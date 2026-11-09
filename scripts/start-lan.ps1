@@ -153,7 +153,8 @@ $env:RICHMAN_DATA_DIR = $dataPath
 $startArgs = @('--import', 'tsx', '--no-warnings', 'apps/server/src/http.ts')
 if ($layout.Portable) {
     $env:RICHMAN_STATIC_DIR = $layout.WebDir
-    $startArgs = @($layout.ServerEntry)
+    # Start-Process 的 ArgumentList 不会自动给含空格路径加引号，必须显式包一层。
+    $startArgs = @(('"' + $layout.ServerEntry + '"'))
 }
 
 $process = $null
