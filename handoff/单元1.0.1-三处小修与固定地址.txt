@@ -98,3 +98,23 @@ C. start-fixed 固定地址
   funnel --bg 幂等无单测。后续单元再补。
 - Wait-TunnelDns 的 30 秒是循环目标，单次同步 GetHostAddresses 的底层 resolver 超时
   可能略超；不宣称“严格 30 秒上界”。
+
+八、1.0.1 发布物与实测（2026-11-10）
+- 代码提交：dc16bc8 feat(1.0.1) + 1bc159f docs(1.0.1)；tag v1.0.1 指向 1bc159f。
+- 发布包：release/RichMan-v1.0.1-win-x64.zip，44,984,969 字节，
+  SHA256 CD5749A11F805DB23D20D16F4592D8559E4F8E9AC8AC52CC75B14AA7F8065463；
+  build-info.json：version 1.0.1、protocolVersion 1、nodeVersion v24.21.0、
+  gitCommit 1bc159f9d931e89cf02b965fba4711a0886dcf17、gitDirty=false。
+- release:verify 12/12 PASS（staging 49 文件 / 105,867,759 字节）。
+- 桌面包：D:\Lianjunjie\Cqianyi\Desktop\RichMan-v1.0.1-win-x64（全新解压，49 文件）。
+- 固定地址实测：start-fixed.bat -CheckOnly 在服务未起时给出
+  reason=LOCAL_SERVER_DOWN、tailscale.ok=true、funnel.url=https://laptop-g5ftl95e.tailbb114d.ts.net；
+  真实启动后 /health 返回 ok=true/version=1.0.1/rooms=0，公网固定地址 GET 200，
+  POST /api/rooms 返回 201 与 4 位房间码；测试房间已清理后重启，rooms=0。
+- GitHub：https://github.com/xiong3clay/RichMan/releases/tag/v1.0.1
+  （asset state=uploaded，digest sha256:cd5749a1…，与本机一致）。
+- 构建环境注意：本机杀软会在 fetch-portable-node 执行 node.exe --version 后的数秒内
+  短暂占用 node.exe，导致 build-release.ps1 的 Compress-Archive 报
+  “being used by another process”。本次用仓库外包装脚本在 Compress-Archive 前等待
+  20 秒完成干净构建，未改动仓库内构建脚本；若日后稳定复现，建议给 build-release.ps1
+  增加“压缩失败重试 3 次、每次间隔 10 秒”的硬化并补测试。
