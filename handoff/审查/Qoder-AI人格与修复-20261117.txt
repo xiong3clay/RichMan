@@ -1,0 +1,244 @@
+RichMan「AI 人格与审查修复」独立审查报告
+审查日期：2026-11-17
+审查范围：工作区未提交改动（A：上轮 P1/P2 修复；B：AI 上限 9→5；C：五种固定 AI 人格）
+审查方式：只读；未修改源码/测试，未 git add/commit
+说明：本轮只新增本报告文件；pnpm test/typecheck/build 为验证命令。Trae 自述报告仅作线索，不作证据。
+
+1. 验证命令与真实尾行
+
+1.1 pnpm test（仓库根目录，独立重跑）
+  Test Files  84 passed (84)
+       Tests  1004 passed (1004)
+    Start at  21:22:28
+    Duration  165.06s (tests 79%, import 16%, transform 6%)
+结果：全绿，与 DSH 给出的 84 files / 1004 tests 一致；Trae 报告中 backup/scripts 失败未在本机复现。
+
+1.2 pnpm typecheck
+  $ tsc --noEmit -p tsconfig.json
+  TYPECHECK_EXIT=0
+结果：通过。
+
+1.3 pnpm build
+  vite v8.3.5 building client environment for production...
+  ✓ 144 modules transformed.
+  apps/web/dist/index.html                   0.49 kB │ gzip:   0.31 kB
+  apps/web/dist/assets/index--JyM_5JG.css   18.07 kB │ gzip:   4.10 kB
+  apps/web/dist/assets/index-Cx0QvkYm.js   429.99 kB │ gzip: 126.39 kB
+  ✓ built in 369ms
+  BUILD_EXIT=0
+结果：通过。
+
+1.4 基线与新增测试
+新增/当前 bots 测试共 62 条：bots-policy 15、bots-driver 4、bots-manager 9、bots-http 3、bots-persistence 5、bots-personality 16、bots-driver-reliability 5、bots-lifecycle 5。
+既有测试文件未被修改；bots-http 从 9 上限改为 5 后把 6 也纳入非法值，是收紧而非削弱。
+
+2. P0 清单
+
+P0-1 无真人暂停没有顺延引擎截止时间，重连会立即补算超时，甚至直接破产/快进多阶段
+- 文件:行号：
+  apps/server/src/rooms/manager.ts:656-660（noteHumanOnline 只清 pausedByNoHuman/noHumanSinceMs）
+  apps/server/src/rooms/manager.ts:596-604（restoreIdentity 明确不改游戏状态/截止时间）
+  apps/server/src/ws.ts:224（scheduler.getState 在 isNoHumanOnline 时返回 null）
+  apps/server/src/ws.ts:350-354（重连/入座后直接 scheduler.schedule + botDriver.notify）
+  apps/server/src/rooms/scheduler.ts:50,69,89-94（过期 deadline 立即 advanceDue，且用原 deadlineMs 补算）
+  packages/game-core/src/engine.ts:428-432（ACTION_TIMEOUT）
+  packages/game-core/src/engine.ts:441-443（BETTING 超时结算，未提交按 0 注）
+  packages/game-core/src/engine.ts:477-479（TAX dangerDeadlineMs 到期 bankruptPlayer）
+- 问题：
+  pausedByNoHuman 只阻止 scheduler/driver 继续行动，但没有修改 engine 的 deadlineAt/windowDeadlineMs/dangerDeadlineMs，也没有调用 resumeFromPause 或等价地顺延截止时间。
+  真人离线超过当前阶段截止时间后重连，restoreIdentity 先清除 pausedByNoHuman；ws 随后 schedule。scheduler 看到旧 deadline 已过期，立即 advanceDue，并以原截止时刻补算；while 循环可能连续快进多个过期阶段。
+- 后果：
+  若离线时处于 TAX 危险阶段，重连即可能被判破产；处于 ACTION 会立即 ACTION_TIMEOUT；处于 BETTING 会立即按未提交 0 注结算。所谓“无真人暂停”没有冻结时间线，反而在重连瞬间造成不可逆对局损失。
+- 违反约束：
+  破坏单人练习/重连可玩性；与“无真人在线暂停推进”的实现意图直接矛盾。虽未绕过引擎，但属于必须修复的功能性 P0。
+- 最小修复：
+  1) 在生命周期恢复时原子地重建/顺延所有截止时间：可在重连事务中调用 resumeFromPause 或等价逻辑，把 windowDeadlineMs/dangerDeadlineMs/request deadline 移到重连时刻之后，再清 pausedByNoHuman 并 schedule。
+  2) 或者无真人离线时同时设置 room.paused=true，重连后必须走现有 resume_game/resumeFromPause，再允许 scheduler 推进；不要只清 pausedByNoHuman。
+  3) 持久化生命周期暂停起点/恢复语义，避免重启与内存行为不一致。
+  4) 增加假时钟测试：TAX danger 离线超过 rescueSec 但小于宽限期，重连后不得破产；ACTION/BETTING 同理不得立即超时。
+
+3. P1 清单
+
+P1-1 开局后无真人满 10 分钟会静默永久删除房间与事件流，缺少确认/提示/备份
+- 文件:行号：
+  apps/server/src/rooms/manager.ts:673-681（shouldReclaim：PLAYING + pausedByNoHuman + NO_HUMAN_GRACE_MS）
+  apps/server/src/rooms/manager.ts:367-371（reclaimRoom 删除内存房间并 transact 删除存档）
+  apps/server/src/ws.ts:536-554（30s 巡检回收，只 console.warn）
+  apps/server/src/storage/file-store.ts:135-140（deleteRoom rename 后 rm 整个房间目录）
+  apps/server/src/rooms/lifecycle.ts:7-13（5min/10min/30s 常量）
+- 问题：
+  这是代码有意实现的生命周期回收，不是偶然泄漏；但当前没有二次确认、用户可见提示、可配置宽限期或备份/墓碑保留。PLAYING 房间的 snapshot 与 events.ndjson 会被一起删除。
+- 后果：
+  真人断线超过 10 分钟后重连，房间已不存在，历史事件与对局不可恢复。对移动端/弱网场景，10 分钟可能过短；若产品未明确批准“到期即删档”，属于数据丢失风险。
+- 最小修复：
+  1) 把 NO_HUMAN_GRACE_MS 做成可配置，并在 UI/文档明确“离线多久后回收”。
+  2) PLAYING 房间优先保留为 paused/待回收，或先归档/备份再删除；纯 AI 大厅可按短 TTL 删除。
+  3) reclaimRoom 的 transact action 内再次 canReclaim，作为防御性检查。
+  4) 增加重连与 sweep 同房间队列顺序、宽限期边界、删除后重连失败的测试。
+
+4. P2 清单
+
+P2-1 FOOL 同意私人借款未检查借款人存活
+- 文件:行号：apps/server/src/bots/policy.ts:105-106；packages/game-core/src/private-loans.ts acceptLoanRequest 的双方 alive 校验
+- 问题：FOOL 的 accept 只看 canAfford/withinMax/随机数，未看 borrowerAlive；其他人格有检查。
+- 后果：极端时序下可能产生 PARTY_NOT_ALIVE 拒绝命令；driver 对非 VERSION_CONFLICT 会 markDriven 放弃，等待阶段超时。
+- 最小修复：FOOL 也加 borrowerAlive；补“请求创建后借款人死亡”的边界测试。
+
+P2-2 TAX 催收未检查出借人收款后 MAX，且失败后同 key 放弃会阻断后续自救
+- 文件:行号：apps/server/src/bots/policy.ts:363-380；apps/server/src/bots/driver.ts:264-269,299-300；packages/game-core/src/private-loans.ts collectPrivateDebt 的 nextLenderCents>MAX
+- 问题：collectibleDraft 只按 loan.remainingCents 与 borrower.cents 取上限，没有按 MAX_MONEY_CENTS-bot.cents 限制；私人还款已修，催收未修。
+- 后果：极端余额下 COLLECT_PRIVATE 被引擎拒绝；driver markDriven 同一 loanId key，后续 tick 仍选同一催收并被跳过，可能等到 danger 超时才破产。
+- 最小修复：催收金额再 min(MAX-bot.cents)；失败时允许重新决策/降级到 request/giveUp；补 MAX 边界测试。
+
+P2-3 非 VERSION_CONFLICT 失败一律 markDriven，缺少可重试错误白名单
+- 文件:行号：apps/server/src/bots/driver.ts:258-270
+- 问题：只有 VERSION_CONFLICT 重试；INVALID_AMOUNT/REQUEST_EXPIRED/ERROR_PAUSED 等都直接放弃。对确定性非法命令合理，但对暂停/瞬时状态变化可能过早放弃。
+- 后果：AI 当前动作被跳过后只能等阶段超时；不会永久死锁，但体验下降。
+- 最小修复：区分可重试/不可重试错误；ERROR_PAUSED 或状态已变化时不占坑，允许生命周期恢复后重新决策；补非版本冲突失败测试。
+- 备注：当前 ErrorCode 中没有 STALE_STATE；用户举例中的该码不存在。
+
+P2-4 driven 超过 500 直接清空，可能丢失已成功 key
+- 文件:行号：apps/server/src/bots/driver.ts:319-334
+- 问题：超限清空整轮 keys，而不是按阶段/时间淘汰。
+- 后果：多数成功命令会改变状态，policy 不会重复；但 TAX rescue 按秒生成 key，极端情况下可能重新驱动同一贷款/请求。当前未发现必然双扣，但幂等保护变弱。
+- 最小修复：按 phaseInstanceId/时间 LRU 清理，或保留成功终态 key；补超限后重复驱动测试。
+
+P2-5 notify/retry 的 0ms/延迟 timer 未纳入 timers，cancelRoom 不能真正取消
+- 文件:行号：apps/server/src/bots/driver.ts:115-127,259-262,130-146
+- 问题：action timer/rescue timer 被跟踪，但 notify tick 与 VERSION_CONFLICT retry tick 是匿名 timer；cancelRoom 只清 tickQueued/tickAgain，不能取消已排期回调。
+- 后果：回调仍会 tick；当前会重新读取房间/状态，通常安全，但换局/销毁后的清理不彻底。
+- 最小修复：统一跟踪所有 timer，或给 tick/retry 加 room epoch/cancel token；补 cancel 后旧 tick 不行动的测试。
+
+P2-6 前端 AI 上限常量双源，注释/错误文案仍写 1～3
+- 文件:行号：apps/web/src/App.tsx:44,294,424
+- 问题：按钮硬编码 [1,2,3,4,5]，未引用 BOTS_MAX；注释和 INVALID_BOTS 文案仍写 1～3。
+- 后果：前后端常量不一致，后续改 BOTS_MAX 时 UI 会漂移；错误提示误导。
+- 最小修复：从 shared 引入 BOTS_MAX 生成按钮与文案；同步注释。
+
+P2-7 LOBBY 中“有离线真人”的房间不回收
+- 文件:行号：apps/server/src/rooms/manager.ts:673-676
+- 问题：shouldReclaim 的 LOBBY 分支只回收 humans.length===0；真人入座后未开局就断线，humans.length>0，永不 TTL。
+- 后果：房间槽位/存档残留，无 CPU 推进但可被刷满房间上限。
+- 最小修复：LOBBY 也按“无在线真人”计时回收；补入座后断线未开局测试。
+
+P2-8 createdAtMs/noHumanSinceMs 未持久化，restoreRoom 每次重置
+- 文件:行号：apps/server/src/rooms/manager.ts:179-201；apps/server/src/storage/types.ts RoomSnapshot
+- 问题：restoreRoom 用 this.now() 重建 createdAtMs/noHumanSinceMs；快照不保存这两个生命周期字段。
+- 后果：transact/重启会重置 TTL/宽限期；纯 AI 大厅若反复触发 restore 可延后回收。
+- 最小修复：把生命周期时间戳纳入快照或明确“重启重置宽限期”的产品语义；补重启/多次 transact 测试。
+
+P2-9 reclaimRoom 自身不在 transact 内复查 canReclaim
+- 文件:行号：apps/server/src/rooms/manager.ts:367-371；apps/server/src/ws.ts:540-542
+- 问题：当前 ws sweep 与重连都走同一 RoomCommandQueue，canReclaim 与 reclaimRoom 在同一队列任务内，实际没有交错竞态；但 reclaimRoom 作为公开方法只检查 rooms.has，不在删除事务内复查。
+- 后果：若未来其他路径绕过队列调用，可能误删刚重连房间。
+- 最小修复：transact action 内再次 canReclaim；补队列顺序/边界测试。
+
+P2-10 validateSnapshot 仍信任 isBot，AI tokenDigest 只校验非空
+- 文件:行号：apps/server/src/storage/file-store.ts:22-33
+- 问题：本地快照可把真人标成 isBot:true，从而跳过人类 tokenDigest/session 校验；AI tokenDigest 不要求摘要格式。
+- 后果：不是远程可触发漏洞；正常 join/resume/restoreIdentity 不能认领 AI 座位。若快照文件被视为不可信输入，则是身份校验弱化。
+- 最小修复：限制 AI 座位来源/ID/数量，校验 isBot 与 session 的互斥和人格字段；补篡改快照测试。本轮人格/生命周期没有把它升级为远程必须修的安全问题。
+
+P2-11 autoStart 发送失败无回滚，TTL 只兜底“从未入座”的纯 AI 房间
+- 文件:行号：apps/web/src/App.tsx:103-118,274-304；apps/server/src/rooms/manager.ts:673-676
+- 问题：startedAutomatically 在 sendLobby(start) 前置 true，发送失败不恢复；若已入座但未开局就断线，LOBBY 不回收。
+- 后果：从未入座的纯 AI 房间会被 5min TTL 回收；已入座未开局的失败房间可能残留，用户也看不到自动开局失败原因。
+- 最小修复：检查 sendLobby 返回值，失败回滚并提示/允许手动重试；LOBBY 无在线真人也 TTL；补前端/浏览器 E2E。
+
+P2-12 AI 人格标签对所有真人公开
+- 文件:行号：apps/server/src/ws.ts:184-209；apps/server/src/rooms/manager.ts:684-701
+- 问题：snapshot/room 给所有客户端展示 AI 的 botPersonality；人类玩家没有该字段。
+- 后果：不泄漏人类隐私或他人私有财务；但会公开 AI 策略画像，真人可针对 FOOL/GENIUS 利用。若人格本应公开则无问题，若本应隐藏则是信息泄漏。
+- 最小修复：明确产品语义；若需隐藏，只给 AI 自己或不展示具体人格。
+
+P2-13 processor 的 isPaused 未包含 pausedByNoHuman
+- 文件:行号：apps/server/src/ws.ts:227-229
+- 问题：scheduler/driver 会拒绝无真人推进，但 processor 只检查 manager.isPaused；离线前已入队的命令仍可能在暂停后执行。
+- 后果：通常无真人可发命令，影响小；但“暂停”语义不完全。
+- 最小修复：processor 也拒绝 pausedByNoHuman，或明确允许离线前已入队命令完成；补测试。
+
+5. 对指定怀疑点的明确判定
+
+5.1 A3(a)：暂停期间 deadlineAt 未顺延，重连立即补算超时/破产
+判定：成立，P0。
+真实路径：noteHumanOffline 只置 pausedByNoHuman/noHumanSinceMs；engine deadline 不变。重连 restoreIdentity→noteHumanOnline 清标志；ws 立即 scheduler.schedule；scheduler 对过期 deadline 用原 deadlineMs advanceDue；engine ACTION_TIMEOUT/BETTING 0 注结算/TAX bankruptPlayer 会立即发生，且可能连续快进。现有 bots-lifecycle 只测 driver 不行动/重连后行动，没有测 scheduler 截止时间，所以漏掉。
+
+5.2 A3(b)：10 分钟后 reclaimRoom 删除 PLAYING 房间与存档目录
+判定：竞态怀疑在当前 ws 接线下不成立；产品/数据丢失风险成立，P1。
+原因：ws lobby 消息与 sweep 都通过同一 RoomCommandQueue 串行；canReclaim 在 sweep 队列任务内、reclaimRoom 之前执行。重连若先入队，会先 noteHumanOnline 清 pausedByNoHuman，sweep 随后 canReclaim=false；若 sweep 先入队并删除，重连后到只能 ROOM_NOT_FOUND。不是“刚重连又被并发误删”的竞态，而是到期顺序。
+但删除是静默、不可逆、含 events.ndjson，无二次确认/提示/备份；10min 是否可接受需要产品确认。建议按 P1-1 修。
+
+5.3 GENIUS“均匀 0/1，任何非零下注 EV=0，风险调整后最优 0 注”
+判定：与 gamble.ts 原始赔付公式一致，成立。
+证据：packages/game-core/src/gamble.ts:96-99 猜对 +bet×leverage，猜错 -bet×leverage；生产开奖来自 randomInt(2)，均匀 0/1。policy.ts:154-162 的 EV=0、方差=moved²；pickGeniusBet 用 ev - variance×riskAversion，0 注 utility=0，非零为负，因此选 0。
+补充：二倍杠杆亏损不足会生成 OVERDRAFT 贷款并计息，真实期望效用可能比原始赔付更差；这不推翻“0 注更优”，但 GENIUS 的简化模型没有显式建模透支利息/破产风险。没有发现反例。
+
+6. 其余核对点结论
+
+A1 并发冲突修复：
+- 现在成功才 markDriven；VERSION_CONFLICT 最多重试 3 次，150/300/600ms；其他失败 markDriven 放弃。
+- 不会因重试导致同一次行动双生效：重试只发生在明确非 ok 的 VERSION_CONFLICT 之后，该命令未 apply；execute 是本地 Promise，若 commit 后抛错会走 catch 且不重试。新 commandId 不会把“已成功但回执丢失”的命令去重，但当前路径不存在这种重试。
+- attempts 成功删除、换轮/换局清理、cancelRoom 清理；超过 3 次后 markDriven，不会无限重试。retry tick 与 pending 不互吞：finally 先删 pending，retry tick 重新决策；同 key 在途由 pending 阻止。
+- 非 VERSION_CONFLICT 直接放弃不会永久卡死，既有阶段超时兜底；但对瞬时错误不够友好，见 P2-3。
+
+A2 定时器绑定 game/阶段：
+- ScheduleStamp(gameId+phaseInstanceId) 在 fire 与 stillCurrent 双重校验；start/rematch 先 cancelRoom 再 notify；destroy/leave/disconnect/reclaim/close 都清理 timers/pending/attempts/driven/rescueTimers。
+- BETTING 的 phaseInstanceId 在同一局内不会跨轮复用：engine.setPhase 每次递增 phaseCounter，且带 round 前缀；跨局即使字符串相同，gameId 不同也会丢弃。
+- 残留风险是 notify/retry 匿名 timer 未被 cancelRoom 跟踪，见 P2-5；当前回调会重读状态，通常安全。
+
+A3 生命周期：
+- pausedByNoHuman/noHumanSinceMs、scheduler.getState 返回 null、driver.tick/fire 拒绝行动、30s sweep、5min/10min 常量均已实现。
+- restoreRoom 恢复时按快照中 online 真人判定 pausedByNoHuman；AI 座位恢复后 online 保持 true，不参与真人计数，不触发暂停。
+- 核心缺陷是 P0-1：暂停没有顺延截止时间；P1-1：到期静默删档。
+
+B 上限 9→5：
+- BOTS_MAX=5 在 shared/rules.ts，manager 与 http 都引用；非法值仍 400 INVALID_BOTS。
+- 0 AI 建房合法；5 AI + 1 真人 = 6 座，小于 RULES.playerMax=10；5 AI + 5 真人可坐满 10，第 11 人拒绝。
+- App.tsx 注释/错误文案仍 1～3，按钮硬编码 1～5，未引用 BOTS_MAX，属 P2-6。
+
+C 五种人格：
+- 类型/默认值/标签在 shared/bots.ts；profile 只在 isBot 座位；createRoom 用注入 rng 抽取，rematch 重抽，快照持久化，ws 只给 AI 注入标签。
+- 五种人格行为确实不同，且大多在合法动作集内；bots-personality 用真实 applyCommand 做代表性属性测试。
+- FOOL 随机基本合法，但缺少 borrowerAlive 检查（P2-1）；催收缺少出借人 MAX 检查（P2-2）。driver 对非法/失败命令有 markDriven+超时兜底，不会永久卡死。
+- 同 seed 可复现：manager rng 测试覆盖；driver rng 也可注入。人类玩家不会收到人类人格，但会看到所有 AI 人格标签，见 P2-12。
+- 旧快照缺失 botPersonality 恢复默认 PASSIVE，安全；非法人格被 validateSnapshot 拒绝。
+
+A4 其余 P2 修复：
+- ACCEPT 前已校验借款人收款后≤MAX；私人全额还款已受出借人 MAX 约束。
+- driven 按 gameId/round 清理且单房间 500 上限；超限清空有幂等弱化风险，见 P2-4。
+- notify 每房间合并一个 tick，运行期间 notify 合并为下一 tick；未发现丢事件导致阶段末尾无人行动。
+- rescuePoll 每秒巡检 AI 危险玩家，遵守 2 秒请求间隔；TAX 结束后不再续排，cancelRoom/close 清理，未发现残留 tick。
+
+7. 测试有效性评价
+
+有效之处：
+- bots-personality 不是只断言 mock：它用真实 applyCommand 对五种人格、多阶段、多 rng 值做 outcome.ok 属性测试，并覆盖真实 INTEREST→ACTION 带债路径。
+- bots-driver 的 1+5 AI 集成走真实 GameCommandProcessor/RoomScheduler，断言无非法回执、无 RULE_INVARIANT、eventSeq 连续、5 个 AI 都提交过命令。
+- bots-driver-reliability 覆盖 VERSION_CONFLICT 重试成功、最多 4 次调用后放弃、换局/换阶段旧 draft 丢弃、notify 合并。
+- bots-lifecycle 覆盖纯 AI 大厅 TTL、宽限期、重连清暂停、driver 无真人不行动。
+- bots-manager/http/persistence 覆盖 BOTS_MAX、人格抽取/rematch/恢复、快照兼容；bots-http 把 6 纳入非法值，是收紧。
+- 既有测试文件未改，未发现为通过而放松旧断言。
+
+关键缺口：
+- 没有覆盖 P0-1：无真人暂停后重连，scheduler 对过期 deadline 的立即补算/破产/0 注结算。
+- 没有覆盖 ws sweep 与重连的队列顺序、宽限期边界、删除后重连失败。
+- 没有覆盖非 VERSION_CONFLICT 失败后的兜底/重试策略。
+- 没有覆盖 driven 500 超限清空后的重复驱动、notify 在 tick 运行期间到达、rescuePoll 在 TAX 结束后的残留。
+- 没有覆盖 FOOL 借款人死亡、催收出借人 MAX 边界。
+- 没有前端 autoStart 浏览器 E2E；没有 LOBBY 离线真人 TTL；没有 validateSnapshot isBot 篡改测试。
+- 部分 driver reliability 用 stub manager + 直接 applyCommand，适合单元测试，但不能替代真实 processor/ws 生命周期集成。
+
+结论：1004 全绿证明主路径与既有规则没有回归，但不能证明 P0-1 的重连时间线安全；该缺口必须补测试并修复。
+
+8. 策略强度
+
+当前 AI 已不再是“几乎不借钱、不下注、不自救”的单一被动策略：
+- AGGRESSIVE 会主动借银行、下注 20%～40%、可用两倍杠杆。
+- CONSERVATIVE 保留缓冲、优先保信用、小额下注。
+- PASSIVE 仍偏被动，小额下注、缺钱才借。
+- GENIUS 按 EV/方差选 0 注，不无收益借钱，优先还债。
+- FOOL 随机但基本合法，可能随机借/还/请求/下注/放弃。
+- TAX 危险阶段新增催收、私人借款请求、2 秒间隔等待、必要时 RESCUE_GIVE_UP；driver 每秒 rescuePoll。
+残余策略问题：GENIUS 未显式建模透支利息/破产风险；FOOL 边界自检不完整；人格标签公开可能被真人利用。整体属于可玩、有差异，但仍非强竞技 AI。
+
+结论：能但需先修 P0

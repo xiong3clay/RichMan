@@ -1,0 +1,171 @@
+RichMan 单人练习（AI 对手）成果报告
+=====================================
+日期：2026-11-15
+范围：为 RichMan 增加「单人练习：AI 对手」模式，一个人（无第二位玩家、无第二台设备）
+      也能完整玩完一局。规则口径以 V1.3.2 为准，AI 与真人完全同规则。
+
+一、结论
+--------
+1. AI 不新增引擎入口：所有动作都是标准 GameCommand，actorId = AI 的 playerId，
+   经 apps/server/src/rooms/command-queue.ts 的 GameCommandProcessor.execute()
+   与真人走同一条队列；审计 eventSeq、commandId 幂等、存档/恢复、回放天然生效。
+2. 引擎仍是纯函数；AI 只读 EngineState，不修改状态、不加钱、不豁免失信/负债/税收/赌博规则。
+3. 金额全部是整数分（Cents），未引入任何新依赖。
+4. 新增 5 个测试文件、30 条测试；既有测试的断言未改。
+5. tsc 与 build 通过；本地 pnpm dev 实测：建房(bots=1) → 入座自动准备 → 自动开局 →
+   AI 连续行动到第 3 轮，无卡死、无非法命令、无服务端错误。
+
+二、改动文件清单
+----------------
+服务端（规则外，不碰 packages/game-core）：
+- packages/shared/src/protocol.ts
+    LobbyPlayerSchema 增加可选 isBot（人类省略该字段，保持旧消息形状）；
+    LOBBY_ERROR_CODES 增加 INVALID_BOTS。
+- apps/server/src/rooms/manager.ts
+    房间成员增加 isBot?: boolean；
+    createRoom(bots=0)：校验 0..9 的整数，非法抛 LobbyError("INVALID_BOTS")；
+    按座位顺序预置 AI（playerId="p"+seatId，昵称「AI 挑战者N」，ready/online=true，
+    tokenDigest 写不可认领的随机串）；
+    createRoomPersisted(bots) 透传；
+    disconnectFor/leaveFor 对 AI 座位 no-op（永不离线、永不离开）；
+    大厅房主转移只交给真人；只剩 AI 的房间直接回收；
+    restoreRoom 不把 AI 占位串写进 token 索引；
+    viewOf 只对 AI 输出 isBot: true。
+- apps/server/src/http.ts
+    POST /api/rooms 支持 bots 字段（缺省 0）；非整数/越界（含 null）返回 400 INVALID_BOTS，
+    不静默回落成 0。
+- apps/server/src/ws.ts
+    接入 BotDriver；commit 成功后 scheduler.schedule + botDriver.notify；
+    start/rematch/resume_game 也 notify；destroy_room 调 cancelRoom；close() 调 botDriver.close()；
+    snapshot 从大厅成员取 AI 标记，注入 me.isBot / publicPlayers[].isBot（仅展示，不参与规则）。
+- apps/server/src/bots/policy.ts（新）
+    纯函数 decideBotCommand(state, botPlayerId, nowMs, rng): GameCommandDraft | null。
+    阶段策略：INTEREST 无命令；BANK_DUE 结清/拒绝；ACTION 依次私人还款 → 临期银行还款 →
+    低现金借最小额度 → END_ACTION；BETTING rng<0.6 跳过，否则押 1 点、金额 min(10分, 现金10%)；
+    TAX 只应答当前等待窗口的私人借款请求。所有命令先自查金额/额度/信用/轮次，
+    不产生会被引擎拒绝的非法命令。
+- apps/server/src/bots/driver.ts（新）
+    监听房间提交；对每个 isBot 成员决策，延迟 700–1500ms（构造可配，测试传 0）后
+    经 processor.execute 提交；同一 (gameId, phaseInstanceId, botId[, loanId/requestId/seat])
+    只驱动一次；执行前用最新状态复核阶段/座位/请求并刷新 expectedGameVersion；
+    任何异常只记日志，不阻塞房间，既有超时推进兜底；cancelRoom/close 清理定时器与幂等记录。
+- apps/server/src/storage/types.ts
+    RoomSnapshot.players 增加可选 isBot；
+    discardPendingDeliveries 只在 hostId 非空时重新选房主，且只选真人。
+- apps/server/src/storage/file-store.ts
+    validateSnapshot 支持 AI 座位：tokenDigest 允许占位串、会话数按真人计、
+    sessions 不得引用 AI、房主必须是真人、纯 AI 大厅允许 hostId=null；
+    loadAll 恢复时只有真人置离线，AI 保持在线。
+    （这一条是本地 pnpm dev 冒烟发现的真实阻塞：不修则建房直接 503 ERROR_PAUSED。）
+
+前端（只展示服务端视图，不算钱）：
+- apps/web/src/net/wire.ts
+    WireLobbyPlayer / WireMe / WirePublicPlayer 增加可选 isBot。
+- apps/web/src/App.tsx
+    入口页新增「单人练习」：1/2/3 个 AI 可选（默认 1）；
+    POST /api/rooms {nickname, bots} → startRoom(autoStart) → 入座自动 ready →
+    全员就绪且本人是房主时自动 start。
+- apps/web/src/LobbyView.tsx
+    玩家行显示 AI 标签。
+- apps/web/src/GameView.tsx
+    玩家表/终局名单显示 AI 标签；ACTION 阶段当前席位是 AI 时标题显示「AI 思考中…」。
+
+新增测试（30 条，全部新增文件，未改任何既有断言）：
+- apps/server/tests/bots-policy.test.ts（15）
+- apps/server/tests/bots-manager.test.ts（6）
+- apps/server/tests/bots-driver.test.ts（3）
+- apps/server/tests/bots-http.test.ts（3）
+- apps/server/tests/bots-persistence.test.ts（3）
+
+三、新增消息字段（协议版本不变，仍是 1）
+----------------------------------------
+1. HTTP 建房请求：POST /api/rooms
+   body: { "nickname": "…", "bots": 1 }   // bots 可选，0..9 的整数，缺省 0
+   失败：400 { "ok": false, "error": "INVALID_BOTS" }
+2. 服务端 room 消息的玩家项：
+   { playerId, nickname, seatId, ready, online, isBot?: true }
+   只对 AI 座位输出 isBot；人类玩家不写该字段（旧客户端/旧断言形状不变）。
+3. 服务端 snapshot 视图：
+   view.me.isBot?: true
+   view.publicPlayers[].isBot?: true
+4. 没有新增 WebSocket 消息类型；AI 命令复用现有 GameCommand 信封与全部错误码。
+   注意：浏览器提交命令时金额字段必须是规范十进制字符串（既有协议要求）；
+   AI 在服务端进程内直接构造整数分（number），processor.toEngineCommand 会统一处理。
+
+四、AI 第一版策略（简单但合理，不做搜索/评估）
+----------------------------------------------
+- INTEREST：无需命令。
+- BANK_DUE：只处理自己为借款人的待决策贷款；现金足够就 REPAY，不足则 REFUSE（引擎只接受
+  这两种，且引擎在现金不足时会直接按失信结算）。
+- ACTION（仅自己回合，且未先应答请求）：
+  ① 有 ACTIVE 私人债且现金够 → REPAY_PRIVATE（一次还清）；
+  ② 有 ACTIVE 银行债且下一轮到期（dueRound=round+1）且现金够 → REPAY_BANK；
+  ③ 现金 < 100 分、信用 GOOD、无未结清银行贷款 → BORROW_BANK，
+     金额 = min(floor(现金/2), 100-现金)，即补到 1 元的最小额度；
+  ④ 否则 END_ACTION。
+- BETTING：未下注时 rng()<0.6 跳过（betCents=0，合法）；否则 guess=1、leverage=1，
+  金额 = min(10 分, floor(现金/10))。
+- TAX：不主动发起请求；只对当前等待窗口的私人借款请求作答。
+- 私人借款请求：自己闲置现金 - 本金 >= 500 分且借款人当前信用 GOOD 且存活 → ACCEPT；
+  否则 REFUSE。第一期不主动向真人借钱。
+- 失信（credit=DEFAULTED）不会新增普通银行贷款；DEFAULTED 贷款不产生 REPAY_BANK。
+
+五、本地验证步骤
+----------------
+1) 安装/启动（Windows PowerShell）：
+   cd D:\Lianjunjie\biancheng\RichMan
+   corepack pnpm install
+   corepack pnpm dev
+   控制台应打印：监听 0.0.0.0:8000，以及本机/局域网访问地址。
+2) 浏览器打开 http://localhost:8000/
+3) 入口页输入昵称 → 「AI 对手数量」选 1/2/3（默认 1）→ 点「单人练习」。
+   页面会自己完成：入座 → 自动准备 → 自动开局（无需再点准备/开始）。
+4) 预期：
+   - 房间/对局玩家表里 AI 显示「AI」标签；
+   - AI 回合顶部显示「AI 思考中…」，约 0.7–1.5 秒后自动行动；
+   - AI 会下注（或跳过）、结束行动；有债务时会还款、现金低于 1 元时会借款；
+   - 任何阶段倒计时照常推进，AI 异常时也不会卡住房间；
+   - 最终一方破产或只剩一人时 GAME_OVER，房主可「再来一局」（AI 保留）。
+5) 自动化验证命令：
+   corepack pnpm -s typecheck
+   corepack pnpm -s build
+   corepack pnpm -s vitest run apps/server/tests/bots-policy.test.ts ^
+     apps/server/tests/bots-manager.test.ts apps/server/tests/bots-driver.test.ts ^
+     apps/server/tests/bots-http.test.ts apps/server/tests/bots-persistence.test.ts
+   corepack pnpm -s test          # 全量回归
+
+六、真实结果（本机 2026-11-15）
+-------------------------------
+- typecheck：exit 0。
+- build：vite 8.3.5，143 modules，✓ built，exit 0。
+- 新增 5 个测试文件：30/30 通过（见 artifacts/test-logs/ 下的运行记录）。
+- 全量：942 条基线 + 30 条新增 = 972 条。
+  实际运行：corepack pnpm -s vitest run --maxWorkers=2
+  尾行：Test Files  2 failed | 79 passed (81)
+        Tests       5 failed | 967 passed (972)
+  5 条失败全部与本功能无关（3 条 junction 环境问题 + 2 条子进程 5s 超时）；
+  30 条新增测试全部通过。详见第七节与 artifacts/test-logs/ai-bots-test-final.log。
+- 真实 pnpm dev + WebSocket 冒烟（artifacts/test-logs/ai-bots-practice-smoke.log）：
+  {"ok":true,"reason":"done","roomCode":"5987","joined":true,"started":true,
+   "rounds":[1,2,3],"phases":["ACTION","BETTING"],
+   "aiActions":[{"type":"ACTION_ENDED","playerId":"p1"},{"type":"ACTION_ENDED","playerId":"p2"},
+                {"type":"BET_SUBMITTED","playerId":"p1","round":1},
+                {"type":"ACTION_ENDED","playerId":"p1"},{"type":"ACTION_ENDED","playerId":"p2"}],
+   "humanCommands":4,"commandFailures":[],"serverErrors":[]}
+  说明：建房带 bots=1 成功落盘（未再出现 503 ERROR_PAUSED），真人按阶段操作，
+  AI 在真实 WS 栈中完成 END_ACTION 与 SUBMIT_BET，回合从 1 推进到 3。
+- 证据日志：artifacts/test-logs/ai-bots-typecheck.log、ai-bots-build.log、
+  ai-bots-new-tests.log、ai-bots-test-final.log、ai-bots-practice-smoke.log。
+
+七、已知问题 / 环境限制（与本功能无关）
+--------------------------------------
+1. 本执行环境（Trae 命令沙箱）会重定向 junction 目标：
+   PowerShell 创建 junction 后 Target 指向 Trae 的 shadow 路径，Node 的
+   fs.symlink(...,"junction") 也不产生可 lstat 的链接（lstat → ENOENT）。
+   因此 3 条既有测试在本环境失败：backup.test.ts T21/T23、scripts.test.ts T26。
+   这些文件与断言本次未改动；在正常 Windows 环境应恢复通过。
+2. 进程/PowerShell 子进程类既有测试在并行高负载下会撞 5s/10s 测试超时
+   （本次全量里是 backup T16、scripts T5；crash-recovery、stability、review06-crash、
+   release-lib 等此前也出现过）。单独或小批量运行时这些测试均通过，本次已逐个复跑确认。
+   在正常空闲环境跑 `corepack pnpm -s test` 应得到 972/972 全绿。
+3. 未做真人真机验收：单人练习需要一个人实际从开局点到结束（见第五节步骤）。

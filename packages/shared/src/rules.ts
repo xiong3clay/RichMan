@@ -13,6 +13,12 @@ export const RULES = {
   rescueRequestMinGapSec: 2,
 } as const;
 
+/**
+ * 单人练习最多允许的 AI 座位数。与 RULES.playerMax 独立：即使以后扩大房间人数，
+ * 单人练习也保持这个上限；manager 与 HTTP 必须引用同一常量。
+ */
+export const BOTS_MAX = 5;
+
 export const TIMERS = {
   standard: { actionSec: 60, requestSec: 45, bankDueSec: 45, bettingSec: 45, rescueSec: 60 },
   fast: { actionSec: 30, requestSec: 20, bankDueSec: 20, bettingSec: 30, rescueSec: 45 },

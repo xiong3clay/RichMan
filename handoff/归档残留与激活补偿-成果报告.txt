@@ -1,0 +1,108 @@
+RichMan「归档残留与激活补偿」成果报告
+=====================================
+日期：2026-11-18
+依据：handoff/归档与二次平移修复-成果报告.txt 第七节 N1/N7 残留边界
+范围：A 激活跨重启补偿、B 归档隐藏残留清理、C 坏归档隔离。
+未 git add / 未 commit；未改规则数值、协议、schemaVersion、依赖、前端。
+基线 1067 条；本轮新增 6 条；改动后本机 1073 条中 1068 通过，
+5 条失败均为既有环境问题（详见第五节）。
+
+一、A 激活后的跨重启补偿（N1 残留）
+------------------------------------
+1.1 改了什么
+- storage/types.ts：新增 ActivationUndo（schemaVersion/roomCode/expectedVersion/beforeGame/
+  noHumanSinceMs/pauseStartedAtMs/pauseShifted/writtenAtMs）与 RoomStore.writeActivationUndo /
+  deleteActivationUndo 可选方法。
+- storage/atomic.ts：AtomicOptions 增加 backup?: boolean（默认 true）；
+  writeSnapshotAtomic 只在 backup !== false 时复制 snapshot.bak.json。
+  这样 activation-undo.json 的原子写不会污染唯一好备份。
+- storage/file-store.ts：
+  writeActivationUndo（约 222-230）写 rooms/<code>/activation-undo.json；
+  deleteActivationUndo（约 231-233）删除；
+  applyActivationUndo（约 234-288）在 loadAll 校验快照后执行：
+  · snapshot.game.version === expectedVersion → 用 beforeGame 恢复、paused=true、
+    真人 online=false、写回 snapshot.json、删 undo、warn 一次；
+  · 版本不等（后续合法推进/激活没落盘）→ 只删 undo；
+  · undo JSON/字段损坏 → 保留房间、paused=true、warn，不删 undo、不删档；
+  · 回滚写盘失败 → 保留 undo 与暂停，下次启动重试。
+  loadAll 调用点约 486：`s = await this.applyActivationUndo(code, s)`。
+- rooms/manager.ts：writeActivationUndo / deleteActivationUndo 包装（约 417-428）；
+  无持久化 store 时 no-op；删除失败只告警。
+- ws.ts 最终激活（约 347-372）：在 manager.transact 之前写 undo，
+  expectedVersion = result?.state.version ?? 当前 game.version；
+  transact 成功（含 online 确认）后在同一房间队列内删除 undo。
+  写 undo 失败会抛错，走原有 rollbackConnectionActivation，房间保持暂停。
+
+1.2 测试（apps/server/tests/activation-undo.test.ts，真实临时目录 + FileRoomStore）
+- 「激活已落盘、补偿未执行：loadAll 回到 beforeGame 且 paused=true」
+  （内存与磁盘 snapshot.json 都回到 version 0，undo 被删除）
+- 「stale undo（版本已推进）只删记录，不改游戏」
+- 「正常激活清理后 undo 不存在」（manager.writeActivationUndo→deleteActivationUndo→loadAll）
+- 「undo 损坏：保留房间并暂停，不删档」（坏 JSON 仍在，房间仍能加载）
+另外 pause-archive-atomic.test.ts 的 16 条真实 WS 重连用例全部通过，
+说明正常激活路径会写并清理 undo，没有破坏既有老化/平移语义。
+
+二、B 归档隐藏残留目录清理（N7 边界）
+--------------------------------------
+2.1 改了什么
+- storage/archive-policy.ts：新增 ARCHIVE_RESIDUE_TTL_MS = 60 * 60_000。
+- storage/file-store.ts pruneArchives（约 412-438）：每次 cleanupArchives 先扫描
+  archive/ 与 rooms/ 的直接子目录，匹配 `.archived-source-*`、`.staging-*`、`.restore-*`
+  且 mtime 超过 1 小时的递归删除；删除失败写入 failed 并 warn，不抛异常；
+  1 小时内的保留，避免误删进行中的归档/恢复。
+2.2 测试（apps/server/tests/archive-residue.test.ts）
+- 「archive/rooms 下三类残留超过 1 小时才清理，1 分钟内的保留」：
+  三个真实目录 utimes 到 2 小时前 → 消失并进入 removed；
+  新建的 `.staging-new` 保留。
+
+三、C 坏归档隔离（N7 边界）
+----------------------------
+3.1 改了什么
+- storage/archive-policy.ts：ARCHIVE_QUARANTINE_FAILURES = 3。
+- storage/file-store.ts：新增 archiveFailures Map（按归档目录计连续失败）；
+  pruneArchives 读取失败时 +1，成功后清零；达到 3 次时把目录 rename 到
+  archive/.quarantine/<原名>/（重名追加时间戳），结果记录在
+  ArchiveCleanupResult.quarantined，warn 写出隔离路径；隔离成功当次不再进 failed。
+  隔离区文件保留；容量统计把 .quarantine 下文件大小计入 bytes，
+  但 quarantined 不进入 FIFO 删除列表。
+- ArchiveCleanupResult 增加 quarantined: string[]（结果字段扩展，原字段不变）。
+3.2 测试（apps/server/tests/archive-residue.test.ts）
+- 「连续 3 次 cleanupArchives 后进入 .quarantine，随后不再 failed」：
+  第 1/2 次 failed 含坏档；第 3 次 quarantined 含目标且 failed 不含源目录；
+  第 4 次 failed/quarantined 都不再出现，隔离目录仍在。
+
+四、改动文件
+------------
+- apps/server/src/storage/types.ts（ActivationUndo、RoomStore 方法）
+- apps/server/src/storage/atomic.ts（backup 选项）
+- apps/server/src/storage/file-store.ts（undo 读写/启动回滚、残留清理、隔离、容量）
+- apps/server/src/storage/archive-policy.ts（残留 TTL、隔离阈值）
+- apps/server/src/rooms/manager.ts（undo 包装）
+- apps/server/src/ws.ts（激活前写 undo、成功后删）
+- 新增测试：activation-undo.test.ts（4）、archive-residue.test.ts（2）
+
+五、真实命令与尾行
+------------------
+- corepack pnpm -s test（VITEST_MAX_WORKERS=4，仅设置本次命令环境变量，不改配置）：
+    Test Files  2 failed | 88 passed (90)
+         Tests  5 failed | 1068 passed (1073)
+  5 条失败全部是既有环境问题：
+  · backup T21/T23、scripts T26：本机 junction 目标被重定向，lstat ENOENT；
+  · backup T15、scripts T5：并行负载下 5 秒子进程超时。
+  T15 与 scripts T5 已单独复跑通过（artifacts/test-logs/t15.log、scripts-t5.log）。
+  本轮新增 6 条测试全部通过；既有 1067 条断言未削弱。
+- corepack pnpm -s typecheck：首次 TS7 进程卡死被终止，重跑 exit 0
+  （日志 artifacts/test-logs/undo-residue-typecheck.log）。
+- corepack pnpm -s build：exit 0，vite built（artifacts/test-logs/undo-residue-build.log）。
+
+六、未做 / 已知局限
+------------------
+1. 没有做物理双盘（真实 EXDEV）实验；沿用 GPT 的注入式 EXDEV 测试。
+2. 残留目录清理的“删除失败”分支只做代码审查与 warn/failed 处理，
+   未构造稳定的跨平台权限故障测试（Windows 删除失败不稳定）。
+3. 隔离区容量“计入 bytes”已实现，但没有单独的容量边界测试；
+   现有 archive-capacity 系列测试保持通过。
+4. 激活 undo 只覆盖“激活后版本未推进”的回滚；如果激活后已有合法命令推进版本，
+   按需求只删 undo，不试图回滚后续合法状态。
+5. undo 文件未做签名/防篡改；损坏时保留并暂停，等待人工处理。
+6. 未 git add / commit；未做真机人工完整一局。

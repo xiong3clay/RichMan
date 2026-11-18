@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { SERVER_DEFAULTS, PROTOCOL_VERSION, NicknameSchema } from "@richman/shared";
+import { BOTS_MAX, SERVER_DEFAULTS, PROTOCOL_VERSION, NicknameSchema } from "@richman/shared";
 import { RoomManager } from "./rooms/manager.js";
 import { attachLobbyWebSocket } from "./ws.js";
 import type { LobbyWsOptions } from './ws.js';
@@ -133,6 +133,14 @@ async function handleCreateRoom(
       sendJson(res, 400, { ok: false, error: "INVALID_NICKNAME" });
       return;
     }
+    const bots = (body as Record<string, unknown>)["bots"] === undefined
+      ? 0
+      : (body as Record<string, unknown>)["bots"];
+    // 单人练习：0～BOTS_MAX 个 AI 座位；非法值不能回落成 0，避免静默建出非预期房间。
+    if (typeof bots !== "number" || !Number.isInteger(bots) || bots < 0 || bots > BOTS_MAX) {
+      sendJson(res, 400, { ok: false, error: "INVALID_BOTS" });
+      return;
+    }
     const ip = clientIp(req, security.limits);
     if (!security.createRoomBucket.tryTake(ip)) {
       sendJson(res, 429, { ok: false, error: "RATE_LIMITED" });
@@ -142,7 +150,7 @@ async function handleCreateRoom(
       sendJson(res, 503, { ok: false, error: "ROOM_LIMIT" });
       return;
     }
-    sendJson(res, 201, { ok: true, roomCode: await manager.createRoomPersisted() });
+    sendJson(res, 201, { ok: true, roomCode: await manager.createRoomPersisted(bots) });
   } catch (error) {
     const message = (error as Error).message;
     if ((error as {code?: string}).code === 'ERROR_PAUSED') { sendJson(res, 503, { ok: false, error: 'ERROR_PAUSED' }); return; }
@@ -226,7 +234,7 @@ function serveStatic(
 export function createRequestHandler(opts: ServerOptions = {}): http.RequestListener {
   const staticDir = opts.staticDir ?? DEFAULT_STATIC_DIR;
   const startedAt = opts.startedAt ?? Date.now();
-  const manager = opts.manager ?? new RoomManager();
+  const manager = opts.manager ?? new RoomManager({ offlineNow: opts.wsOptions?.now });
   const stats = opts.stats ?? (() => ({ connections: 0, rooms: 0 }));
   const limits = opts.security?.limits ?? loadSecurityLimits(process.env);
   const security = createSecurityRuntime(limits, opts.wsOptions?.now ?? (() => Date.now()), opts.security);
@@ -290,7 +298,7 @@ export function createRequestHandler(opts: ServerOptions = {}): http.RequestList
 export async function startServer(opts: ServerOptions = {}): Promise<StartedServer> {
   const host = opts.host ?? SERVER_DEFAULTS.host;
   const port = opts.port ?? Number(process.env["PORT"] ?? SERVER_DEFAULTS.port);
-  const manager = opts.manager ?? new RoomManager();
+  const manager = opts.manager ?? new RoomManager({ offlineNow: opts.wsOptions?.now });
   const store = opts.store ?? (opts.dataDir ? new FileRoomStore(opts.dataDir) : null);
   if (store) await loadAllRooms(store, manager);
   let runtime: ReturnType<typeof attachLobbyWebSocket> | null = null;

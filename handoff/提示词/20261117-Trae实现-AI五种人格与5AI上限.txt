@@ -1,0 +1,68 @@
+你是 RichMan 项目的实现者。在现有「单人练习：AI 对手」（尚未提交的工作区改动）基础上做两件事：① 单人练习最多支持 5 个 AI；② 给每个 AI 随机分配一种整局固定的「人格」策略，共 5 种。不要 git commit，不要削弱测试。
+
+## 0. 开工前必须读（按顺序）
+1. AGENTS.md（含第 11 节协作约定）
+2. handoff/项目当前状态.txt
+3. docs/plans/Richman分阶段联机开发方案_V1.3精简施工版.txt（唯一施工依据）
+4. 当前已有的 AI 实现：apps/server/src/bots/policy.ts、apps/server/src/bots/driver.ts、apps/server/tests/bots-*.test.ts（5 个文件），以及 git diff 里 http.ts / ws.ts / rooms/manager.ts / storage/types.ts / storage/file-store.ts / packages/shared/src/protocol.ts / apps/web/src/*
+5. 规则实现：packages/game-core/src/engine.ts、bank.ts、private-loans.ts、tax.ts、gamble.ts；packages/shared/src/rules.ts、types.ts、protocol.ts
+6. 基线：当前 972 条测试全绿、tsc 与 build 通过。这是你的起点，**不能退步**。
+
+## 1. 目标（两条，都要做完）
+A. 单人练习支持 1–5 个 AI（现有实现上限是 9，改为 5），HTTP / manager / 协议校验 / 前端入口全链路一致。
+B. 每个 AI 在**开局时随机**获得一种固定人格，整局不变、重启不变、界面上可见：
+   - AGGRESSIVE 激进型
+   - CONSERVATIVE 保守型
+   - PASSIVE 消极型（= 现有行为，作为基线策略保留）
+   - GENIUS 高智商型（按引擎真实规则做近似最优决策）
+   - FOOL 傻子型（在合法动作集合内完全随机下注、随机借还）
+
+## 2. 硬约束（违反即不算完成）
+- AI 的每个动作仍是标准 GameCommand，且**只走** GameCommandProcessor.execute()（apps/server/src/rooms/command-queue.ts），actorId = AI 的 playerId；不得绕过引擎、不得直接改 state、不得作弊或读取隐藏信息（他人私有财务、他人下注金额）。
+- personality **只影响"选哪条合法命令、参数取多少"**，永不改变规则、不改变引擎上限、不影响真人的可用动作。
+- 所有 AI 命令必须落在引擎合法集合内：金额整数分、下注不超过可负担、借贷满足前置条件、还债不超过 remainingCents、不产生 RUEL_INVARIANT。傻子型的"完全随机"＝在当前**合法动作集合**内均匀随机、参数在合法区间内随机，**绝不能生成必被引擎拒绝的命令**。
+- 不引入新依赖；不削弱或改写既有 972 条测试的断言语义。
+- 协议版本仍为 1；旧存档没有 personality 字段时必须能正常恢复（默认 PASSIVE），不得因此拒绝启动。
+- 除非发现必须修的规则 bug，不要改 packages/game-core（发现就先报告，不要自行改规则）。
+
+## 3. 实现要求
+
+### 3.1 上限改为 5
+- 上限常量集中定义（如 packages/shared 的 `BOTS_MAX = 5`），manager.createRoom(bots) 校验 0..5；http POST /api/rooms 非法值仍返回 400 INVALID_BOTS（不得静默回落 0）。
+- 前端入口提供 1/2/3/4/5 个 AI 可选，默认 1；原有「入座自动 ready → 全员就绪自动 start」逻辑保持可用。
+
+### 3.2 人格数据与持久化
+- 新增 `BotPersonality = "AGGRESSIVE" | "CONSERVATIVE" | "PASSIVE" | "GENIUS" | "FOOL"`，放 packages/shared（协议要展示）。
+- 房间成员记录加 `botPersonality?: BotPersonality`，仅 isBot 时存在；创建房间时用**注入的 rng**为每个 AI 座位抽取人格（允许重复）。
+- 持久化：写入 RoomSnapshot.players；validateSnapshot 校验取值合法；重启恢复后人格不变、AI 仍在席。
+- 展示：大厅与对局里 AI 昵称旁显示人格标签（激进/保守/消极/高智商/傻子），真人玩家不显示；只做展示，不参与任何规则判定。
+- rematch（再开一局）重新抽取人格，并在交接文档里写清楚。
+
+### 3.3 五种策略（必须实质不同，且每一条都可用测试固定下来）
+- 公共判断（还债 / 放贷 / 自救 / 借贷前置条件）复用同一组 helper，不要复制五份。
+- PASSIVE：保持现状（现金<1元且无未结清贷款才借；下注 60% 跳过、否则 0.1 元；行动阶段只还债或结束行动）。
+- CONSERVATIVE：优先结清到期与临期债务以保持信用；保留现金缓冲（例如 ≥5 元）；下注小（≤现金 5% 且 ≤1 元）；不主动借银行，只有危险自救时才借。
+- AGGRESSIVE：下注比例大（例如现金的 20%–40%，受可负担约束）；会为下注/自救主动借银行；愿意出借私人借款赚利息；风险高、可能破产。
+- GENIUS：按**引擎真实赔付公式**算期望值再决策（必须读 gamble.ts，不要自己发明公式）。至少做到：①现金够就结清到期银行债避免失信；②危险自救时优先合法筹钱（私人借款/银行借款），确实救不了才放弃；③下注取 EV 最大的金额/猜点/leverage（在引擎允许范围内）；④不为无收益目的借钱。
+- FOOL：合法动作集合内均匀随机（随机下注金额/猜点/leverage、随机借还、随机放贷答复），参数随机但必须合法。
+- 任何人格在"当前没有合法可选动作"时必须返回 END_ACTION（或在无可选时返回 null），不得让房间靠超时推进。
+
+### 3.4 必须新增的测试（断言语义，不是"能跑"）
+- 每种人格：①固定局面+固定 seed 下的确定性决策断言；②属性测试：把它的决策喂给真实 applyCommand，必须 ok=true（不得产生非法命令）。
+- 人格分配：同 seed 可复现；5 个 AI 能抽到多种人格；非法人格值被拒。
+- 上限：bots=5 通过、bots=6 → INVALID_BOTS（manager 与 http 两层都测）。
+- 持久化：含人格的快照存→读→人格仍在；缺 personality 的旧快照恢复为 PASSIVE。
+- 端到端：1 真人 + 5 AI 跑 ≥3 轮（可用 artifacts/test-logs/practice-smoke.mjs 改 bots=5），断言无非法命令、无服务端错误、无卡阶段。
+- 策略强度对比（强烈建议，做不了就写"未验证"）：固定种子跑若干局引擎级模拟，输出各人格的胜率/破产率，证明 GENIUS 明显强于 PASSIVE/FOOL、AGGRESSIVE 波动更大。
+
+## 4. 验收（必须贴真实命令输出，不要编造）
+cd D:\Lianjunjie\biancheng\RichMan
+pnpm test          # 期望 ≥972 全绿 + 新增用例
+pnpm typecheck
+pnpm build
+# 再本地起服跑一次 bots=5 的 smoke，贴关键输出
+git diff --stat
+
+## 5. 交付
+- 写 handoff/AI人格策略-成果报告.txt：五种人格的行为差异对照表、人格抽取与持久化方式、新增/改动文件清单、测试与真实输出、已知局限（尤其 GENIUS 的 EV 是否真的最优、哪些没验证）。
+- 完成后用一句话汇报：新增测试数、是否全绿、tsc/build 结果、bots=5 smoke 结果。

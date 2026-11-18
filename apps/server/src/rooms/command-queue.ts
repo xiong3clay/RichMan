@@ -1,5 +1,5 @@
 import { createHash, randomInt } from "node:crypto";
-import { applyCommand, type EngineState } from "@richman/game-core";
+import { applyCommand, shiftDeadlinesForPause, type EngineState } from "@richman/game-core";
 import { MoneyStringSchema, errorMessage, type CommandOutcome, type ErrorCode,
   type GameCommand, type TransitionResult } from "@richman/shared";
 
@@ -34,6 +34,10 @@ interface ProcessorOptions {
   now?: () => number;
   draw?: () => 0 | 1;
   store?: CommandResultStore;
+  /** 无真人在线暂停的起点；返回 null 表示当前没有需要平移的暂停。 */
+  pauseSince?: (roomCode: string) => number | null;
+  /** 截止时间平移成功落盘后调用；只清暂停起点，不清 pausedByNoHuman。 */
+  markPauseShifted?: (roomCode: string) => void;
 }
 
 export class RoomCommandQueue {
@@ -61,6 +65,35 @@ export class GameCommandProcessor {
     this.store = options.store ?? new Map<string, CommandResultRecord>();
     this.now = options.now ?? Date.now;
     this.draw = options.draw ?? (() => randomInt(2) as 0 | 1);
+  }
+
+  /**
+   * 无真人在线暂停后的恢复：在房间队列内把所有绝对截止时间整体平移 pause 时长。
+   * 不新增客户端命令、不发事件；必须在清除 pausedByNoHuman 之前调用。
+   */
+  resumeFromPause(roomCode: string): Promise<boolean> {
+    return this.options.queue.run(roomCode, () => this.resumeFromPauseInQueue(roomCode));
+  }
+
+  /** 调用方已经持有该房间队列（如 ws 的 join 分支）时直接使用，避免嵌套 run 死锁。 */
+  async resumeFromPauseInQueue(roomCode: string, commit = this.options.commit): Promise<boolean> {
+    const since = this.options.pauseSince?.(roomCode) ?? null;
+    const state = this.options.getState(roomCode);
+    if (state === null || since === null) return false;
+    const pausedMs = this.now() - since;
+    if (!Number.isSafeInteger(pausedMs) || pausedMs < 0) return false;
+    const shifted = shiftDeadlinesForPause(state, pausedMs);
+    if (shifted === state && pausedMs !== 0) return false;
+    const transition = {
+      state: shifted,
+      events: [],
+      outcome: { ok: true as const },
+      nextDeadlineAt: shifted.deadlineAt,
+      pauseShifted: true,
+    };
+    await commit(roomCode, transition);
+    this.options.markPauseShifted?.(roomCode);
+    return true;
   }
 
   execute(roomCode: string, playerId: string, command: GameCommand, authorize?: () => boolean): Promise<CommandReply> {

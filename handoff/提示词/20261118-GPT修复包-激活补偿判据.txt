@@ -1,0 +1,806 @@
+RichMan 修复包：激活跨重启补偿判据加强（P1-1 / P1-2）+ 两个 P2 卫生项
+生成时间 2026-11-18，供 GPT 阅读后产出补丁。文件为 TypeScript（ESM，Node 24，pnpm monorepo），测试框架 Vitest。
+仓库根目录：D:\Lianjunjie\biancheng\RichMan
+包管理命令：pnpm test / pnpm typecheck / pnpm build（全部在仓库根目录执行）。
+
+## 背景（来自 Qoder 只读审查，结论：能上线，无 P0，两条 P1）
+服务端当前处于「暂停不推进」状态时，真人重连会做一次「连接激活」：先写 activation-undo.json 补偿记录，再提交激活事务，成功后删补偿记录。重启时 loadAll 会先应用补偿记录（把房间回滚到激活前）。
+
+### P1-1
+补偿记录的过期判定（file-store.ts:259）只比 snapshot.game.version，不比 gameId。ActivationUndo 类型里没有 gameId 字段（types.ts:40-49）。rematch/start 换局会把 version 重置为 0 并换 gameId（manager.ts:624-648、engine.ts:124），残留补偿记录可能在版本号碰撞时进入回滚分支。回滚前的 validateSnapshot 会拦住写盘（file-store.ts:278，gameId 校验在 file-store.ts:131），所以磁盘不会坏；但 catch（file-store.ts:282-287）不区分「校验失败」和「写盘失败」，一律返回已改一半的 restored，导致内存里 game=旧局、gameId=新局，该房间之后任何提交都抛错并被置为 storageFailed 暂停。
+
+### P1-2
+expectedVersion 取 result?.state.version ?? game.version（ws.ts:357），而普通重连路径与 pausedMs<=0 的平移路径都不改 version（engine.ts:219）。因此「version 相等」无法区分两种情况：(a) 激活事务从未提交；(b) 激活已提交但 deleteActivationUndo 失败（manager.ts:424-428 只 warn）或进程在提交后、删记录前崩溃。
+若把 (b) 误判为 (a)：平移路径会把已经消费过的离线区间再平移一次（截止时间超额延长，违反「暂停区间恰好消费一次」）；普通路径会把 noHumanSinceMs / pauseStartedAtMs 回拨到旧离线时刻，导致 30 秒生命周期巡检可能把刚重连的房间提前归档（manager.ts:795-806、lifecycle.ts:16）。
+
+## 需要你产出的修改（严格按此范围，不要扩大）
+1. types.ts：ActivationUndo 增加所需字段（至少 gameId、joinedPlayerId；如你认为需要表达「未激活形态」还可加，但必须可选或写明向后兼容策略）。
+2. ws.ts:354-363：写补偿记录时补齐新字段（beforeActivation.gameId、joined.playerId 都在作用域内可用）。
+3. file-store.ts:238-288：
+   a) 过期判定加 gameId 联合校验，缺失 gameId 的旧记录按过期处理；
+   b) 回滚前额外要求磁盘快照仍是「未激活形态」（pausedByNoHuman===true、joinedPlayerId 对应玩家 online===false、noHumanSinceMs 与记录一致），不满足则按过期处理、绝不回滚；
+   c) catch 分流：validateSnapshot 失败 → 不写盘、返回原 snapshot（paused=true）、保留补偿记录；写盘失败 → 保留记录、返回 restored（paused=true）。禁止把校验失败也返回 restored。
+4. manager.ts:424-428：deleteActivationUndo 失败的 warn 要写清房间码与「补偿记录会在下次启动被判为过期」。
+5. P2 卫生（小改动）：archiveFailures 中目录已不存在的 key 在每轮巡检时清掉；隔离区容量统计要计入 archive.json 自身大小，count 要计入隔离目录。
+6. 测试：在 apps/server/tests/activation-undo.test.ts 追加 4 条真实行为测试（真实临时目录 + FileRoomStore + RoomManager，不用 mock 业务函数）：
+   T1 跨局过期：快照 gameId=B/version=V + 记录{expectedVersion:V, gameId:A} → loadAll 后 game.gameId===B、version 不变、记录文件已删。
+   T2 校验失败分流：回滚目标与快照 gameId 不一致 → loadAll 后内存 game.gameId===内存 gameId（不被替换）、记录仍存在、房间 paused。
+   T3 删除失败后成功激活 + 重启：不被回滚；再次 resume 时截止时间只被平移一次（对比单次平移的期望值）；pauseStartedAtMs 不被回拨。
+   T4 旧版记录（无 gameId）→ 按过期删掉、房间正常加载。
+
+## 输出格式要求（非常重要，我要直接把你的输出落盘）
+因为你看不到我的仓库，请给「可机械替换的补丁」，不要给我整文件重写、不要用省略号：
+对每个被修改的文件，给一个块：
+--- 文件：<相对路径>
+### 修改 N
+【原文定位块】逐字复制我给的片段（含缩进），只保留必要的最少行用于唯一定位
+【修改后块】完整替换文本
+然后单独给「新增测试代码」整段（可直接追加到 activation-undo.test.ts 末尾），要求 import 语句如与现有文件重复则说明放哪里。
+最后给一节「自查」：逐条说明你的改动如何解决 P1-1(a)(b)(c) 与 P1-2，以及哪一处最可能让 T1–T4 之外出现回归。
+注意：你无法执行 pnpm，不要编造任何测试输出行；只写推理与补丁。
+
+========== 代码快照 ==========
+===== apps/server/src/storage/types.ts  (行 1-64 / 共66行) =====
+   1| import type { EngineState } from '@richman/game-core';
+   2| import type { BotPersonality, GameEvent, RoomState } from '@richman/shared';
+   3| import type { SessionRecord } from '../rooms/session.js';
+   4| import type { CommandResultRecord } from '../rooms/command-queue.js';
+   5| export interface RoomSnapshot {
+   6|   schemaVersion: 1;
+   7|   rulesVersion: string;
+   8|   protocolVersion: number;
+   9|   savedAt: number;
+  10|   roomCode: string;
+  11|   hostId: string | null;
+  12|   roomState: RoomState;
+  13|   paused: boolean;
+  14|   gameId: string | null;
+  15|   usedGameIds: string[];
+  16|   players: Array<{playerId: string; seatId: number; nickname: string; ready: boolean; online: boolean; tokenDigest: string; isBot?: boolean; botPersonality?: BotPersonality}>;
+  17|   sessions: SessionRecord[];
+  18|   game: EngineState | null;
+  19|   commands: Array<CommandResultRecord & { key: string }>;
+  20|   /** 同提交审计副本（包括开奖结果），恢复不重放。 */
+  21|   lastEvents: GameEvent[];
+  22|   /** 生命周期时间戳；旧快照缺失时从恢复时刻开始计时。 */
+  23|   createdAtMs?: number;
+  24|   noHumanSinceMs?: number | null;
+  25|   pausedByNoHuman?: boolean;
+  26|   pauseStartedAtMs?: number | null;
+  27|   pauseShifted?: boolean;
+  28| }
+  29| export interface RoomStore {
+  30|   commitRoom(code: string, snapshot: RoomSnapshot, events: readonly GameEvent[]): Promise<void>;
+  31|   deleteRoom(code: string): Promise<void>;
+  32|   /** 把 rooms/<code>/ 整体移到 archive/<code>/；不删除存档。 */
+  33|   archiveRoom?(code: string): Promise<void>;
+  34|   cleanupArchives?(nowMs?: number): Promise<unknown>;
+  35|   writeActivationUndo?(code: string, undo: ActivationUndo): Promise<void>;
+  36|   deleteActivationUndo?(code: string): Promise<void>;
+  37| }
+  38| 
+  39| /** 激活前写盘的补偿记录；重启时若版本未推进则回滚本次激活。 */
+  40| export interface ActivationUndo {
+  41|   schemaVersion: 1;
+  42|   roomCode: string;
+  43|   expectedVersion: number;
+  44|   beforeGame: EngineState | null;
+  45|   noHumanSinceMs: number | null;
+  46|   pauseStartedAtMs: number | null;
+  47|   pauseShifted: boolean;
+  48|   writtenAtMs: number;
+  49| }
+  50| /** 交付前崩溃的加入不是可恢复身份；保留原房间码，重新选仍有凭据的房主。 */
+  51| export function discardPendingDeliveries(snapshot: RoomSnapshot): boolean {
+  52|   const pending = new Set(snapshot.sessions.filter(s => s.pendingDelivery).map(s => s.playerId));
+  53|   if (!pending.size) return false;
+  54|   snapshot.players = snapshot.players.filter(p => !pending.has(p.playerId));
+  55|   snapshot.sessions = snapshot.sessions.filter(s => !pending.has(s.playerId));
+  56|   if (snapshot.hostId !== null && !snapshot.players.some(p => p.playerId === snapshot.hostId)) {
+  57|     // 房主只能由真人接管；只剩 AI 时保持 null，避免把房间交给永不响应的座位。
+  58|     snapshot.hostId = [...snapshot.players].filter(p => p.isBot !== true)
+  59|       .sort((a,b) => a.seatId-b.seatId)[0]?.playerId ?? null;
+  60|   }
+  61|   return true;
+  62| }
+  63| export class RoomCommitError extends Error {
+  64|   constructor(readonly durable: RoomSnapshot | null, cause: unknown) { super('存档提交失败', { cause }); }
+
+===== apps/server/tests/activation-undo.test.ts  (行 1-109 / 共111行) =====
+   1| import { afterEach, describe, expect, it } from "vitest";
+   2| import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+   3| import os from "node:os";
+   4| import path from "node:path";
+   5| import { advanceSystem } from "@richman/game-core";
+   6| import { RoomManager } from "../src/rooms/manager.js";
+   7| import { SessionRegistry, SnapshotSessionStore } from "../src/rooms/session.js";
+   8| import { FileRoomStore } from "../src/storage/file-store.js";
+   9| import type { ActivationUndo } from "../src/storage/types.js";
+  10| 
+  11| const dirs: string[] = [];
+  12| 
+  13| afterEach(async () => {
+  14|   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
+  15| });
+  16| 
+  17| async function setup() {
+  18|   const dir = await mkdtemp(path.join(os.tmpdir(), "richman-undo-"));
+  19|   dirs.push(dir);
+  20|   const store = new FileRoomStore(dir);
+  21|   const manager = new RoomManager({
+  22|     generateRoomCode: () => "4040",
+  23|     generateGameId: () => "g-undo",
+  24|     generateToken: () => "tok",
+  25|     now: () => 0,
+  26|     rng: () => 0,
+  27|   });
+  28|   manager.setStore(store);
+  29|   const code = await manager.createRoomPersisted(1);
+  30|   const sessions = new SessionRegistry(manager, { store: new SnapshotSessionStore(manager) });
+  31|   const human = sessions.join(code, "人类");
+  32|   manager.setReadyFor(code, human.playerId, true);
+  33|   manager.startFor(code, human.playerId);
+  34|   Object.assign(manager.getGame(code)!, advanceSystem(manager.getGame(code)!, {
+  35|     actorId: "SYSTEM", nowMs: 0, drawResult: 0,
+  36|   }).state);
+  37|   await manager.persist(code);
+  38|   const snapshot = manager.exportRoom(code)!;
+  39|   return { dir, store, manager, code, snapshot };
+  40| }
+  41| 
+  42| function undoFor(code: string, snapshot: NonNullable<ReturnType<RoomManager["exportRoom"]>>, expectedVersion: number): ActivationUndo {
+  43|   const beforeGame = structuredClone(snapshot.game)!;
+  44|   beforeGame.version = 0;
+  45|   return {
+  46|     schemaVersion: 1,
+  47|     roomCode: code,
+  48|     expectedVersion,
+  49|     beforeGame,
+  50|     noHumanSinceMs: 77,
+  51|     pauseStartedAtMs: 70,
+  52|     pauseShifted: false,
+  53|     writtenAtMs: 1,
+  54|   };
+  55| }
+  56| 
+  57| async function undoExists(dir: string, code: string): Promise<boolean> {
+  58|   const entries = await readdir(path.join(dir, "rooms", code));
+  59|   return entries.includes("activation-undo.json");
+  60| }
+  61| 
+  62| describe("A 激活跨重启补偿 activation-undo", () => {
+  63|   it("激活已落盘、补偿未执行：loadAll 回到 beforeGame 且 paused=true", async () => {
+  64|     const { dir, store, code, snapshot } = await setup();
+  65|     expect(snapshot.game!.version).toBe(1);
+  66|     await store.writeActivationUndo(code, undoFor(code, snapshot, snapshot.game!.version));
+  67| 
+  68|     const loaded = await store.loadAll();
+  69|     expect(loaded).toHaveLength(1);
+  70|     expect(loaded[0]!.game!.version).toBe(0);
+  71|     expect(loaded[0]!.paused).toBe(true);
+  72|     expect(loaded[0]!.noHumanSinceMs).toBe(77);
+  73|     expect(loaded[0]!.pauseStartedAtMs).toBe(70);
+  74|     expect(await undoExists(dir, code)).toBe(false);
+  75|     // 磁盘权威点也必须回滚，而不是只在内存里。
+  76|     const onDisk = JSON.parse(await readFile(path.join(dir, "rooms", code, "snapshot.json"), "utf8")) as { game: { version: number }; paused: boolean };
+  77|     expect(onDisk.game.version).toBe(0);
+  78|     expect(onDisk.paused).toBe(true);
+  79|   });
+  80| 
+  81|   it("stale undo（版本已推进）只删记录，不改游戏", async () => {
+  82|     const { dir, store, code, snapshot } = await setup();
+  83|     await store.writeActivationUndo(code, undoFor(code, snapshot, snapshot.game!.version + 1));
+  84| 
+  85|     const loaded = await store.loadAll();
+  86|     expect(loaded[0]!.game!.version).toBe(1);
+  87|     expect(await undoExists(dir, code)).toBe(false);
+  88|   });
+  89| 
+  90|   it("正常激活清理后 undo 不存在", async () => {
+  91|     const { dir, manager, code, snapshot } = await setup();
+  92|     await manager.writeActivationUndo(code, undoFor(code, snapshot, snapshot.game!.version));
+  93|     expect(await undoExists(dir, code)).toBe(true);
+  94|     await manager.deleteActivationUndo(code);
+  95|     expect(await undoExists(dir, code)).toBe(false);
+  96| 
+  97|     const loaded = await new FileRoomStore(dir).loadAll();
+  98|     expect(loaded[0]!.game!.version).toBe(1);
+  99|   });
+ 100| 
+ 101|   it("undo 损坏：保留房间并暂停，不删档", async () => {
+ 102|     const { dir, code } = await setup();
+ 103|     await writeFile(path.join(dir, "rooms", code, "activation-undo.json"), "{ not-json", "utf8");
+ 104| 
+ 105|     const loaded = await new FileRoomStore(dir).loadAll();
+ 106|     expect(loaded).toHaveLength(1);
+ 107|     expect(loaded[0]!.paused).toBe(true);
+ 108|     expect(await undoExists(dir, code)).toBe(true);
+ 109|   });
+
+===== apps/server/src/storage/file-store.ts  (行 80-165 / 共557行) =====
+  80|   } finally { await rm(temporary, { force: true }); }
+  81| }
+  82| 
+  83| class UnsupportedSnapshot extends Error {}
+  84| const digest = (s: unknown) => typeof s === 'string' && /^[a-f0-9]{64}$/.test(s);
+  85| export function validateSnapshot(value: unknown, code: string): RoomSnapshot {
+  86|   const s = value as RoomSnapshot;
+  87|   if (s?.schemaVersion !== 1 || (s.rulesVersion !== undefined && s.rulesVersion !== RULES_VERSION) ||
+  88|     (s.protocolVersion !== undefined && s.protocolVersion !== PROTOCOL_VERSION)) throw new UnsupportedSnapshot('存档版本不兼容');
+  89|   if (s.roomCode !== code || !/^\d{4,8}$/.test(code) || !Object.values(ROOM_STATE).includes(s.roomState) ||
+  90|     !Array.isArray(s.players) || !Array.isArray(s.sessions) || !Array.isArray(s.commands) || !Array.isArray(s.usedGameIds)) throw new Error('房间结构无效');
+  91|   if (s.commands.length > 5000 || !Array.isArray(s.lastEvents) || typeof s.paused !== 'boolean') throw new Error('快照集合无效');
+  92|   if ((s.createdAtMs !== undefined && (!Number.isSafeInteger(s.createdAtMs) || s.createdAtMs < 0)) ||
+  93|     (s.noHumanSinceMs !== undefined && s.noHumanSinceMs !== null && (!Number.isSafeInteger(s.noHumanSinceMs) || s.noHumanSinceMs < 0)) ||
+  94|     (s.pauseStartedAtMs !== undefined && s.pauseStartedAtMs !== null && (!Number.isSafeInteger(s.pauseStartedAtMs) || s.pauseStartedAtMs < 0)) ||
+  95|     (s.pauseShifted !== undefined && typeof s.pauseShifted !== 'boolean') ||
+  96|     (s.pausedByNoHuman !== undefined && typeof s.pausedByNoHuman !== 'boolean')) throw new Error('生命周期字段无效');
+  97|   const ids = new Set(), seats = new Set(), tokens = new Set(), recoveries = new Set();
+  98|   const humans = s.players.filter(p => p?.isBot !== true);
+  99|   if (s.players.filter(p => p?.isBot === true).length > BOTS_MAX) throw new Error('AI 座位数量超限');
+ 100|   for (const p of s.players) {
+ 101|     // AI 座位的 tokenDigest 是不可认领的占位串，不要求 64 位摘要；人类仍必须严格校验。
+ 102|     const tokenOk = p?.isBot === true
+ 103|       ? typeof p.tokenDigest === 'string' && p.tokenDigest.length > 0
+ 104|       : digest(p?.tokenDigest);
+ 105|     if (!p || typeof p.playerId !== 'string' || typeof p.nickname !== 'string' || !Number.isInteger(p.seatId) || p.seatId < 1 || p.seatId > 10 ||
+ 106|       (p.isBot !== undefined && typeof p.isBot !== 'boolean') ||
+ 107|       (p.isBot === true && p.playerId !== 'p' + String(p.seatId)) ||
+ 108|       (p.isBot === true
+ 109|         ? (p.botPersonality !== undefined && !isBotPersonality(p.botPersonality))
+ 110|         : p.botPersonality !== undefined) ||
+ 111|       !tokenOk || ids.has(p.playerId) || seats.has(p.seatId) || tokens.has(p.tokenDigest)) throw new Error('座位结构无效');
+ 112|     ids.add(p.playerId); seats.add(p.seatId); tokens.add(p.tokenDigest);
+ 113|   }
+ 114|   // 房主必须是真人；纯 AI 房间（真人尚未入座）允许 hostId 为 null。
+ 115|   if (s.hostId !== null && !humans.some(p => p.playerId === s.hostId)) throw new Error('房主无效');
+ 116|   if ((humans.length > 0) !== (s.hostId !== null) || s.players.length > 10 ||
+ 117|     (s.roomState === ROOM_STATE.LOBBY ? s.game !== null || s.gameId !== null : s.game === null || s.gameId === null || s.players.length < 2)) throw new Error('房间状态不一致');
+ 118|   const sessionIds = new Set();
+ 119|   for (const r of s.sessions) {
+ 120|     const p = s.players.find(p => p.playerId === r.playerId);
+ 121|     if (!p || p.isBot === true || sessionIds.has(r.playerId) || r.roomCode !== code || r.seatId !== p.seatId || r.tokenDigest !== p.tokenDigest ||
+ 122|       !digest(r.tokenDigest) || !digest(r.recoveryDigest) || recoveries.has(r.recoveryDigest) || tokens.has(r.recoveryDigest) ||
+ 123|       (r.pendingDelivery !== undefined && typeof r.pendingDelivery !== 'boolean') ||
+ 124|       (r.pendingDelivery === true && s.roomState !== ROOM_STATE.LOBBY) ||
+ 125|       !Number.isSafeInteger(r.connectionEpoch) || r.connectionEpoch < 0) throw new Error('身份结构无效');
+ 126|     sessionIds.add(r.playerId); recoveries.add(r.recoveryDigest);
+ 127|   }
+ 128|   if (humans.length !== s.sessions.length) throw new Error('缺少身份记录');
+ 129|   if (s.game !== null) {
+ 130|     const g = s.game;
+ 131|     if (g.gameId !== s.gameId || !s.usedGameIds.includes(g.gameId) || !PHASES.includes(g.phase) || !Number.isSafeInteger(g.version) ||
+ 132|       !Number.isSafeInteger(g.eventSeq) || typeof g.phaseInstanceId !== 'string' || !Array.isArray(g.players) ||
+ 133|       !Array.isArray(g.bankLoans) || !Array.isArray(g.privateLoans) || !Array.isArray(g.requests) ||
+ 134|       !['standard','fast'].includes(g.config?.timerMode) || g.players.length !== s.players.length ||
+ 135|       (g.deadlineAt !== null && !Number.isFinite(Date.parse(g.deadlineAt)))) throw new Error('引擎结构无效');
+ 136|     const engineIds = new Set();
+ 137|     for (const p of g.players) {
+ 138|       if (!ids.has(p.playerId) || engineIds.has(p.playerId) || !Number.isSafeInteger(p.cents) || Math.abs(p.cents) > MAX_MONEY_CENTS ||
+ 139|         !s.players.some(r => r.playerId === p.playerId && r.seatId === p.seatId)) throw new Error('名单或金额不匹配');
+ 140|       engineIds.add(p.playerId);
+ 141|     }
+ 142|     const inspectMoney = (v: unknown, key = ''): void => {
+ 143|       if ((key === 'cents' || key.endsWith('Cents')) && (typeof v !== 'number' || !Number.isSafeInteger(v) || Math.abs(v) > MAX_MONEY_CENTS)) throw new Error('账务金额类型无效');
+ 144|       if (v && typeof v === 'object') for (const [k,item] of Object.entries(v)) inspectMoney(item,k);
+ 145|     }; inspectMoney(g);
+ 146|     const amount = (v: unknown) => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 && v <= MAX_MONEY_CENTS;
+ 147|     const finiteTime = (v: unknown) => v === null || (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0);
+ 148|     const validSeat = (v: unknown) => v === null || seats.has(v);
+ 149|     const seatList = (v: unknown) => Array.isArray(v) && new Set(v).size === v.length && v.every(seat=>seats.has(seat));
+ 150|     if (!finiteTime(g.windowDeadlineMs) || !finiteTime(g.dangerDeadlineMs) || !validSeat(g.currentSeatId) || !validSeat(g.dangerSeatId) ||
+ 151|       !seatList(g.taxSeats) || !seatList(g.actedSeats) || !Number.isInteger(g.taxIndex) || g.taxIndex < 0 || g.taxIndex > g.taxSeats.length) throw new Error('阶段窗口或座位无效');
+ 152|     const loanIds = new Set();
+ 153|     for (const loan of [...g.bankLoans,...g.privateLoans]) {
+ 154|       if (typeof loan.loanId !== 'string' || !ids.has(loan.borrowerId) || !amount(loan.principalCents) || !amount(loan.remainingCents) ||
+ 155|         !Number.isSafeInteger(loan.rateBps) || loan.rateBps < 0 || loan.rateBps > 10000 || !Number.isSafeInteger(loan.issuedRound) ||
+ 156|         !Number.isSafeInteger(loan.lastInterestRound) || loanIds.has(loan.loanId)) throw new Error('贷款结构无效');
+ 157|       loanIds.add(loan.loanId);
+ 158|     }
+ 159|     for (const loan of g.bankLoans) if (!['ACTIVE','REPAID','DEFAULTED'].includes(loan.status) || !['NORMAL','OVERDRAFT'].includes(loan.origin) ||
+ 160|       !Number.isSafeInteger(loan.dueRound) || loan.dueRound < loan.issuedRound || !s.players.some(p=>p.playerId===loan.borrowerId&&p.seatId===loan.seatId)) throw new Error('银行贷款结构无效');
+ 161|     for (const loan of g.privateLoans) if (!ids.has(loan.lenderId) || loan.borrowerId===loan.lenderId || !['ACTIVE','REPAID','BAD_DEBT','FROZEN'].includes(loan.status)) throw new Error('私人贷款结构无效');
+ 162|     const requestIds = new Set();
+ 163|     for (const request of g.requests) if (!ids.has(request.borrowerId) || !ids.has(request.lenderId) || !amount(request.principalCents) ||
+ 164|       !Number.isSafeInteger(request.deadlineMs) || request.deadlineMs < 0 || typeof request.requestId !== 'string' || requestIds.has(request.requestId) ||
+ 165|       !['PENDING','ACCEPTED','REFUSED','EXPIRED','CANCELLED','FAILED'].includes(request.status)) throw new Error('请求结构无效');
+
+===== apps/server/src/storage/file-store.ts  (行 200-300 / 共557行) =====
+ 200|     let renamed = false;
+ 201|     try {
+ 202|       await writeSnapshotAtomic(path.join(this.roomDir(code), 'snapshot.json'), snapshot, this.options); renamed = true;
+ 203|       if (events.length) {
+ 204|         if (this.options.appendFailAt === 'open') throw new Error('injected append open');
+ 205|         const h = await open(path.join(this.roomDir(code), 'events.ndjson'), 'a');
+ 206|         try {
+ 207|           if (this.options.appendFailAt === 'writeFile') throw new Error('injected append writeFile');
+ 208|           await h.writeFile(JSON.stringify({ seq: snapshot.game?.eventSeq ?? 0, gameId: snapshot.gameId, at: snapshot.savedAt, events }) + '\n');
+ 209|           if (this.options.appendFailAt === 'sync') throw new Error('injected append sync');
+ 210|           await h.sync();
+ 211|         }
+ 212|         finally { await h.close(); }
+ 213|       }
+ 214|     } catch (error) { throw new RoomCommitError(renamed || (error instanceof AtomicWriteError && error.committed) ? structuredClone(snapshot) : null, error); }
+ 215|   }
+ 216|   async deleteRoom(code: string): Promise<void> {
+ 217|     const tomb = path.join(this.root, '.tmp', 'deleted-' + randomUUID());
+ 218|     await mkdir(path.dirname(tomb), { recursive: true });
+ 219|     try { await rename(this.roomDir(code), tomb); } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return; throw e; }
+ 220|     await rm(tomb, { recursive: true, force: true }).catch(() => this.warn('已删除房间的回收目录待清理'));
+ 221|   }
+ 222|   private undoPath(code: string) { return path.join(this.roomDir(code), 'activation-undo.json'); }
+ 223|   /** 激活前写补偿记录；专用 backup=false，避免污染 snapshot.bak.json。 */
+ 224|   async writeActivationUndo(code: string, undo: ActivationUndo): Promise<void> {
+ 225|     if (undo?.schemaVersion !== 1 || undo.roomCode !== code
+ 226|       || !Number.isSafeInteger(undo.expectedVersion) || !Number.isSafeInteger(undo.writtenAtMs)) {
+ 227|       throw new Error('激活补偿记录无效');
+ 228|     }
+ 229|     await writeSnapshotAtomic(this.undoPath(code), undo, { backup: false, warn: this.options.warn });
+ 230|   }
+ 231|   async deleteActivationUndo(code: string): Promise<void> {
+ 232|     await rm(this.undoPath(code), { force: true });
+ 233|   }
+ 234|   /**
+ 235|    * 重启时应用激活补偿：磁盘版本仍等于 expectedVersion 才回滚到 beforeGame；
+ 236|    * 版本已推进（后续合法命令）或激活没落盘则只删 undo；undo 损坏则保留房间并暂停。
+ 237|    */
+ 238|   private async applyActivationUndo(code: string, snapshot: RoomSnapshot): Promise<RoomSnapshot> {
+ 239|     const undoPath = this.undoPath(code);
+ 240|     let raw: string;
+ 241|     try { raw = await readFile(undoPath, 'utf8'); }
+ 242|     catch (error) {
+ 243|       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return snapshot;
+ 244|       this.warn('房间 ' + code + ' 激活补偿记录读取失败，保留房间并保持暂停');
+ 245|       snapshot.paused = true;
+ 246|       return snapshot;
+ 247|     }
+ 248|     let undo: ActivationUndo;
+ 249|     try {
+ 250|       undo = JSON.parse(raw) as ActivationUndo;
+ 251|       if (undo?.schemaVersion !== 1 || undo.roomCode !== code || !Number.isSafeInteger(undo.expectedVersion)
+ 252|         || !Number.isSafeInteger(undo.writtenAtMs)) throw new Error('激活补偿记录无效');
+ 253|     } catch {
+ 254|       // 损坏的 undo 不删档：保留记录与房间，供人工修复。
+ 255|       this.warn('房间 ' + code + ' 激活补偿记录损坏，保留房间并保持暂停');
+ 256|       snapshot.paused = true;
+ 257|       return snapshot;
+ 258|     }
+ 259|     if (snapshot.game === null || snapshot.game.version !== undo.expectedVersion) {
+ 260|       await rm(undoPath, { force: true }).catch(() => this.warn('房间 ' + code + ' 过期激活补偿记录待清理'));
+ 261|       return snapshot;
+ 262|     }
+ 263|     if (undo.beforeGame === null || typeof undo.beforeGame !== 'object') {
+ 264|       this.warn('房间 ' + code + ' 激活补偿缺少 beforeGame，保留房间并保持暂停');
+ 265|       snapshot.paused = true;
+ 266|       return snapshot;
+ 267|     }
+ 268|     const restored: RoomSnapshot = {
+ 269|       ...snapshot,
+ 270|       game: undo.beforeGame,
+ 271|       paused: true,
+ 272|       noHumanSinceMs: undo.noHumanSinceMs,
+ 273|       pauseStartedAtMs: undo.pauseStartedAtMs,
+ 274|       pauseShifted: undo.pauseShifted,
+ 275|       players: snapshot.players.map(player => player.isBot === true ? player : { ...player, online: false }),
+ 276|     };
+ 277|     try {
+ 278|       validateSnapshot(restored, code);
+ 279|       await writeSnapshotAtomic(path.join(this.roomDir(code), 'snapshot.json'), restored, this.options);
+ 280|       await rm(undoPath, { force: true });
+ 281|       this.warn('房间 ' + code + ' 已按激活补偿回滚到 version ' + String(restored.game?.version ?? -1));
+ 282|     } catch {
+ 283|       // 写盘失败：保留 undo，下一次启动继续尝试；内存中保持暂停。
+ 284|       this.warn('房间 ' + code + ' 激活补偿回滚写盘失败，保留补偿记录并保持暂停');
+ 285|       restored.paused = true;
+ 286|     }
+ 287|     return restored;
+ 288|   }
+ 289|   /** Archive operations share a store-wide queue so retention cannot race a restore. */
+ 290|   private serializeArchive<T>(task: () => Promise<T>): Promise<T> {
+ 291|     const result = this.archiveTail.then(task);
+ 292|     this.archiveTail = result.then(() => undefined, () => undefined);
+ 293|     return result;
+ 294|   }
+ 295| 
+ 296|   private archivePolicy(): ArchivePolicy {
+ 297|     const policy = { ...DEFAULT_ARCHIVE_POLICY, ...this.options.archivePolicy };
+ 298|     for (const value of Object.values(policy)) {
+ 299|       if (!Number.isSafeInteger(value) || value <= 0) throw new Error('归档保留参数必须为正安全整数');
+ 300|     }
+
+===== apps/server/src/storage/file-store.ts  (行 410-546 / 共557行) =====
+ 410|   }
+ 411| 
+ 412|   private async pruneArchives(nowMs: number): Promise<ArchiveCleanupResult> {
+ 413|     if (!Number.isSafeInteger(nowMs) || nowMs < 0) throw new Error('归档清理时钟无效');
+ 414|     const policy = this.archivePolicy();
+ 415|     const archiveRoot = path.join(this.root, 'archive');
+ 416|     const roomsRoot = path.join(this.root, 'rooms');
+ 417|     await mkdir(archiveRoot, { recursive: true });
+ 418|     await mkdir(roomsRoot, { recursive: true });
+ 419|     const result: ArchiveCleanupResult = { removed: [], failed: [], quarantined: [] };
+ 420|     // 清理跨盘归档/恢复留下的隐藏残留目录；只处理超过 1 小时的，避免误删进行中的操作。
+ 421|     for (const root of [archiveRoot, roomsRoot]) {
+ 422|       let entries;
+ 423|       try { entries = await readdir(root, { withFileTypes: true }); }
+ 424|       catch (error) { result.failed.push({ path: root, message: String(error) }); this.warn('残留目录扫描失败，保留 ' + root); continue; }
+ 425|       for (const entry of entries) {
+ 426|         if (!entry.isDirectory() || !/^\.(?:archived-source|staging|restore)-/.test(entry.name)) continue;
+ 427|         const directory = path.join(root, entry.name);
+ 428|         try {
+ 429|           const info = await lstat(directory);
+ 430|           if (nowMs - info.mtimeMs < ARCHIVE_RESIDUE_TTL_MS) continue;
+ 431|           await rm(directory, { recursive: true, force: true });
+ 432|           result.removed.push(directory);
+ 433|         } catch (error) {
+ 434|           result.failed.push({ path: directory, message: String(error) });
+ 435|           this.warn('归档残留目录清理失败，保留 ' + entry.name);
+ 436|         }
+ 437|       }
+ 438|     }
+ 439|     const archives: Array<{ directory: string; archivedAtMs: number; size: number }> = [];
+ 440|     for (const name of await readdir(archiveRoot)) {
+ 441|       if (!/^\d{4,8}(?:-[a-zA-Z0-9-]+)?$/.test(name)) continue;
+ 442|       const directory = path.join(archiveRoot, name);
+ 443|       try {
+ 444|         let manifest: ArchiveManifest;
+ 445|         try { manifest = JSON.parse(await readFile(path.join(directory, 'archive.json'), 'utf8')) as ArchiveManifest; }
+ 446|         catch (error) {
+ 447|           if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+ 448|           const code = name.split('-')[0]!;
+ 449|           await this.validateArchive(directory, code);
+ 450|           // Old archives lack a reliable archive date. Start a full retention window on first maintenance.
+ 451|           manifest = { schemaVersion: 1, roomCode: code, archivedAtMs: nowMs, files: await archiveFiles(directory) };
+ 452|           await writeArchiveJson(path.join(directory, 'archive.json'), manifest);
+ 453|         }
+ 454|         if (manifest.schemaVersion !== 1 || !Number.isSafeInteger(manifest.archivedAtMs) || manifest.archivedAtMs < 0) throw new Error('归档清单无效');
+ 455|         const files = await archiveFiles(directory, '', false);
+ 456|         const size = files.reduce((sum, file) => sum + file.size, 0) + (await lstat(path.join(directory, 'archive.json'))).size;
+ 457|         archives.push({ directory, archivedAtMs: manifest.archivedAtMs, size });
+ 458|         this.archiveFailures.delete(directory);
+ 459|       } catch (error) {
+ 460|         const failures = (this.archiveFailures.get(directory) ?? 0) + 1;
+ 461|         this.archiveFailures.set(directory, failures);
+ 462|         if (failures >= ARCHIVE_QUARANTINE_FAILURES) {
+ 463|           try {
+ 464|             const quarantineRoot = path.join(archiveRoot, '.quarantine');
+ 465|             await mkdir(quarantineRoot, { recursive: true });
+ 466|             let target = path.join(quarantineRoot, name);
+ 467|             if (await exists(target)) target = path.join(quarantineRoot, name + '-' + String(nowMs) + '-' + randomUUID());
+ 468|             await rename(directory, target);
+ 469|             result.quarantined.push(target);
+ 470|             this.archiveFailures.delete(directory);
+ 471|             this.warn('归档连续读取失败，已隔离到 ' + target);
+ 472|           } catch (quarantineError) {
+ 473|             result.failed.push({ path: directory, message: String(quarantineError) });
+ 474|             this.warn('归档隔离失败，保留 ' + name);
+ 475|           }
+ 476|         } else {
+ 477|           result.failed.push({ path: directory, message: String(error) });
+ 478|           this.warn('归档清单读取失败，保留 ' + name);
+ 479|         }
+ 480|       }
+ 481|     }
+ 482|     archives.sort((a, b) => a.archivedAtMs - b.archivedAtMs || a.directory.localeCompare(b.directory));
+ 483|     let count = archives.length;
+ 484|     // 隔离区占用计入容量但不参与 FIFO 删除。
+ 485|     let quarantinedBytes = 0;
+ 486|     try {
+ 487|       for (const name of await readdir(path.join(archiveRoot, '.quarantine'))) {
+ 488|         try { quarantinedBytes += (await archiveFiles(path.join(archiveRoot, '.quarantine', name), '', false)).reduce((sum, file) => sum + file.size, 0); }
+ 489|         catch { this.warn('隔离归档容量统计失败，跳过 ' + name); }
+ 490|       }
+ 491|     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') this.warn('隔离区容量统计失败'); }
+ 492|     let bytes = archives.reduce((sum, archive) => sum + archive.size, 0) + quarantinedBytes;
+ 493|     for (const archive of archives) {
+ 494|       if (nowMs - archive.archivedAtMs < policy.retentionMs && count <= policy.maxCount && bytes <= policy.maxBytes) continue;
+ 495|       try {
+ 496|         await rm(archive.directory, { recursive: true, force: true });
+ 497|         result.removed.push(archive.directory);
+ 498|         count -= 1;
+ 499|         bytes -= archive.size;
+ 500|       } catch (error) {
+ 501|         result.failed.push({ path: archive.directory, message: String(error) });
+ 502|         this.warn('归档清理失败，保留 ' + path.basename(archive.directory));
+ 503|       }
+ 504|     }
+ 505|     return result;
+ 506|   }
+ 507|   warn(message: string) {
+ 508|     try { (this.options.warn ?? console.warn)(message); }
+ 509|     catch { /* A diagnostic callback cannot roll back a committed archive. */ }
+ 510|   }
+ 511|   async loadAll(): Promise<RoomSnapshot[]> {
+ 512|     await this.cleanupArchives();
+ 513|     await mkdir(path.join(this.root, 'rooms'), { recursive: true });
+ 514|     const result: RoomSnapshot[] = [];
+ 515|     for (const code of await readdir(path.join(this.root, 'rooms'))) {
+ 516|       if (!/^\d{4,8}$/.test(code)) continue;
+ 517|       let s: RoomSnapshot;
+ 518|       try {
+ 519|         try { s = validateSnapshot(JSON.parse(await readFile(path.join(this.roomDir(code), 'snapshot.json'), 'utf8')), code); }
+ 520|         catch (e) {
+ 521|           if (e instanceof UnsupportedSnapshot) throw e;
+ 522|           s = validateSnapshot(JSON.parse(await readFile(path.join(this.roomDir(code), 'snapshot.bak.json'), 'utf8')), code);
+ 523|           this.warn('房间 ' + code + ' 使用备份快照恢复');
+ 524|           // 坏主文件不能在下次提交时覆盖唯一好bak。先保留坏文件，再从好bak修复权威点。
+ 525|           try { await rename(path.join(this.roomDir(code),'snapshot.json'),path.join(this.roomDir(code),'invalid-current-' + randomUUID() + '.json')); }
+ 526|           catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+ 527|           await writeSnapshotAtomic(path.join(this.roomDir(code),'snapshot.json'),s);
+ 528|         }
+ 529|       } catch {
+ 530|         const dest = path.join(this.root, 'rooms', 'corrupt-' + Date.now() + '-' + code + '-' + randomUUID());
+ 531|         await rename(this.roomDir(code), dest); this.warn('房间 ' + code + ' 存档无效，已隔离到 ' + path.basename(dest)); continue;
+ 532|       }
+ 533|       if (discardPendingDeliveries(s)) await writeSnapshotAtomic(path.join(this.roomDir(code),'snapshot.json'),s);
+ 534|       s = await this.applyActivationUndo(code, s);
+ 535|       await this.checkAudit(code, s); s.paused = true;
+ 536|       // AI 座位没有连接，恢复后仍应显示在线；只有真人座位需要等待重连。
+ 537|       s.players.forEach(p => { if (p.isBot !== true) p.online = false; });
+ 538|       result.push(s);
+ 539|     }
+ 540|     return result;
+ 541|   }
+ 542|   private async checkAudit(code: string, snapshot: RoomSnapshot) {
+ 543|     let last = 0;
+ 544|     try {
+ 545|       const content = await readFile(path.join(this.roomDir(code), 'events.ndjson'), 'utf8');
+ 546|       for (const line of content.split('\n').filter(Boolean)) {
+
+===== apps/server/src/storage/archive-policy.ts  (行 1-23 / 共23行) =====
+   1| /** Archive maintenance settings are server operations limits, measured per data root. */
+   2| export const ARCHIVE_RETENTION_MS = 30 * 24 * 60 * 60_000;
+   3| export const ARCHIVE_MAX_COUNT = 100;
+   4| export const ARCHIVE_MAX_BYTES = 1024 * 1024 * 1024;
+   5| 
+   6| /** 失败归档副本 / 暂存 / 恢复残留目录的最短保留时间；超过后清理。 */
+   7| export const ARCHIVE_RESIDUE_TTL_MS = 60 * 60_000;
+   8| 
+   9| /** 同一归档连续读取失败多少次后隔离到 archive/.quarantine/。 */
+  10| export const ARCHIVE_QUARANTINE_FAILURES = 3;
+  11| 
+  12| export interface ArchivePolicy {
+  13|   retentionMs: number;
+  14|   maxCount: number;
+  15|   maxBytes: number;
+  16| }
+  17| 
+  18| export const DEFAULT_ARCHIVE_POLICY: Readonly<ArchivePolicy> = {
+  19|   retentionMs: ARCHIVE_RETENTION_MS,
+  20|   maxCount: ARCHIVE_MAX_COUNT,
+  21|   maxBytes: ARCHIVE_MAX_BYTES,
+  22| };
+  23| 
+
+===== apps/server/src/storage/atomic.ts  (行 1-39 / 共40行) =====
+   1| import { randomUUID } from 'node:crypto';
+   2| import { mkdir, open, copyFile, rename, rm } from 'node:fs/promises';
+   3| import path from 'node:path';
+   4| export interface AtomicOptions {
+   5|   failAt?: 'before_rename' | 'after_rename';
+   6|   checkpoint?: (point: 'before_rename' | 'after_rename') => void | Promise<void>;
+   7|   failCleanup?: boolean;
+   8|   /** 默认 true；专用的辅助文件（如 activation-undo）不应污染 snapshot.bak.json。 */
+   9|   backup?: boolean;
+  10|   warn?: (message: string) => void;
+  11| }
+  12| export class AtomicWriteError extends Error {
+  13|   constructor(readonly committed: boolean, options: ErrorOptions) { super('快照提交失败', options); }
+  14| }
+  15| export async function writeSnapshotAtomic(filePath: string, value: unknown, options: AtomicOptions = {}): Promise<void> {
+  16|   const text = JSON.stringify(value, null, 2) + '\n';
+  17|   const directory = path.dirname(filePath);
+  18|   const tempDir = path.resolve(directory, '../../.tmp');
+  19|   await mkdir(directory, { recursive: true }); await mkdir(tempDir, { recursive: true });
+  20|   const temp = path.join(tempDir, randomUUID() + '.json');
+  21|   let committed = false;
+  22|   try {
+  23|     const handle = await open(temp, 'wx');
+  24|     try { await handle.writeFile(text, 'utf8'); await handle.sync(); } finally { await handle.close(); }
+  25|     if (options.backup !== false) {
+  26|       try { await copyFile(filePath, path.join(directory, 'snapshot.bak.json')); }
+  27|       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  28|     }
+  29|     await options.checkpoint?.('before_rename');
+  30|     if (options.failAt === 'before_rename') throw new Error('injected before_rename');
+  31|     await rename(temp, filePath); committed = true;
+  32|     await options.checkpoint?.('after_rename');
+  33|     if (options.failAt === 'after_rename') throw new Error('injected after_rename');
+  34|   } catch (cause) { throw new AtomicWriteError(committed, { cause }); }
+  35|   finally {
+  36|     try { if (options.failCleanup) throw new Error('injected cleanup'); await rm(temp, { force: true }); }
+  37|     catch { try { (options.warn ?? console.warn)('存档临时文件清理失败'); } catch { /* 诊断不能改变提交结果。 */ } }
+  38|   }
+  39| }
+
+===== apps/server/src/ws.ts  (行 340-400 / 共679行) =====
+ 340|         if (!delivered || conn.closed) { await manager.discardUndelivered(roomCode); return; }
+ 341|       }
+ 342|       if (conn.closed || !delivered) {
+ 343|         await manager.transact(roomCode, () => sessions.disconnect(joined));
+ 344|         releaseSupersededOwner(joined);
+ 345|         return;
+ 346|       }
+ 347|       const beforeActivation = manager.exportRoom(roomCode)!;
+ 348|       try {
+ 349|         const activate = async (result?: TransitionResult) => {
+ 350|           if (conn.closed || conn.replaced) throw new Error("连接交付已中断");
+ 351|           const game = manager.getGame(roomCode);
+ 352|           // 激活前写跨重启补偿：rename 已提交但补偿失败时，重启回到激活前。
+ 353|           if (game !== null) {
+ 354|             await manager.writeActivationUndo(roomCode, {
+ 355|               schemaVersion: 1,
+ 356|               roomCode,
+ 357|               expectedVersion: result?.state.version ?? game.version,
+ 358|               beforeGame: beforeActivation.game,
+ 359|               noHumanSinceMs: beforeActivation.noHumanSinceMs ?? null,
+ 360|               pauseStartedAtMs: beforeActivation.pauseStartedAtMs ?? null,
+ 361|               pauseShifted: beforeActivation.pauseShifted ?? false,
+ 362|               writtenAtMs: now(),
+ 363|             });
+ 364|           }
+ 365|           await manager.transact(roomCode, () => {
+ 366|             if (conn.closed || conn.replaced) throw new Error("连接交付已中断");
+ 367|             if (result) manager.applyPauseShift(roomCode, result);
+ 368|             if (freshJoin) sessions.delivery(joined, false);
+ 369|             manager.confirmOnline(roomCode, joined.playerId);
+ 370|           });
+ 371|           await manager.deleteActivationUndo(roomCode);
+ 372|         };
+ 373|         if (!manager.isPaused(roomCode) && manager.getGame(roomCode) !== null
+ 374|           && manager.isNoHumanOnline(roomCode) && !manager.isPauseShifted(roomCode)) {
+ 375|           const shifted = await processor.resumeFromPauseInQueue(roomCode, (_code, result) => activate(result));
+ 376|           if (!shifted) {
+ 377|             console.warn("[richman] 房间 " + roomCode + " 暂停时间线未恢复，保持暂停");
+ 378|             await manager.transact(roomCode, () => sessions.disconnect(joined));
+ 379|             sendError(conn, "ERROR_PAUSED", "恢复时间线未完成，本局保持暂停");
+ 380|             return;
+ 381|           }
+ 382|         } else await activate();
+ 383|       } catch (error) {
+ 384|         if (freshJoin) await manager.discardUndelivered(roomCode);
+ 385|         else {
+ 386|           try { await manager.rollbackConnectionActivation(beforeActivation, joined.playerId); }
+ 387|           catch (rollbackError) { console.warn("[richman] 房间 " + roomCode + " 恢复补偿写盘失败", rollbackError); }
+ 388|         }
+ 389|         console.warn("[richman] 房间 " + roomCode + " 恢复时间线失败，保持暂停", error);
+ 390|         sendError(conn, "ERROR_PAUSED", "恢复时间线失败，本局保持暂停，请重试");
+ 391|         return;
+ 392|       }
+ 393|       if (conn.closed || conn.replaced) {
+ 394|         await manager.rollbackConnectionActivation(beforeActivation, joined.playerId);
+ 395|         releaseSupersededOwner(joined);
+ 396|         return;
+ 397|       }
+ 398|       bind(conn, joined, epoch);
+ 399|       const room = manager.getRoom(roomCode);
+ 400|       if (room) send(conn, { type: "room", players: room.players, hostId: room.hostId, state: room.state, paused: room.paused });
+
+===== apps/server/src/rooms/manager.ts  (行 240-270 / 共833行) =====
+ 240|   private storageFailed(code: string, before: RoomSnapshot | null, error: unknown): never {
+ 241|     if (before) this.restoreRoom(before); else this.rooms.delete(code);
+ 242|     if (error instanceof RoomCommitError && error.durable) this.durablePending.set(code, error.durable);
+ 243|     const r = this.rooms.get(code); if (r) r.paused = true;
+ 244|     this.emit({ type: 'storage_error', roomCode: code });
+ 245|     if (r) this.emit({ type: 'room', roomCode: code, room: this.viewOf(r) });
+ 246|     throw new LobbyError('ERROR_PAUSED', '存档写入失败，本局已暂停，请房主重试或联系管理员');
+ 247|   }
+ 248|   async persist(code: string): Promise<void> { const s = this.exportRoom(code); if (this.store && s) await this.store.commitRoom(code, s, []); }
+ 249|   /** 所有身份/大厅写入共享所在房间队列；提交前缓冲事件，失败恢复完整旧记录。 */
+ 250|   async transact<T>(code: string, action: () => T, publish?: () => void): Promise<T> {
+ 251|     this.reconcileDurable(code);
+ 252|     const before = this.exportRoom(code); this.deferred.set(code, []);
+ 253|     let committed: RoomSnapshot | null | undefined;
+ 254|     try {
+ 255|       const result = action();
+ 256|       const candidate = this.exportRoom(code);
+ 257|       // 候选已捕获，await前撤回共享可见态，身份与账务都只在持久成功后发布。
+ 258|       if (before) this.restoreRoom(before); else this.rooms.delete(code);
+ 259|       if (this.store) { if (candidate) await this.store.commitRoom(code, candidate, []); else await this.store.deleteRoom(code); }
+ 260|       committed = candidate;
+ 261|       if (candidate) this.restoreRoom(candidate); else {
+ 262|         this.rooms.delete(code); for (const [key, roomCode] of this.sessions) if (roomCode === code) this.sessions.delete(key);
+ 263|       }
+ 264|       const events = this.deferred.get(code)!; this.deferred.delete(code);
+ 265|       publish?.();
+ 266|       for (const event of events) this.emit(event);
+ 267|       return result;
+ 268|     } catch (error) {
+ 269|       this.deferred.delete(code);
+ 270|       if (committed !== undefined) {
+
+===== apps/server/src/rooms/manager.ts  (行 400-440 / 共833行) =====
+ 400|   }
+ 401| 
+ 402|   async rollbackConnectionActivation(before: RoomSnapshot, playerId: string): Promise<void> {
+ 403|     this.reconcileDurable(before.roomCode);
+ 404|     const current = this.exportRoom(before.roomCode);
+ 405|     if (!current) return;
+ 406|     // Retain the newly authenticated identity and epoch while compensating only activation.
+ 407|     const rollback: RoomSnapshot = { ...current, game: before.game, lastEvents: before.lastEvents,
+ 408|       noHumanSinceMs: before.noHumanSinceMs, pauseStartedAtMs: before.pauseStartedAtMs,
+ 409|       pauseShifted: before.pauseStartedAtMs == null ? false : before.pauseShifted,
+ 410|       players: current.players.map(player => player.playerId === playerId ? { ...player, online: false } : player) };
+ 411|     try { await this.transact(before.roomCode, () => this.restoreRoom(rollback)); }
+ 412|     catch (error) { this.restoreRoom({ ...rollback, paused: true }); throw error; }
+ 413|   }
+ 414| 
+ 415|   async cleanupArchives(nowMs = this.offlineNow()): Promise<void> { await this.store?.cleanupArchives?.(nowMs); }
+ 416| 
+ 417|   /** 激活前写跨重启补偿记录；没有持久化存储时无需写。 */
+ 418|   async writeActivationUndo(roomCode: string, undo: ActivationUndo): Promise<void> {
+ 419|     if (this.store?.writeActivationUndo === undefined) return;
+ 420|     await this.store.writeActivationUndo(roomCode, undo);
+ 421|   }
+ 422| 
+ 423|   /** 激活事务成功后的清理；删除失败只告警，重启时由 undo 版本检查兜底。 */
+ 424|   async deleteActivationUndo(roomCode: string): Promise<void> {
+ 425|     if (this.store?.deleteActivationUndo === undefined) return;
+ 426|     try { await this.store.deleteActivationUndo(roomCode); }
+ 427|     catch (error) { console.warn('[richman] 房间 ' + roomCode + ' 激活补偿记录待清理', error); }
+ 428|   }
+ 429| 
+ 430|   /** 生命周期巡检（删除）：只有纯 AI/空大厅会直接删除。 */
+ 431|   reclaimCandidates(nowMs = this.now()): string[] {
+ 432|     return [...this.rooms.values()]
+ 433|       .filter((room) => this.shouldReclaim(room, nowMs))
+ 434|       .map((room) => room.roomCode)
+ 435|       .sort();
+ 436|   }
+ 437| 
+ 438|   /** 生命周期巡检（归档）：有存档价值的房间只归档，不删除。 */
+ 439|   archiveCandidates(nowMs = this.offlineNow()): string[] {
+ 440|     return [...this.rooms.values()]
+
+===== apps/server/src/rooms/manager.ts  (行 760-810 / 共833行) =====
+ 760|     const safe = Math.min(BOT_PERSONALITIES.length - 1, Math.max(0, index));
+ 761|     return BOT_PERSONALITIES[safe]!;
+ 762|   }
+ 763| 
+ 764|   private onlineHumanCount(room: RoomRecord): number {
+ 765|     return room.players.filter((player) => player.isBot !== true && player.online).length;
+ 766|   }
+ 767| 
+ 768|   /** 真人上线：解除无人在线暂停；LOBBY 也清除离线计时，重连后 TTL 不再累计。 */
+ 769|   private noteHumanOnline(room: RoomRecord): void {
+ 770|     if (this.onlineHumanCount(room) === 0) return;
+ 771|     room.noHumanSinceMs = null;
+ 772|     room.pauseStartedAtMs = null;
+ 773|     if (room.state === ROOM_STATE.PLAYING && room.game !== null) room.pausedByNoHuman = false;
+ 774|   }
+ 775| 
+ 776|   /** 最后一位真人离线：记录离线起点；PLAYING 同时暂停推进，重复断线不刷新起点。 */
+ 777|   private noteHumanOffline(room: RoomRecord): void {
+ 778|     if (this.onlineHumanCount(room) > 0) return;
+ 779|     if (room.pauseStartedAtMs === null) {
+ 780|       room.pauseStartedAtMs = this.offlineNow();
+ 781|       room.noHumanSinceMs = room.pauseStartedAtMs;
+ 782|       room.pauseShifted = false;
+ 783|     }
+ 784|     if (room.state === ROOM_STATE.PLAYING && room.game !== null) room.pausedByNoHuman = true;
+ 785|   }
+ 786| 
+ 787|   /** 删除：只有从未有真人入座的 LOBBY（纯 AI/空房）。 */
+ 788|   private shouldReclaim(room: RoomRecord, nowMs: number): boolean {
+ 789|     const humans = room.players.filter((player) => player.isBot !== true);
+ 790|     return room.state === ROOM_STATE.LOBBY && humans.length === 0
+ 791|       && nowMs - room.createdAtMs >= AI_LOBBY_TTL_MS;
+ 792|   }
+ 793| 
+ 794|   /** 归档：有真人座位的离线大厅，或开局后无真人暂停超过归档期；永不物理删除对局。 */
+ 795|   private shouldArchive(room: RoomRecord, nowMs: number): boolean {
+ 796|     const humans = room.players.filter((player) => player.isBot !== true);
+ 797|     if (room.state === ROOM_STATE.LOBBY) {
+ 798|       return humans.length > 0 && this.onlineHumanCount(room) === 0 && room.pauseStartedAtMs !== null
+ 799|         && nowMs - room.pauseStartedAtMs >= LOBBY_OFFLINE_ARCHIVE_MS;
+ 800|     }
+ 801|     if (room.state === ROOM_STATE.PLAYING) {
+ 802|       return room.pausedByNoHuman && room.pauseStartedAtMs !== null
+ 803|         && nowMs - room.pauseStartedAtMs >= ROOM_PAUSE_ARCHIVE_MS;
+ 804|     }
+ 805|     return false;
+ 806|   }
+ 807| 
+ 808|   private viewOf(room: RoomRecord): RoomView {
+ 809|     return {
+ 810|       paused: room.paused,

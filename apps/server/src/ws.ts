@@ -3,7 +3,7 @@ import type { Duplex } from "node:stream";
 import { randomBytes, createHash } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import type { RawData } from "ws";
-import { ClientGameCommandSchema, ClientLobbyMessageSchema, RULES, SERVER_DEFAULTS } from "@richman/shared";
+import { ClientGameCommandSchema, ClientLobbyMessageSchema, DEFAULT_BOT_PERSONALITY, RULES, SERVER_DEFAULTS } from "@richman/shared";
 import type { GameEvent, LobbyErrorCode, ServerLobbyMessage, TransitionResult } from "@richman/shared";
 import { SNAPSHOT_SCHEMA_VERSION, eventsForPlayer, getPlayerView } from "@richman/game-core";
 import type { EngineState } from "@richman/game-core";
@@ -14,6 +14,8 @@ import type { SessionIdentity, SessionStore } from "./rooms/session.js";
 import { GameCommandProcessor, RoomCommandQueue } from "./rooms/command-queue.js";
 import type { CommandResultStore, CommandResultRecord } from "./rooms/command-queue.js";
 import { RoomScheduler } from "./rooms/scheduler.js";
+import { LIFECYCLE_SWEEP_MS } from "./rooms/lifecycle.js";
+import { BotDriver } from "./bots/driver.js";
 import {
   clientIp,
   createSecurityRuntime,
@@ -182,10 +184,25 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
     const identity = conn.identity!, state = manager.getGame(identity.roomCode);
     if (state === null) return;
     const pendingDueLoan = state.bankLoans.find(loan => loan.loanId === state.pendingDueLoanId);
+    const view = getPlayerView(state, identity.playerId, new Date(now()));
+    // AI 标记与人格来自大厅成员，引擎不参与；只给客户端显示用，不进入规则判定。
+    const bots = new Map((manager.getRoom(identity.roomCode)?.players ?? [])
+      .filter(player => player.isBot === true)
+      .map(player => [player.playerId, player.botPersonality ?? DEFAULT_BOT_PERSONALITY] as const));
+    const withBots = {
+      ...view,
+      me: bots.has(view.me.playerId)
+        ? { ...view.me, isBot: true, botPersonality: bots.get(view.me.playerId) }
+        : view.me,
+      publicPlayers: view.publicPlayers.map(player =>
+        bots.has(player.playerId)
+          ? { ...player, isBot: true, botPersonality: bots.get(player.playerId) }
+          : player),
+    };
     send(conn, { type: "snapshot", view: wireCopy({
       schemaVersion: SNAPSHOT_SCHEMA_VERSION,
       paused: manager.isPaused(identity.roomCode),
-      ...getPlayerView(state, identity.playerId, new Date(now())),
+      ...withBots,
       phaseInstanceId: state.phaseInstanceId, eventSeq: state.eventSeq,
       currentSeatId: state.currentSeatId, actedSeats: [...state.actedSeats],
       pendingDueLoanId: pendingDueLoan?.borrowerId === identity.playerId ? pendingDueLoan.loanId : null,
@@ -202,13 +219,26 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
       if (events.length) send(conn, { type: "events", gameId: state.gameId, gameVersion: state.version, events: wireCopy(events) });
     }
     scheduler.schedule(roomCode);
+    botDriver?.notify(roomCode);
   };
-  const scheduler = new RoomScheduler({ queue, getState: code => manager.isPaused(code) ? null : manager.getGame(code), commit, now,
+  const scheduler = new RoomScheduler({ queue, getState: code => manager.isPaused(code) || manager.isNoHumanOnline(code) ? null : manager.getGame(code), commit, now,
     onError: (_error,code) => manager.pauseRoom(code,'系统推进失败，本局已暂停，请联系管理员') });
   const commandStore: CommandResultStore = options.commandStore ?? { get: key => manager.getCommand(key), set: (key, value) => manager.setCommand(key, value) };
   const processor = new GameCommandProcessor({ queue, getState: code => manager.getGame(code), commit,
-    advance: code => scheduler.advanceDue(code), now, store: commandStore, atomicCommit: true, isPaused: code => manager.isPaused(code),
+    advance: code => scheduler.advanceDue(code), now, store: commandStore, atomicCommit: true,
+    isPaused: code => manager.isPaused(code) || manager.isNoHumanOnline(code),
+    pauseSince: code => manager.getPauseSince(code),
+    markPauseShifted: code => manager.markPauseShifted(code),
     onInvariant: code => manager.pauseRoom(code,'规则不变量失败，本局已暂停，请联系管理员') });
+  // AI 与真人共用同一个 processor：命令鉴权、幂等、审计与超时完全一致。
+  let botDriver: BotDriver | null = null;
+  const botDriverRef = new BotDriver({
+    manager,
+    execute: (roomCode, botPlayerId, command) => processor.execute(roomCode, botPlayerId, command),
+    now,
+    onError: (error, roomCode) => console.error("AI 行动失败（房间 " + roomCode + "）：", error),
+  });
+  botDriver = botDriverRef;
   const broadcast = (event: RoomManagerEvent): void => {
     for (const conn of connections.values()) {
       if (!current(conn) || conn.identity!.roomCode !== event.roomCode) continue;
@@ -283,9 +313,9 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
       let epoch: number;
       try {
       ({ joined, epoch } = await manager.transact(roomCode, () => {
-      const joined = message.type === "resume" ? sessions.resume(roomCode, message)
-        : message.sessionToken !== undefined ? sessions.resume(roomCode, { sessionToken: message.sessionToken })
-          : sessions.join(roomCode, message.nickname);
+      const joined = message.type === "resume" ? sessions.resume(roomCode, message, false)
+        : message.sessionToken !== undefined ? sessions.resume(roomCode, { sessionToken: message.sessionToken }, false)
+          : sessions.join(roomCode, message.nickname, false);
       if (freshJoin) sessions.delivery(joined,true);
       return { joined, epoch: sessions.claim(joined) };
       }));
@@ -308,11 +338,62 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
         ...("recoveryCode" in joined ? { recoveryCode: joined.recoveryCode as string } : {}) }), error => resolve(!error)));
       if (freshJoin) {
         if (!delivered || conn.closed) { await manager.discardUndelivered(roomCode); return; }
-        try { await manager.transact(roomCode, () => sessions.delivery(joined,false)); }
-        catch (error) { await manager.discardUndelivered(roomCode); throw error; }
       }
       if (conn.closed || !delivered) {
         await manager.transact(roomCode, () => sessions.disconnect(joined));
+        releaseSupersededOwner(joined);
+        return;
+      }
+      const beforeActivation = manager.exportRoom(roomCode)!;
+      try {
+        const activate = async (result?: TransitionResult) => {
+          if (conn.closed || conn.replaced) throw new Error("连接交付已中断");
+          const game = manager.getGame(roomCode);
+          // 激活前记下回滚依据，启动时按落盘的游戏与在线状态判断是否可回滚。
+          if (game !== null) {
+            await manager.writeActivationUndo(roomCode, {
+              schemaVersion: 1,
+              roomCode,
+              gameId: beforeActivation.gameId,
+              joinedPlayerId: joined.playerId,
+              expectedVersion: result?.state.version ?? game.version,
+              beforeGame: beforeActivation.game,
+              noHumanSinceMs: beforeActivation.noHumanSinceMs ?? null,
+              pauseStartedAtMs: beforeActivation.pauseStartedAtMs ?? null,
+              pauseShifted: beforeActivation.pauseShifted ?? false,
+              writtenAtMs: now(),
+            });
+          }
+          await manager.transact(roomCode, () => {
+            if (conn.closed || conn.replaced) throw new Error("连接交付已中断");
+            if (result) manager.applyPauseShift(roomCode, result);
+            if (freshJoin) sessions.delivery(joined, false);
+            manager.confirmOnline(roomCode, joined.playerId);
+          });
+          await manager.deleteActivationUndo(roomCode);
+        };
+        if (!manager.isPaused(roomCode) && manager.getGame(roomCode) !== null
+          && manager.isNoHumanOnline(roomCode) && !manager.isPauseShifted(roomCode)) {
+          const shifted = await processor.resumeFromPauseInQueue(roomCode, (_code, result) => activate(result));
+          if (!shifted) {
+            console.warn("[richman] 房间 " + roomCode + " 暂停时间线未恢复，保持暂停");
+            await manager.transact(roomCode, () => sessions.disconnect(joined));
+            sendError(conn, "ERROR_PAUSED", "恢复时间线未完成，本局保持暂停");
+            return;
+          }
+        } else await activate();
+      } catch (error) {
+        if (freshJoin) await manager.discardUndelivered(roomCode);
+        else {
+          try { await manager.rollbackConnectionActivation(beforeActivation, joined.playerId); }
+          catch (rollbackError) { console.warn("[richman] 房间 " + roomCode + " 恢复补偿写盘失败", rollbackError); }
+        }
+        console.warn("[richman] 房间 " + roomCode + " 恢复时间线失败，保持暂停", error);
+        sendError(conn, "ERROR_PAUSED", "恢复时间线失败，本局保持暂停，请重试");
+        return;
+      }
+      if (conn.closed || conn.replaced) {
+        await manager.rollbackConnectionActivation(beforeActivation, joined.playerId);
         releaseSupersededOwner(joined);
         return;
       }
@@ -320,19 +401,34 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
       const room = manager.getRoom(roomCode);
       if (room) send(conn, { type: "room", players: room.players, hostId: room.hostId, state: room.state, paused: room.paused });
       snapshot(conn);
+      // 重连/入座后解除“无真人在线”暂停，并重新武装超时与 AI 驱动。
+      if (manager.getGame(roomCode) !== null) {
+        scheduler.schedule(roomCode);
+        botDriver?.notify(roomCode);
+      }
       return;
     }
     if (conn.identity) reconcileOwners(conn.identity.roomCode);
     if (!current(conn)) { sendError(conn, "NOT_JOINED", "请先加入房间"); return; }
     const identity = conn.identity!;
     if (message.type === "ready") await manager.transact(identity.roomCode, () => sessions.setReady(identity, message.ready));
-    else if (message.type === "leave") { await manager.transact(identity.roomCode, () => sessions.leave(identity), () => { detach(conn); }); }
+    else if (message.type === "leave") {
+      await manager.transact(identity.roomCode, () => sessions.leave(identity), () => { detach(conn); });
+      // 最后一位真人离开：立即停掉推进与 AI 定时器，宽限期后由巡检回收。
+      if (manager.isNoHumanOnline(identity.roomCode)) {
+        scheduler.cancelRoom(identity.roomCode);
+        botDriver?.cancelRoom(identity.roomCode);
+      }
+    }
     else if (message.type === "start" || message.type === "rematch") {
       await manager.transact(identity.roomCode, () => {
         if (message.type === "start") sessions.start(identity); else sessions.rematch(identity);
       });
       await scheduler.advanceDue(identity.roomCode);
       scheduler.schedule(identity.roomCode);
+      // 换局：先丢旧局全部待执行 timer/draft，再按新局重新驱动。
+      botDriver?.cancelRoom(identity.roomCode);
+      botDriver?.notify(identity.roomCode);
     } else if (message.type === 'resume_game') {
       const events = await manager.resumeGame(identity.roomCode, identity.playerId, now());
       for (const peer of connections.values()) {
@@ -342,12 +438,14 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
           gameVersion: manager.getGame(identity.roomCode)!.version, events });
       }
       scheduler.schedule(identity.roomCode);
+      botDriver?.notify(identity.roomCode);
     } else if (message.type === "destroy_room") {
       const roomCode = identity.roomCode;
       // 必须先收集 peers：destroyRoom 成功后 sessions 已清空，current() 会全部为 false。
       const peers = selectDestroyPeers(connections.values(), roomCode, WebSocket.OPEN);
       await manager.destroyRoom(roomCode, identity.playerId);
       scheduler.cancelRoom(roomCode);
+      botDriver?.cancelRoom(roomCode);
       notifyAndCloseDestroyedPeers(
         peers,
         { type: "room_destroyed", roomCode, byPlayerId: identity.playerId },
@@ -411,6 +509,10 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
     detach(conn);
     void queue.run(identity.roomCode, async () => {
       if (sessions.isCurrent(identity, epoch) && !owners.has(ownerKey(identity))) await manager.transact(identity.roomCode, () => sessions.disconnect(identity));
+      if (manager.isNoHumanOnline(identity.roomCode)) {
+        scheduler.cancelRoom(identity.roomCode);
+        botDriver?.cancelRoom(identity.roomCode);
+      }
     }).catch(() => undefined);
   };
   const init = (ws: WebSocket, roomCodeQuery: string | null, ip: string): void => {
@@ -485,6 +587,43 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
     }
   }, 5000);
 
+  // 生命周期巡检：纯 AI/空大厅删除；有存档价值的房间只归档，绝不物理删除对局。
+  const sweepRooms = async (): Promise<void> => {
+    const nowMs = now();
+    try { await manager.cleanupArchives(nowMs); }
+    catch (error) { console.warn("[richman] 清理过期归档失败", error); }
+    for (const roomCode of manager.reclaimCandidates(nowMs)) {
+      try {
+        await queue.run(roomCode, async () => {
+          if (!manager.canReclaim(roomCode, now())) return;
+          const reclaimed = await manager.reclaimRoom(roomCode);
+          if (!reclaimed) return;
+          scheduler.cancelRoom(roomCode);
+          botDriver?.cancelRoom(roomCode);
+          console.warn("[richman] 已回收房间 " + roomCode + "（纯 AI/空大厅超时）");
+        });
+      } catch (error) {
+        console.error("[richman] 回收房间 " + roomCode + " 失败：", error);
+      }
+    }
+    for (const roomCode of manager.archiveCandidates(nowMs)) {
+      try {
+        await queue.run(roomCode, async () => {
+          if (!manager.canArchive(roomCode, now())) return;
+          const archived = await manager.archiveRoom(roomCode);
+          if (!archived) return;
+          scheduler.cancelRoom(roomCode);
+          botDriver?.cancelRoom(roomCode);
+          console.warn("[richman] 已归档房间 " + roomCode + "（真人离线超时；存档保留在 data/archive）");
+        });
+      } catch (error) {
+        console.error("[richman] 归档房间 " + roomCode + " 失败：", error);
+      }
+    }
+  };
+  const lifecycle = setInterval(() => { void sweepRooms(); }, LIFECYCLE_SWEEP_MS);
+  lifecycle.unref?.();
+
   const rejectUpgrade = (socket: Duplex, status: number, code: string): void => {
     try {
       socket.write(`HTTP/1.1 ${status} ${code}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
@@ -532,7 +671,8 @@ export function attachLobbyWebSocket(server: Server, manager: RoomManager, optio
     server.off("upgrade", onUpgrade);
     heartbeatClock.clearInterval(heartbeat);
     authClock.clearInterval(authScan);
-    scheduler.close(); unsubscribe();
+    clearInterval(lifecycle);
+    scheduler.close(); botDriver?.close(); unsubscribe();
     for (const client of wss.clients) client.terminate();
     await new Promise<void>(resolve => wss.close(() => resolve()));
     await queue.drain();

@@ -1,0 +1,17 @@
+【任务】修 RichMan 归档/激活的 3 个残留边界（GPT 上一轮已把 N1–N8 主路径做完，本轮只做下面 3 条；不做物理双盘实验、不做 LRU、不改规则数值、不改协议）
+
+背景：GPT 的报告在 handoff/归档与二次平移修复-成果报告.txt 第七节。DSH 已实测 pnpm test 88 文件/1067 条全绿、tsc exit 0、build exit 0，主路径可信。
+
+A. 激活后的跨重启补偿（N1 残留，最高优先）
+现状：apps/server/src/ws.ts 的最终激活在 manager.transact 里同时写 game+online+pauseShifted；一旦 rename 已提交、随后连接断开且补偿写盘连续失败，磁盘会保留激活后快照，重启后回不到激活前。
+要求：激活前把 before 快照写入房间目录的 activation-undo.json（原子写；含 expectedVersion=本次激活将写入的 game.version、beforeGame、noHumanSinceMs、pauseStartedAtMs、pauseShifted、writtenAtMs）；激活+确认在线同一事务成功后，在同一房间队列内删除它。
+启动 loadAll（apps/server/src/storage/file-store.ts）读到 undo 时：snapshot.game.version === expectedVersion → 用 beforeGame 恢复、paused=true、真人玩家 online=false、原子写回 snapshot.json、删 undo、warn 一次；版本不等于 expectedVersion（已被后续合法推进或激活根本没落盘）→ 只删 undo；undo 损坏 → 保留房间、标 paused、告警，不删档。
+测试（真实临时目录，不 mock 业务）：① 造「激活已落盘、补偿未执行」状态，loadAll 后 version 回到 before 且 paused=true；② stale undo 被删且版本不变；③ 正常激活后 undo 不存在；④ undo 损坏时房间仍能加载。
+
+B. 归档残留目录清理（N7 边界）
+file-store.ts 中 `.archived-source-*`（EXDEV 源 tomb 删除失败留下）、`.staging-*`、`.restore-*` 目前无人清理。要求 cleanupArchives 顺带清理 archive/ 与 rooms/ 下这些前缀且 mtime 超过 1 小时的目录（常量放 apps/server/src/storage/archive-policy.ts），失败计入返回的 failed 并 warn，不抛异常。测试：造三个真实目录并用 utimes 改成 2 小时前，跑 cleanupArchives 后消失；1 分钟前的保留。
+
+C. 坏档隔离（N7 边界）
+pruneArchives 遇到坏清单目前每轮都失败、也让容量统计失真。要求：同一归档连续 3 次读取失败后移到 archive/.quarantine/<原名>/(保留文件并 warn)，结果里记录 quarantined；容量计算把 quarantined 计入但不参与 FIFO 删除；隔离后不再出现在 failed。测试：坏档连跑 3 次 cleanupArchives 后进入 .quarantine 且不再 failed。
+
+验收：仓库根跑真实 pnpm test / pnpm typecheck / pnpm build 并贴尾行（typecheck 若整进程卡死是 TS7 偶发，杀掉重跑即可）；不得削弱既有断言（只允许为新增清理逻辑调整夹具）；写 handoff/归档残留与激活补偿-成果报告.txt（逐条 文件:行号 + 测试名 + 未做项）；不 git add、不 commit。做不完按 A→B→C 保底并写明停在哪。

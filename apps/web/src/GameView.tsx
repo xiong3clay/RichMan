@@ -3,6 +3,7 @@ import type { ConnectionStatus, CommandOptions, RichmanClient } from "./net/clie
 import { clearSession } from "./net/client";
 import { Countdown } from "./Countdown";
 import {
+  botPersonalityLabel,
   creditLabel,
   formatCents,
   isNonNegativeCents,
@@ -87,7 +88,10 @@ const MONEY_LIMIT_TEXT = formatCents("1000000000000");
 
 function stageHeadline(view: WireSnapshotView): string {
   if (view.phase === "ACTION") {
-    return view.currentSeatId === view.me.seatId ? "你的操作阶段" : "等待行动阶段";
+    if (view.currentSeatId === view.me.seatId) return "你的操作阶段";
+    const acting = view.publicPlayers.find((player) => player.seatId === view.currentSeatId);
+    if (acting?.isBot === true) return "AI 思考中…";
+    return "等待行动阶段";
   }
   if (view.phase === "BETTING") {
     return view.finance.myBet === null ? "你的下注阶段" : "你的下注阶段（已锁定）";
@@ -668,7 +672,13 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
             {view.publicPlayers.map((player) => (
               <div className="final-row" key={player.playerId}>
                 <span>#{player.seatId}</span>
-                <span>{player.nickname}</span>
+                <span>
+                  {player.nickname}
+                  {player.isBot === true ? <span className="tag">AI</span> : null}
+                  {player.isBot === true && player.botPersonality !== undefined
+                    ? <span className="tag">{botPersonalityLabel(player.botPersonality)}</span>
+                    : null}
+                </span>
                 <span>{statusLabel(player.status)}</span>
                 <span>{creditLabel(player.credit)}</span>
               </div>
@@ -1786,6 +1796,10 @@ function GameSessionView({ roomCode, hostId = null, paused: roomPaused, view, cl
                   <span>#{player.seatId}</span>
                   <span>
                     {player.nickname}
+                    {player.isBot === true ? <span className="tag">AI</span> : null}
+                    {player.isBot === true && player.botPersonality !== undefined
+                      ? <span className="tag">{botPersonalityLabel(player.botPersonality)}</span>
+                      : null}
                     {player.playerId === view.me.playerId ? <span className="tag me">我</span> : null}
                     {!player.alive ? <span className="tag">出局</span> : null}
                   </span>

@@ -1,0 +1,45 @@
+修 RichMan 本轮 Qoder 二审问题（报告：handoff/审查/Qoder-AI人格与修复-20261117.txt）。只改代码与测试，不提交、不改既有测试断言语义。
+
+基线：工作区未提交改动（Trae 上一轮 A/B/C）已由 DSH 验收：pnpm test 1004 全绿、typecheck 0、build 0、1 真人 + 5 AI 冒烟到第 3 轮。修改后这些必须仍然全绿。
+
+【第一步：P0-1 无真人暂停没有顺延截止时间（必须修）】
+问题：apps/server/src/rooms/manager.ts:656-660 只清 pausedByNoHuman/noHumanSinceMs，引擎 deadlineAt/windowDeadlineMs/dangerDeadlineMs/LoanRequest.deadlineMs 都不变；apps/server/src/ws.ts:224 暂停时 scheduler 不排期，但重连后 ws.ts:350-354 立刻 schedule，apps/server/src/rooms/scheduler.ts:50/69/89-94 发现 deadline 已过期就用原 deadlineMs 连续 advanceDue → ACTION 立刻 ACTION_TIMEOUT、BETTING 立刻按 0 注结算、TAX 危险阶段直接 bankruptPlayer。
+
+要求：
+1) 语义定为「暂停期间游戏时间冻结」：恢复后剩余时间必须与暂停那一刻一致（按暂停时长整体平移），不得立即触发任何超时动作。
+2) 实现方式优先选：在 packages/game-core 增加纯函数 shiftDeadlinesForPause(state, pausedMs)（返回新状态，version+1，不发事件），遍历 GameState 与 LoanRequest 里所有绝对时间字段（deadlineAt、windowDeadlineMs、dangerDeadlineMs、PENDING 请求的 deadlineMs，以及你 grep 到的其他 Deadline），整体 +pausedMs；pausedMs 必须 >0 且为安全整数，否则原样返回。
+3) 服务器在「清除 pausedByNoHuman 之前」、且在房间队列内串行执行：给 apps/server/src/rooms/command-queue.ts 增加一个显式方法（如 resumeFromPause(roomCode)），内部算 pausedMs = now - noHumanSinceMs、调用 shift、按现有 commit/notify 路径落盘；不要绕过队列直接改 manager 里的 state，避免与玩家命令并发。
+4) wire 进入 ws.ts 的重连/入座路径：先 resumeFromPause，再清 pausedByNoHuman，再 scheduler.schedule + botDriver.notify；任何一步失败要记日志、保持房间暂停（宁可不推进，也不要带着过期 deadline 快进）。
+5) 不要新增客户端可见的 GameCommand（避免协议膨胀）；如果最终必须加命令，先停下来在报告里说明理由。
+
+【第二步：P1-1 开局后 10 分钟静默删档（必须修）】
+问题：manager.ts:673-681 + reclaimRoom + ws.ts:536-554 会把 PLAYING 房间连 snapshot/events.ndjson 一起删除，真人离线超过 10 分钟回来整局消失。
+要求：
+1) PLAYING 且无在线真人的房间永不因离线自动删除：只暂停（现有 pausedByNoHuman），CPU 已经不再推进。
+2) 新增可配置的归档：暂停超过 ROOM_PAUSE_ARCHIVE_MS（默认 7 天）时把房间目录整体移动到 data/archive/<roomCode>/（保留 snapshot.json 与 events.ndjson），再从内存移除；不做物理删除。日志写清归档路径。用一个常量集中定义，别散落。
+3) LOBBY：纯 AI 大厅 5 分钟仍直接删除；有真人座位但全员离线的 LOBBY 改为 30 分钟回收（同样先归档再移除，避免有人刚建好房就断网）。
+4) reclaimRoom 的 transact action 内再执行一次 canReclaim（防御），但不要改变现有 ws 队列顺序。
+5) 新增测试：PLAYING 离线超过明示的短周期不被删除；归档后文件仍存在；LOBBY 30 分钟边界；重连在宽限期内不会丢档；sweep 与重连同一房间队列顺序（先重连则 canReclaim=false）。
+
+【第三步：P2 列表，按顺序做，做不完在报告里注明停在哪】
+P2-1 FOOL 同意私人借款没检查借款人存活（apps/server/src/bots/policy.ts:105-106）：补 borrowerAlive 检查 + 「请求创建后借款人死亡」边界测试。
+P2-2 TAX 催收没按出借人 MAX 上限（policy.ts:363-380）：催收金额取 min(可收金额, MAX_MONEY_CENTS - bot.cents)，不许产生必拒的 COLLECT_PRIVATE；并让该 key 的失败不阻断后续自救（同一 tick 里可降级到 request 或 giveUp），补 MAX 边界测试。
+P2-3 driver 只重试 VERSION_CONFLICT（driver.ts:258-270）：增加可重试白名单（至少 ERROR_PAUSED；REQUEST_EXPIRED/INVALID_AMOUNT 这种确定性非法不重试），可重试错误不 markDriven，恢复后允许重新决策；补测试。注意：ErrorCode 里没有 STALE_STATE，别引用不存在的码。
+P2-4 driven 单房间超过 500 直接清空（driver.ts:319-334）：改成按 phaseInstanceId/轮次 LRU 淘汰，至少不要一次清空整轮成功 key；补超限后不重复驱动已成功命令的测试。
+P2-5 notify tick 与 VERSION_CONFLICT retry 的匿名 timer 没被 cancelRoom 跟踪（driver.ts:115-127、259-262、130-146）：统一用 timers 表跟踪或加 room epoch/cancel token，cancelRoom 后旧回调必须不行动；补测试。
+P2-6 前端 AI 上限双源（apps/web/src/App.tsx:44、294、424）：按钮与文案改为从 @richman/shared 的 BOTS_MAX 生成，注释与 INVALID_BOTS 提示改为 1～5；不要只改注释。
+P2-7 LOBBY 里有离线真人就永不回收（manager.ts:673-676）：已在第二步用 30 分钟归档解决，确认边界测试覆盖。
+P2-8 createdAtMs/noHumanSinceMs 没进快照，restoreRoom 每次重置（manager.ts:179-201、storage/types.ts）：把生命周期时间戳持久化到 RoomSnapshot 并校验；旧快照缺字段时按「恢复时刻开始计时」兜底；补重启/多次 transact 测试。
+P2-9 reclaimRoom 事务内复查 canReclaim：第二步已含。
+P2-10 validateSnapshot 信任 isBot（storage/file-store.ts:22-33）：本轮做便宜加固——isBot 座位数 ≤ BOTS_MAX、isBot 座位 playerId 必须是 p<seatId> 形式、isBot 与 sessions 互斥已校验；补篡改快照应被拒绝的测试。不做签名/加密。
+P2-11 前端 autoStart 失败无回滚（App.tsx:103-118、274-304）：检查 sendLobby(start) 结果，失败时回滚 startedAutomatically、给出可见错误并允许手动点开局；LOBBY 兜底由第二步负责。
+P2-12 人格标签对所有真人公开：这是有意设计（透明、可被针对），本轮不改、不隐藏；在报告里记一句即可。
+P2-13 processor 的 isPaused 未包含 pausedByNoHuman（ws.ts:227-229）：暂停时拒绝新命令（返回 ERROR_PAUSED），补测试。
+
+【验收与交付】
+- 改完在仓库根目录跑真实命令并贴尾行：pnpm test、pnpm typecheck、pnpm build。
+- 新增测试必须真验行为（假时钟、真实 applyCommand/真实队列），禁止只断言 mock 调用；禁止修改既有测试断言使其变松。
+- 写 handoff/暂停时间线与生命周期修复-成果报告.txt：逐条对应 P0-1/P1-1/P2-1..P2-13 的「改了什么/文件:行号/测试名/未做的与原因」。
+- 更新 handoff/项目当前状态.txt。
+- 不 git add、不 git commit。
+- 若一轮做不完：顺序是 P0-1 → P1-1 → P2-1/P2-2 → P2-3/P2-4/P2-5 → P2-6/P2-8/P2-10/P2-11/P2-13，每完成一段先跑测试保底，并在报告开头写清停在哪。

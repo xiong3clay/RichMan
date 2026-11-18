@@ -1,0 +1,186 @@
+Qoder 只读审查：归档残留与激活补偿（2026-11-18）
+====================================================
+审查对象：Trae 按 handoff/提示词/20261118-Trae收尾归档残留与激活补偿.txt 实现的 A/B/C
+成果报告：handoff/归档残留与激活补偿-成果报告.txt
+仓库：D:\Lianjunjie\biancheng\RichMan（工作区含前几轮未提交改动；本轮范围以成果报告第四节为准）
+方式：只读代码核对 + 本机真实命令。未改代码、未 git add、未 commit。
+行号均指审查时工作区文件实际行号。
+
+〇、本机实测（尾行）
+--------------------
+pnpm test：
+  Test Files  90 passed (90)
+       Tests  1073 passed (1073)
+    Duration  174.29s
+  EXIT=0
+pnpm typecheck：首次 tsc.exe 整进程卡死（工作集仅 ~13MB，TS7 已知环境问题），杀掉重跑：
+  $ tsc --noEmit -p tsconfig.json
+  EXIT=0
+pnpm build：
+  ✓ built in 361ms
+  EXIT=0
+说明：Trae 报告第五节「5 failed | 1068 passed」在本机未复现，与 DSH 实测一致（全绿）。
+不采信 Trae 的失败结论；其「既有环境问题」归因无本机证据支持。
+
+一、P0（会丢档/坏数据）：无
+---------------------------
+核对过的安全屏障（均真实有效）：
+- 回滚写盘前全量 validateSnapshot(restored)（file-store.ts:278），gameId/名单/金额/事件 seq
+  全校验，坏回滚落不了盘（gameId 校验在 file-store.ts:131）。
+- undo 原子写 backup:false（file-store.ts:229 → atomic.ts:25-28），不触碰 snapshot.bak.json。
+  该开关必要且正确：atomic.ts:26 的 copyFile(filePath,...) 中 filePath 是被写目标，
+  若 undo 写误用 backup:true，会把 activation-undo.json 内容拷进 snapshot.bak.json 污染唯一好备份。
+- 激活事务 events=[]（manager.ts:259），平移只 +version、不动 eventSeq、不发事件
+  （engine.ts:218-241），回滚不产生 journal 与快照的 seq 背离；checkAudit 对超前行跳过
+  （file-store.ts:549），回滚后审计不报错。
+- schemaVersion 仍为 1（types.ts:6），RoomSnapshot 新增字段全可选，旧快照可加载；
+  git diff 未见 validateSnapshot 校验行被删除或放宽。
+- 残留清理只删三前缀隐藏目录且 mtime>1h（file-store.ts:426-431）；房间目录是纯数字名，
+  不匹配前缀正则，不会被误删。隔离用 rename 保留全部文件（file-store.ts:468）。
+- 同进程 archiveRoom/restoreFromArchive/cleanupArchives 共享 serializeArchive 队列
+  （file-store.ts:290-294、312、367、409），清理与进行中的归档/恢复不互踩；
+  archiveRoom 尾部直接调 pruneArchives（361）而非 cleanupArchives，无自死锁。
+
+二、P1（可观测缺陷）
+--------------------
+P1-1 undo 判 stale 只比 version、无 gameId；校验失败时 catch 返回半应用状态
+     → 跨局版本碰撞会把房间打成内存不一致并永久卡死。【重点2】
+位置：
+- file-store.ts:259 —— stale 判定仅 snapshot.game.version !== undo.expectedVersion。
+- types.ts:40-49 —— ActivationUndo 无 gameId 字段（beforeGame.gameId 现成可用）。
+- file-store.ts:282-287 —— catch 不区分「validateSnapshot 失败」与「写盘失败」，一律返回 restored。
+- recovery.ts:4 —— loadAllRooms 对 loadAll 结果直接 restoreRoom，无二次校验。
+推理链：
+1) undo 残留前提：deleteActivationUndo 失败只告警（manager.ts:424-428），或进程在
+   transact 提交后、删 undo 前崩溃（ws.ts:365-371 窗口）。
+2) 残留 undo 的 expectedVersion=V。房间此后合法推进则 version 越过 V、undo 变 stale 被删；
+   但 rematch/start 换 gameId 并把 version 重置为 0（manager.ts:624-648、engine.ts:124），
+   新局推进到 V 时发生版本号碰撞（旧局早期激活的 V 通常很小，碰撞概率不可忽略）。
+3) 重启 loadAll：version 相等 → 进入回滚分支，restored.game=旧局 beforeGame（gameId A），
+   而 snapshot.gameId=新局 B。
+4) validateSnapshot 在 file-store.ts:131（g.gameId !== s.gameId）抛错 → 磁盘不会被写坏
+   （这是 P0 屏障，也是本条不定 P0 的原因）。
+5) 但 catch（282）把 restored 原样返回：内存 game=A、gameId=B；undo 未删（280 行 rm 被跳过）。
+6) recovery.ts:4 restoreRoom 照单全收 → 客户端 snapshot() 用旧局 A 渲染视图；任何命令或
+   resume_game 提交时 validateSnapshot 再抛 → storageFailed 暂停；每次重启重复 4)-6)，warn 循环。
+后果：磁盘存档完好，但该房间内存态与磁盘不一致、对局不可用，直到人工删 undo/修档。
+触发需「残留 undo + 换局 + 版本碰撞」三条件，概率低但链条真实，失败侧封闭（命令被拒）。
+复现（推理级，审查未写代码）：造 rooms/<code>/ 快照 gameId=B、version=V，再写
+activation-undo.json（expectedVersion=V、beforeGame.gameId=A）→ loadAll →
+可断言 loaded[0].game.gameId !== loaded[0].gameId 且 undo 仍在。现有 4 条 undo 测试均未覆盖。
+建议修法：a) 259 行 stale 判定加 undo.beforeGame?.gameId === snapshot.gameId 联合校验
+（不匹配按 stale 只删 undo）；b) catch 分流：validateSnapshot 失败返回原 snapshot（保持暂停、
+保留 undo），写盘失败才返回 restored 供下次重试。
+
+P1-2 version 判定分不清「激活已提交但删 undo 失败」与「激活从未提交」
+     → 合法激活被误回滚：平移被二次消费 / 归档时钟回拨。【重点1/4】
+位置：
+- ws.ts:357 —— expectedVersion=result?.state.version ?? game.version；普通路径与
+  pausedMs=0 的平移都不改 version（engine.ts:219 pausedMs<=0 原样返回）。
+- manager.ts:424-428 —— 删除失败只告警；manager.ts:402-413 —— rollbackConnectionActivation 不删 undo。
+- file-store.ts:259-287 —— 版本相等即回滚。
+推理链（平移路径，pausedMs>0）：
+1) 成功激活：shift 提交 V+1、pauseShifted=true、pauseStartedAtMs 保留离线起点；
+   deleteActivationUndo 失败（如 Windows EPERM/EBUSY）→ undo 残留 expectedVersion=V+1。
+2) 重启发生在下一条命令（version 推进）之前：磁盘 V+1 == expectedVersion → 回滚到 V，
+   pauseShifted=undo.pauseShifted（false，ws.ts:374 分支前提）、pauseStartedAtMs=旧离线起点。
+3) restoreRoom（manager.ts:205-217）重算 pausedByNoHuman=true、getPauseSince=旧起点 →
+   下次 resume 把「已经消费过的离线区间」再平移一次 → 截止时间超额延长（双重平移），
+   违反 N2「恰好消费一次」语义。pause-archive-atomic.test.ts:188-201 只覆盖删除成功路径。
+推理链（普通路径）：
+1) 成功激活后 confirmOnline→noteHumanOnline 已清 noHumanSinceMs/pauseStartedAtMs=null
+   （manager.ts:769-774）；删 undo 失败 → 残留 undo 携带旧离线时刻（ws.ts:359-360）。
+2) 重启且 version 未推进 → 回滚把两字段写回旧离线时刻（file-store.ts:272-273）。
+3) shouldArchive（manager.ts:795-806）用回拨后的 pauseStartedAtMs 计龄 → 30s 巡检
+   （lifecycle.ts:16）可能把刚重连的房间提前归档（玩家 resume 时 ROOM_NOT_FOUND，档在 archive 可恢复）。
+说明：此洞是规格固有的——提示词第 8 行规定「版本相等即回滚」，而普通激活不改 version，
+版本检查天然分不清两种状态；规格假设「undo 残留 ⇔ 激活未生效」在删除失败时不成立。
+实现忠实于规格，缺陷在规格判据强度。
+建议修法方向：undo 增加 joinedPlayerId 与期望在线态，回滚前额外要求磁盘快照仍呈「未激活」
+形态（该玩家 online=false 且 pausedByNoHuman=true）；或把删 undo 失败升级为激活失败、
+走 rollbackConnectionActivation 补偿。
+补充核对：失败激活 + rollback 成功后的残留 undo 是幂等无害的——beforeGame==磁盘 game，
+paused/offline 本就是 loadAll 对全房间强制（file-store.ts:535-537），不必处理。
+
+三、P2（卫生问题）
+------------------
+P2-1 archiveFailures Map：成功/隔离清零（file-store.ts:458、470），但目录被外部删除后
+条目永不清理（长期缓慢泄漏）；计数纯内存、重启归零——频繁重启的进程里坏档永远凑不满 3 次。
+正常运行 30s 巡检约 90s 内隔离，影响小。【重点6】
+P2-2 隔离容量细节：quarantinedBytes 用 archiveFiles(fingerprint=false) 漏计 archive.json
+自身大小（file-store.ts:488 对比 456）；count 不含隔离目录（483），maxCount 对其无约束；
+隔离字节计入 bytes 但永不参与 FIFO（492-504）——隔离区占满上限时会把健康归档全部 FIFO
+删光而隔离区不动（规格如此，运维需知）。【重点6】
+P2-3 残留清理范围：只扫 archive/ 与 rooms/ 直接子目录（file-store.ts:421-438）。三个前缀的
+产生点全部是直接子级（.staging-→archive/ 328 行、.restore-→rooms/ 381 行、
+.archived-source-→rooms/ 347 行），代码自身不产生嵌套残留，无漏扫；嵌套只可能来自外部
+手工放置，不在范围。Windows rm 失败进 failed+warn 不抛（433-436），下轮重试。
+未覆盖的既有残留：.tmp/deleted-*（217 行）、.tmp/*.json 崩溃临时文件、corrupt-*/
+invalid-current-*（525、530 行）——前几轮遗留，非本轮范围。【重点5】
+P2-4 双开同一 data 目录无任何锁（http.ts:298-303、recovery.ts 全文无 lock；
+serializeArchive 仅单实例内互斥）。两进程 loadAll 会互相应用/删除对方刚写的 undo、
+cleanupArchives 互踩隔离 rename。属既有架构缺口，本轮 undo/隔离新增了跨进程干涉面，
+建议后续加 data 目录单实例锁。【重点4】
+P2-5 ActivationUndo 不携带 lastEvents（types.ts:40-49）：平移路径 applyPauseShift 把
+lastEvents 置 []（manager.ts:392），回滚后磁盘 lastEvents=[] 而非 before.lastEvents →
+最近一次真实命令的审计副本丢失（恢复不重放，影响仅审计保真）。【重点4】
+P2-6 回滚写盘复用 this.options（file-store.ts:279）：生产构造无注入项
+（http.ts:302 new FileRoomStore(dataDir)），failAt/checkpoint 不会进正常恢复路径——
+重点3 的担忧在生产不成立；测试注入 store.options 时回滚写会继承故障（测试专用，可接受）。
+backup 默认 true 使回滚前把当前（激活态、合法）快照拷入 bak，语义正确。
+writeActivationUndo 只透传 warn、不透传 checkpoint/failAt（229 行），故障注入与 undo 写隔离良好。【重点3】
+P2-7 损坏 undo 永久「暂停+warn」循环直到人工处理（file-store.ts:253-257，规格要求不删档，
+设计如此）；writeActivationUndo 入口只浅校验 4 字段（225-228），beforeGame/生命周期字段
+形状靠 apply 端 validateSnapshot 兜底，外部篡改边缘场景可接受。【重点4】
+P2-8 成果报告行号/结论偏差：loadAll 调用点实际 file-store.ts:534（报告写「约486」）；
+报告「5 failed」本机与 DSH 均未复现。其余行号（ws.ts:347-372、manager.ts:417-428、
+file-store.ts:222-288/412-438）核对相符。
+
+四、重点核对逐项速览
+--------------------
+1. 写 undo 时机/失败路径（ws.ts:354-363 在 transact 前写）：transact 抛错→catch rollback
+   （ws.ts:383-392），undo 残留但普通路径幂等无害、平移路径 stale 被删；「从未激活成功」
+   的房间不会被误回滚出实质损害（paused/offline 是 loadAll 全房间强制，file-store.ts:535-537）。
+   真正缺陷在 P1-2（删除失败后的合法激活被误回滚）。
+2. undo 判定强度：file-store.ts:259 只比 version → P1-1，建议加 gameId 联合校验。
+3. backup 开关：atomic.ts:25-28 正确跳过 bak 拷贝；file-store.ts:279 复用 options 生产无
+   注入项 → P2-6。
+4. 生命周期：删除失败只告警（manager.ts:424-428）→ P1-2；loadAll 每房读一次（534）；
+   双开无锁 → P2-4；eventSeq 一致性干净（激活 events=[]、shift 不动 eventSeq）→ 无缺陷。
+5. 残留清理：file-store.ts:420-438 无嵌套漏扫（产生点均直接子级）、Windows 失败分支正确、
+   同进程串行不互踩 → P2-3。
+6. 坏档隔离：file-store.ts:459-480 failed/quarantined 语义互斥正确、隔离目录不入 FIFO
+   （441 行正则排除 .quarantine）、容量计入 bytes → P2-1/P2-2。
+7. 测试有效性：见第五节。
+8. 风险回归：schemaVersion=1 未变、旧快照可加载、validateSnapshot 无削弱；
+   pause-archive-atomic 16 条仍真实覆盖暂停后重连（undo 写不透传 checkpoint，writes===2
+   注入点仍是激活提交而非 undo 写）→ 无回归。
+
+五、测试有效性评价
+------------------
+- activation-undo.test.ts（4 条）：真实 mkdtemp + FileRoomStore + RoomManager/SessionRegistry
+  + 真实引擎 advanceSystem；回滚用例同时断言内存与磁盘 snapshot.json（76-78 行），不是空转。
+  stale/正常清理/损坏三条均断言真实文件存在性与版本。夹具 beforeGame.version 手工置 0 略合成，
+  但走的是真实 applyActivationUndo 全路径，可接受。
+- archive-residue.test.ts（2 条）：真实目录 + utimes 改 2 小时 + 真实 cleanupArchives；
+  隔离用例连跑 4 轮断言 failed/quarantined 互斥与目录迁移，真行为。
+- 无「只断言函数被调用」的空转测试；新文件未 spy 业务函数。
+- 既有断言未削弱：git status 显示本轮未修改任何已跟踪测试文件（apps/server/tests 下无 M）；
+  新增 6 条=1067+6=1073 与实测吻合。
+- pause-archive-atomic.test.ts 16 条（13 个 it + it.each×3）仍是真实 startServer+Peer WS 重连。
+  关键核对：writeActivationUndo 不透传 checkpoint（file-store.ts:229），故 161/177 行
+  writes===2 的注入点仍落在激活提交（#1 join、#2 激活），未被 undo 写挤偏——
+  「暂停后重连」「提交后断开」「after_rename 失败补偿」覆盖保持。
+  188 行真实重启用例覆盖「成功激活+重启不误回滚」（删除成功路径）。
+- 覆盖缺口（与 P1 对应）：无跨 gameId stale 用例（P1-1）；无「删除失败后成功激活+重启」
+  用例（P1-2）；无回滚写盘失败重试用例（file-store.ts:282 catch）；隔离容量边界、
+  Windows rm 失败分支报告已自认未测，合理。
+
+六、结论依据
+------------
+无 P0：所有回滚/清理/隔离路径均有校验或原子屏障，磁盘数据不会丢/坏。两条 P1 均为低概率
+链条下的可观测缺陷（房间内存不一致卡死 / 时间线双重平移与归档时钟回拨），失败侧封闭
+（命令被拒、房间暂停）。建议下一轮优先修 P1-1 的 gameId 联合校验与 catch 分流（改动小、
+收益明确），P1-2 需规格层面补「未激活形态」判据。本轮 A/B/C 主路径实现质量可信，测试真实。
+
+结论：能上线

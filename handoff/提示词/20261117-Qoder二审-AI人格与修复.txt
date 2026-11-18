@@ -1,0 +1,62 @@
+你是独立审查方，只读审查 RichMan 仓库本轮改动（Trae 实现），不改代码、不提交。
+
+仓库：D:\Lianjunjie\biancheng\RichMan
+本轮范围：Qoder 上一轮 P1/P2 修复（A）+ 单人练习 AI 上限 9→5（B）+ 五种固定 AI 人格（C）。
+改动未提交，全部在工作区：git status / git diff 可见；新增未跟踪文件包括 apps/server/src/bots/policy.ts、apps/server/src/bots/driver.ts、apps/server/src/rooms/lifecycle.ts、packages/shared/src/bots.ts、apps/server/tests/bots-personality.test.ts、bots-driver-reliability.test.ts、bots-lifecycle.test.ts 等。
+Trae 的自述报告在 handoff/AI人格与审查修复-成果报告.txt（可作线索，不得当证据）。
+
+【DSH 已独立跑出的真实结果，供你交叉核对，不要直接采信】
+1) pnpm test：84 files / 1004 tests 全绿（Trae 报告里 3 条 backup/scripts 失败在本机未复现）。
+2) pnpm typecheck：exit 0；pnpm build：exit 0。
+3) 真机 5 AI 冒烟（我跑的，非 Trae 的）：1 真人 + p1..p5 五 AI，room 8562，rounds[1,2,3]，humanCommands=4 全 ok，commandFailures=[]，serverErrors=[]，personalities=[PASSIVE,AGGRESSIVE,FOOL,CONSERVATIVE]。
+
+【必须逐项回答的核对点】
+A1 并发冲突修复（原 P1-1）
+- apps/server/src/bots/driver.ts 现在「成功才 markDriven」，VERSION_CONFLICT 重试 3 次（150/300/600ms），其他错误直接 markDriven 放弃。
+- 核对：重试期间会不会把同一次行动提交两次并让引擎重复生效（commandId 每次重新 randomUUID，若首次其实已成功只是回执丢失，是否会双扣钱/双行动）？
+- 核对：attempts 计数何时清理，是否存在同一 key 无限重试；重试 tick 与 pending 集合是否可能互相吞掉。
+- 核对：非 VERSION_CONFLICT 的失败（如 INVALID_AMOUNT、STALE_STATE）直接放弃是否会让 AI 永久卡在该阶段直到超时，是否有更合适的兜底。
+
+A2 定时器绑定 game/阶段（原 P1-2）
+- driver.ts 的 ScheduleStamp（gameId + phaseInstanceId）在 fire 与 stillCurrent 双重校验；start/rematch 先 cancelRoom 再 notify。
+- 核对：所有换局/销毁/离开/回收路径是否都清理了 timers、pending、attempts、driven、rescueTimers；有没有遗漏路径导致旧 draft 跨局生效。
+- 核对：BETTING 的 phaseInstanceId 形如 round1-betting-N，N 会不会在同一局内跨轮复用导致误判同一阶段。
+
+A3 生命周期（原 P1-3）
+- manager 的 pausedByNoHuman/noHumanSinceMs，RoomScheduler 的 getState 在无人在线时返回 null，driver.tick/fire 同样拒绝行动；ws.ts 每 30s reclaimRoom；常量在 rooms/lifecycle.ts（AI_LOBBY_TTL_MS=5min、NO_HUMAN_GRACE_MS=10min、LIFECYCLE_SWEEP_MS=30s）。
+- 重点核对我的两个怀疑（这是本轮最可能的问题）：
+  (a) 暂停期间引擎的 deadlineAt 没有顺延。真人离线 5 分钟时截止时间早已过去，重连后 scheduler 立即以 nowMs=原截止时刻补算超时动作；如果当时正处在 TAX 危险阶段，会不会重连即被判破产？ACTION/BETTING 会不会立刻被自动结束/自动 0 注？请给出真实代码路径判断与严重级别。
+  (b) reclaimRoom 会在 PLAYING 状态、最后一位真人离线满 10 分钟后删除房间与存档目录（含事件流）。这是产品选择还是缺陷？有没有二次确认、能否误删刚重连的房间（reclaimCandidates 与 canReclaim 之间有没有竞态）？重连时是否会先清除 pausedByNoHuman 再被回收。
+- 核对：restoreRoom 恢复时 pausedByNoHuman 的判定是否只依据快照里 online 的真人；AI 座位恢复后 online 是否恒为 true 且不触发暂停。
+
+B 上限 9→5
+- BOTS_MAX=5 在 packages/shared/src/rules.ts，manager 与 http 都引用；http 非法值仍 400 INVALID_BOTS。
+- 核对：apps/web/src/App.tsx:44 注释仍写「1～3」，且按钮数组硬编码 [1,2,3,4,5]，未引用 BOTS_MAX，是否应视为 P2（前后端常量双源）。
+- 核对：0 个 AI 建房、5 AI + 1 真人 = 6 座是否与 RULES.playerMax 一致。
+
+C 五种人格
+- 类型在 packages/shared/src/bots.ts（AGGRESSIVE/CONSERVATIVE/PASSIVE/GENIUS/FOOL，DEFAULT=PASSIVE），profile 只存在于 isBot 座位，createRoom 用注入 rng 抽取，rematch 重抽，持久化到 RoomSnapshot，ws 只给 AI 注入 botPersonality 标签。
+- 核对：五种人格是否真的行为不同、是否都在合法动作集内；FOOL 随机是否可能产生必被引擎拒绝的命令或卡住阶段（driver 是否有兜底）。
+- 核对 GENIUS 的结论「开奖均匀 0/1，任何非零下注 EV=0，风险调整后最优 0 注」是否与 packages/game-core/src/gamble.ts 的真实赔付公式（含两倍杠杆、猜点）一致；如果不一致请给出反例。
+- 核对：人格 rng 注入后同 seed 是否可复现；人类玩家是否可能收到他人的人格/是否泄漏信息。
+- 核对：旧快照缺失 botPersonality 时恢复默认 PASSIVE 是否安全。
+
+A4 其余 P2 修复
+- ACCEPT 前校验借款人收款后 ≤ MAX_MONEY_CENTS；私人全额还款受出借人 MAX 约束；driven key 按 gameId/round 清理且单房间上限 500（超限清空）；notify 每房间合并一个 tick；TAX 危险阶段每秒 rescuePoll 且遵守 2 秒请求最小间隔。
+- 核对：driven 超限清空后会不会重复驱动同一条已成功的命令（重复 END_ACTION/BET 是否有害）；notify 合并是否会丢事件导致阶段末尾无人行动；rescuePoll 是否会在 TAX 结束后残留 tick。
+
+D 测试有效性与安全
+- 通读新增与改动的 bots 测试：是否真的走 applyCommand/真实引擎与假定时器，而不是只断言 mock 被调用；有没有为了通过而放松既有断言（尤其 bots-http 的 9→5）。
+- 复核 P2-5（validateSnapshot 仍信任 isBot、AI 座位 tokenDigest 只校验非空）在「5 个人格 + 生命周期回收」之后是否升级为必须修的安全问题；真人是否可能认领 AI 座位或伪造 isBot 快照。
+- 复核 P2-6（App.tsx autoStart 失败无回滚）现在是否被 5 分钟 AI 大厅 TTL 兜底，残余风险是什么。
+
+【输出要求】
+- 只读：不要修改任何源码、不要 git add/commit。
+- 必须运行并贴真实结果：pnpm test、pnpm typecheck、pnpm build（在仓库根目录）。
+- 结论写成文件：handoff/审查/Qoder-AI人格与修复-20261117.txt（该文件允许写），正文包含：
+  1) 验证命令与真实尾行；
+  2) P0 / P1 / P2 清单，每条含文件:行号、问题、后果、最小修复建议；
+  3) 对我上面对 A3(a)/A3(b) 两个怀疑的明确判定（成立/不成立/需实测），以及 GENIUS 0 注 EV 的判定；
+  4) 测试有效性评价（新增测试是否真验行为、有无削弱）；
+  5) 最后一行只写一句：结论：能上线 / 结论：能但需先修 P0 / 结论：不能。
+- 如果发现我上面给的判断有错，直接指出，不要迎合。

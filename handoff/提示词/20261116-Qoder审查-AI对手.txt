@@ -1,0 +1,47 @@
+你是独立审查者，只读审查，不要修改任何代码、不要 git commit、不要改测试断言语义。工作区：D:\Lianjunjie\biancheng\RichMan（pnpm monorepo，Node >=22）。忽略 pet-spa/、vibe_images/、artifacts/ 下的其它内容。
+
+## 背景
+RichMan 是服务端权威的联机大富翁（2-10 人）。规则写在 packages/game-core，引擎是纯函数 applyCommand(state, command, { actorId, nowMs, drawResult })，服务器命令入口是 apps/server/src/rooms/command-queue.ts 的 GameCommandProcessor.execute(roomCode, playerId, command)。
+
+原版本必须两个真人才能玩，评委一个人玩不了。刚在 commit e4011dc 之上（未提交的工作区改动）加了「单人练习：AI 对手」。你的任务是审查这套改动是否正确、是否会被滥用、是否能支撑"一个人完整玩一局"。
+
+## 请读这些文件
+- 新增：apps/server/src/bots/policy.ts、apps/server/src/bots/driver.ts
+- 改动：apps/server/src/rooms/manager.ts、apps/server/src/ws.ts、apps/server/src/http.ts、apps/server/src/storage/types.ts、apps/server/src/storage/file-store.ts、packages/shared/src/protocol.ts、apps/web/src/App.tsx、apps/web/src/GameView.tsx、apps/web/src/LobbyView.tsx、apps/web/src/net/wire.ts
+- 新增测试：apps/server/tests/bots-policy.test.ts、bots-driver.test.ts、bots-manager.test.ts、bots-http.test.ts、bots-persistence.test.ts
+- 对照规则：packages/game-core/src/engine.ts、bank.ts、private-loans.ts、tax.ts、gamble.ts，packages/shared/src/rules.ts、protocol.ts、types.ts
+- 用 git diff 看改动全貌；handoff/AI对手-成果报告.txt 是作者自述，不要当证据。
+
+## 必须先复核的硬约束（违反任一即为 P0）
+1. AI 的每个动作都是标准 GameCommand，且只走 GameCommandProcessor.execute()（与真人同一条队列），actorId = AI 的 playerId，从而 eventSeq / commandId 幂等 / 审计 / 存档恢复全部生效。有没有任何绕过（直接改 state、直接调 applyCommand、自己造 state）？
+2. AI 不得作弊：不能凭空加钱、不能看隐藏信息（他人手牌式数据、他人下注金额 privacy_hide_bets）、不能改信用/负债。
+3. 已有规则的语义不能被 AI 路径破坏：失信不可还款/不计息/冻结/不淘汰、私人负债不影响银行额度、借款人破产→坏账、出借人破产→FROZEN、阶段内全员完成立即推进、BANK_DUE 扫 dueRound <= round、结算只扣 paidCents。
+4. 既有 942 条测试的断言不能被削弱或改写；新增测试不能只测"能跑"而不测语义。请抽查新测试是否真的断言了行为（而不是 expect(x).toBeDefined() 式空断言）。
+
+## 重点核对项（逐条给结论：确认有问题 / 无问题 + 依据）
+1. policy.ts 里 loan.lastInterestRound === state.round 这个过滤条件：如果本轮利息尚未计提，AI 是不是就永远不还私人债/银行债？请对照 accrueInterest / accruePrivateInterest 的实际调用时点给出结论。
+2. policy.ts 的 hasUnsettledBankLoan 用 status !== "REPAID"，而 borrowFromBank 的前置条件是什么？两者是否一致？会不会产生引擎必拒的命令（DEFAULTED 贷款是否算未结清）？
+3. policy.ts 在 TAX 阶段（危险自救）只应答私人借款请求、否则返回 null。结合 engine.ts 的 handleTaxPhase / RESCUE_GIVE_UP，AI 处于危险时会发生什么？会不会让阶段卡住（还是靠 dangerDeadlineMs 超时破产兜底）？
+4. driver.ts：markDriven 在投递之前执行，若 execute() 抛错或返回非 ok，该 (gameId, phaseInstanceId, botId, type[, ...]) 是否就永久不再重试？结合 ACTION/BETTING/BANK_DUE 各自是否真有超时兜底，判断会不会把房间推进拖到超时甚至卡死。
+5. 幂等键：ACTION 阶段只带 seat，BANK_DUE 带 loanId，请求带 requestId。是否存在"同一阶段同一座位需要发两条同类型命令"却被吞掉的场景（例如两笔私人债分别还款、连续两次自救借款）？
+6. driven 集合只在 cancelRoom / 换 gameId 时清理，一局 100 轮内会无界增长吗？notify() 每次 commit 都 setTimer(0)，会不会造成定时器堆积/重复驱动？
+7. 安全：POST /api/rooms 的 bots 校验（是否会被 null / 浮点 / 字符串绕过、上限是否与 RULES.playerMax 一致）；AI 座位的 tokenDigest 是否真的不可认领（restoreIdentity / matchesIdentity / loadAll 有没有可能让人顶替 AI 座位或把 AI 当真人恢复）。
+8. 存档：validateSnapshot 对 AI 座位放宽了 tokenDigest 校验、human/sessions 计数改为按真人数。这个放宽有没有被利用的可能（例如构造含 AI 标记的快照绕过校验）？重启恢复后 AI 是否仍在席、游戏能否继续。
+9. 并发/竞态：ws.ts 里 notify 只在 commit 之后调用；如果一条真人命令没有改变 version（被拒），AI 会不会因此不被唤起而卡住？start_game / resume_game / rematch / destroy_room 的 notify / cancelRoom 是否齐全。
+10. 前端 App.tsx 的 handlePractice + autoStart：入座自动 ready、全员就绪自动 start。有没有竞态（ready 早于 joined 确认、start 早于 snapshot、重复 start）？失败时用户会不会卡在空大厅没有提示。
+11. 资源滥用：创建 N 个 AI 房间后真人直接关页面（leaveFor 在开局后只标 offline、不删座位），AI 会继续把这一局推到结束。评估这对 CPU / 房间上限的影响，是否需要在"无真人在线"时暂停或回收。
+
+## 交付格式
+先跑并如实贴出结果（不要编造）：
+cd D:\Lianjunjie\biancheng\RichMan
+pnpm test          # 期望 972 passed
+pnpm typecheck
+pnpm build
+
+然后输出：
+- P0 / P1 / P2 清单，每条包含：文件:行号、错在哪（引用关键代码）、为什么违反上述哪条约束、最小修复建议。
+- 测试有效性评价：新增 30 条测试是否覆盖了关键语义，缺哪些必须补的用例。
+- 一句话结论：这套 AI 对手能不能上线给评委单人体验（能 / 能但需先修 P0 / 不能）。
+- 单独一节写「策略强度」：只作建议（P2），指出 AI 目前实际行为（是否几乎不借钱、不下注、不自救），以及最小改动能提升对抗感的地方。
+
+只读审查，不要提交代码。发现 P0 必须给出可复现的路径或测试。

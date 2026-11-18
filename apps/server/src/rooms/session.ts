@@ -108,8 +108,8 @@ export class SessionRegistry {
   }
 
   /** 恢复码只在首次加入时返回一次；与会话 token 使用独立安全随机源取样。 */
-  join(roomCode: string, nickname: string): JoinResult & { recoveryCode: string } {
-    const result = this.manager.join(roomCode, nickname);
+  join(roomCode: string, nickname: string, activate = true): JoinResult & { recoveryCode: string } {
+    const result = this.manager.join(roomCode, nickname, undefined, activate);
     const recoveryCode = secret();
     this.store.save({
       roomCode,
@@ -123,18 +123,18 @@ export class SessionRegistry {
   }
 
   /** 无效凭证一律拒绝；恢复身份不会新增玩家或触碰游戏状态。 */
-  resume(roomCode: string, credentials: ResumeCredentials): JoinResult {
+  resume(roomCode: string, credentials: ResumeCredentials, activate = true): JoinResult {
     if (credentials.sessionToken !== undefined) {
       const record = this.store.getByTokenDigest(digest(credentials.sessionToken));
       if (this.validForRoom(record, roomCode)) {
-        return this.manager.restoreIdentity(roomCode, record.playerId, credentials.sessionToken);
+        return this.manager.restoreIdentity(roomCode, record.playerId, credentials.sessionToken, activate);
       }
     }
     if (credentials.recoveryCode !== undefined) {
       const record = this.store.getByRecoveryDigest(digest(credentials.recoveryCode));
       if (this.validForRoom(record, roomCode)) {
         const sessionToken = secret();
-        const result = this.manager.restoreIdentity(roomCode, record.playerId, sessionToken);
+        const result = this.manager.restoreIdentity(roomCode, record.playerId, sessionToken, activate);
         this.store.save({ ...record, tokenDigest: digest(sessionToken) });
         return result;
       }

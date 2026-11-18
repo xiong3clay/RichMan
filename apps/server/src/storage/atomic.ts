@@ -5,6 +5,8 @@ export interface AtomicOptions {
   failAt?: 'before_rename' | 'after_rename';
   checkpoint?: (point: 'before_rename' | 'after_rename') => void | Promise<void>;
   failCleanup?: boolean;
+  /** 默认 true；专用的辅助文件（如 activation-undo）不应污染 snapshot.bak.json。 */
+  backup?: boolean;
   warn?: (message: string) => void;
 }
 export class AtomicWriteError extends Error {
@@ -20,8 +22,10 @@ export async function writeSnapshotAtomic(filePath: string, value: unknown, opti
   try {
     const handle = await open(temp, 'wx');
     try { await handle.writeFile(text, 'utf8'); await handle.sync(); } finally { await handle.close(); }
-    try { await copyFile(filePath, path.join(directory, 'snapshot.bak.json')); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    if (options.backup !== false) {
+      try { await copyFile(filePath, path.join(directory, 'snapshot.bak.json')); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    }
     await options.checkpoint?.('before_rename');
     if (options.failAt === 'before_rename') throw new Error('injected before_rename');
     await rename(temp, filePath); committed = true;

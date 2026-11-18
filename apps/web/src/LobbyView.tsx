@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { AudioButton } from "./audio/AudioPanel";
+import { botPersonalityLabel } from "./net/wire";
 import type { JoinedInfo, WireRoom } from "./net/wire";
 
 export interface LobbyViewProps {
@@ -66,6 +67,10 @@ export function LobbyView({ room, joined, error, onReady, onStart, onDestroyRoom
             <span>#{player.seatId}</span>
             <span>
               {player.nickname}
+              {player.isBot === true ? <span className="tag">AI</span> : null}
+              {player.isBot === true && player.botPersonality !== undefined
+                ? <span className="tag">{botPersonalityLabel(player.botPersonality)}</span>
+                : null}
               {player.playerId === room.hostId ? <span className="tag">房主</span> : null}
               {joined !== null && player.playerId === joined.playerId ? <span className="tag me">我</span> : null}
             </span>

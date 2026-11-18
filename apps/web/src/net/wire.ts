@@ -2,6 +2,13 @@
  * Web 只消费服务端 view 的 wire 形状：金额一律十进制字符串，前端不做任何金额运算。
  * 这里不 import game-core 的引擎类型，避免把“内部 number 分”误当成可展示金额。
  */
+import { BOT_PERSONALITY_LABELS } from "@richman/shared";
+import type { BotPersonality } from "@richman/shared";
+
+/** AI 人格只做展示；人类玩家没有该字段。 */
+export function botPersonalityLabel(personality: BotPersonality | undefined): string {
+  return personality === undefined ? "" : BOT_PERSONALITY_LABELS[personality];
+}
 
 export interface WireLobbyPlayer {
   playerId: string;
@@ -9,6 +16,10 @@ export interface WireLobbyPlayer {
   seatId: number;
   ready: boolean;
   online: boolean;
+  /** 单人练习的 AI 座位；人类玩家没有该字段。 */
+  isBot?: boolean;
+  /** 仅 AI 座位存在的人格标签。 */
+  botPersonality?: BotPersonality;
 }
 
 export interface WireRoom {
@@ -41,6 +52,10 @@ export interface WireMe {
   credit: "GOOD" | "DEFAULTED";
   status: "ALIVE" | "DANGER" | "BANKRUPT";
   alive: boolean;
+  /** 服务端标记的 AI 座位；仅用于展示，不参与任何规则判定。 */
+  isBot?: boolean;
+  /** 仅 AI 座位存在的人格标签。 */
+  botPersonality?: BotPersonality;
 }
 
 export interface WirePublicPlayer {
@@ -51,6 +66,10 @@ export interface WirePublicPlayer {
   status: "ALIVE" | "DANGER" | "BANKRUPT";
   alive: boolean;
   defaultedBankDebtCents: string;
+  /** 服务端标记的 AI 座位；仅用于展示，不参与任何规则判定。 */
+  isBot?: boolean;
+  /** 仅 AI 座位存在的人格标签。 */
+  botPersonality?: BotPersonality;
 }
 
 export interface WirePrivateLoan {

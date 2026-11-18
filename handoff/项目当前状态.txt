@@ -1,5 +1,74 @@
 RichMan 项目当前状态
-更新日期：2026-11-10
+更新日期：2026-11-18
+
+【归档残留与激活补偿（2026-11-18，未 commit）】
+- A N1 残留：activation-undo.json 跨重启补偿。ws 最终激活在 transact 前原子写
+  expectedVersion/beforeGame/noHumanSinceMs/pauseStartedAtMs/pauseShifted/writtenAtMs；
+  激活+online 同一事务成功后在同一房间队列删除。loadAll 版本匹配→回滚 beforeGame、
+  paused=true、真人 offline、写回快照并删 undo；版本不等→只删 undo；undo 损坏→保留房间并暂停。
+  atomic 写入新增 backup=false，避免污染 snapshot.bak.json。
+- B N7 残留：cleanupArchives 顺带清理 archive/ 与 rooms/ 下
+  .archived-source-* / .staging-* / .restore-* 且 mtime 超过 1 小时的目录；失败进 failed+warn。
+- C N7 边界：坏归档连续 3 次读取失败后移到 archive/.quarantine/<原名>/，
+  结果记录 quarantined，之后不再 failed；隔离占用计入容量但不参与 FIFO 删除。
+- 测试：新增 activation-undo 4 条、archive-residue 2 条；共 1073 条。
+- 证据：本机全量 1073 → 1068 通过；5 条失败均为既有环境问题（junction T21/T23/T26、
+  负载超时 T15/T5，T15/T5 单独复跑通过）；typecheck 重跑 0；build 0。
+- 未做：物理双盘实验、残留删除失败故障注入、隔离容量边界单测、undo 防篡改。
+- 交付报告：handoff/归档残留与激活补偿-成果报告.txt。
+
+【归档与二次平移修复（2026-11-18，未 commit）】
+- N1/N2/N3/N5/N8 主路径已修，身份及 joined 交付后原子激活，game/消费标志同快照，归档年龄独立，失败保持暂停。
+- N7 增 EXDEV 复制校验发布、管理员 restoreFromArchive、清单、30 天/100 份/1 GiB FIFO；N4 全请求创建时间平移，N6 安全整数及 Date 检查。
+- 新增 43 条行为测试，最终 pnpm test 88 文件/1067 条，206.02s，exit 0。本次设置 VITEST_MAX_WORKERS=4；typecheck/build exit 0。
+- 旧断言未改，仅 bots-lifecycle 一处归档夹具同步推进注入时钟。WS 离线时钟通过 offlineNow 注入，建房时钟兼容原契约。
+- 连续补偿写盘失败后的跨重启 undo 尚未覆盖；坏清单/权限项可暂超容量，EXDEV tomb 清理失败仅告警。
+- 完整改法、测试、日志及未做项见 handoff/归档与二次平移修复-成果报告.txt。
+
+【暂停时间线与生命周期修复（2026-11-17，未 commit）】
+- 依据：handoff/审查/Qoder-AI人格与修复-20261117.txt。
+- P0-1 已修：game-core 新增 shiftDeadlinesForPause（整体平移 window/danger/deadlineAt/
+  PENDING 请求 deadline+createdAt，version+1 不发事件）；command-queue 新增
+  resumeFromPause/resumeFromPauseInQueue，ws join/resume 在清 pausedByNoHuman 之前、
+  房间队列内先平移；失败保持暂停并返回 ERROR_PAUSED。未新增客户端命令。
+- P1-1 已修：PLAYING 无人在线不再删除，只在暂停 7 天后归档到 data/archive/<code>/
+  （保留 snapshot/events）；有真人座位的离线 LOBBY 30 分钟后归档；纯 AI/空大厅 5 分钟删除；
+  reclaim 事务内复查 canReclaim；归档/删除都走同房间队列。
+- P2：FOOL 存活检查、TAX 催收 MAX、driver 重试白名单（ERROR_PAUSED）、driven LRU、
+  notify/retry timer 纳入 cancelRoom、App 引用 BOTS_MAX、生命周期时间戳持久化、
+  validateSnapshot AI 数量/ID/字段加固、autoStart 失败回滚、processor 暂停拒绝命令均已做；
+  P2-12 人格公开按产品语义保留；P2-7/P2-9 已并入 P1-1。
+- 测试：新增 bots-resume-pause 8 条；lifecycle 5→9、driver-reliability 5→10、
+  personality 16→18、manager 9→10；共 1024 条。
+- 证据：typecheck/build 0；本机全量 1024 条 → 1020 通过、4 条既有 junction 环境失败
+  （backup T21/T23、scripts 两条；与本轮无关）；crash-recovery/stability 单独复跑 8/8。
+- 未验证：P2-6/P2-11 浏览器 E2E；真实 COLLECT 被引擎拒绝的降级路径；归档恢复工具；
+  真人真机完整一局。
+- 下一入口：归档恢复/提示；浏览器级单人练习 E2E；其余见成果报告第 6 节。
+
+【AI 人格与审查修复（2026-11-17，未 commit）】
+- 基线：972 条全绿（Qoder 报告 handoff/审查/Qoder-AI对手-20261117.txt）；本轮 A/B/C 三件事。
+- A Qoder：P1-1 driver 成功才 markDriven + VERSION_CONFLICT 3 次重试（150/300/600ms）；
+  P1-2 timer 绑定 gameId/phaseInstanceId，start/rematch 先 cancelRoom 再 notify；
+  P1-3 开局后无在线真人暂停推进（scheduler getState=null、driver 不行动），
+       纯 AI 大厅 5 分钟、无真人宽限 10 分钟，30s 巡检回收内存/存档/定时器；
+  P2-1 TAX 自救（催收/私人借款/放弃，严格 2 秒间隔，TAX 不借银行）；
+  P2-3 notify 按房间合并 + driven 按轮清理/上限 500；
+  P2-4 ACCEPT 与私人还款的 MAX 边界；P2-7 http 引用 BOTS_MAX。
+  P2-5（isBot 快照信任）与 P2-6（前端 autoStart 重试）按要求留待下一轮。
+- B BOTS_MAX=5（packages/shared/src/rules.ts），manager/http 同源；前端 1–5 个 AI。
+- C 五种人格 AGGRESSIVE/CONSERVATIVE/PASSIVE/GENIUS/FOOL：createRoom 用注入 rng 抽取，
+  快照持久化，旧快照缺省 PASSIVE，rematch 重抽；大厅/对局显示人格标签；策略按人格区分。
+  GENIUS 用 gamble.ts 真实赔付公式；均匀开奖下 EV=0，风险调整后选 0 注。
+- 新增测试：bots-personality 16、bots-driver-reliability 5、bots-lifecycle 5；
+  manager 6→9、persistence 3→5、driver 3→4（含 1 真人+5 AI ≥3 轮）；bots 合计 62 条。
+- 证据：typecheck/build 0；全量 1004 条 → 1001 通过、3 条既有 junction 环境失败
+  （backup T21/T23、scripts T26，与本轮无关）；5 AI 真实 smoke 房间 9538 打到第 3 轮，
+  无非法命令/服务端错误；日志 artifacts/test-logs/ai-personality-*。
+- 未验证：各人格胜率/破产率模拟；真人真机完整一局；P2-5/P2-6。
+- 下一入口：P2-5 快照 isBot 来源白名单 + AI 数量上限；P2-6 autoStart 发送失败回滚/提示；
+  GENIUS 在非均匀开奖下的 EV 复核。
+
 更新者：Lead（DSH 统筹；06 由 Codex 实现，Qoder 独立复核，复核修复由 Codex，Lead 两次验收；05F 由 Trae 初版，Qoder 复核后 Lead 修复；07A/07B/07C 由 Trae 实现，Qoder 三轮复核，Lead 验收；08A/08B/08C 由 Trae 实现并完成复核修复；09A 已提交 eeec8ca，第四轮测试补强已提交 bb7c2f2（交接 1ebdbe0，Qoder 复核 PASS）；09B 已提交 6491fe9（文档 39dc1b9），Qoder 复核 FAIL(M1/M2)；第五/六轮修复 bcb9aae、文档 71e099a，Qoder 第六轮验证 code PASS、文档硬伤已改并提交 59c00f0；09C-B 规格已写（handoff/单元09C-B-备份恢复清理脚本.txt，含 Qoder S1–S6 补强）；09C-A 由 Trae 实现、Lead 验收并提交 2bd84cd，Qoder 复核判可提交（66 文件/813 条）；09C-B 已提交 70b18a0（Qoder 两轮复核：M1/M2 修复后 code PASS，文档 M-DOC 已改）；09C-C 已提交 7c8fd7d，Qoder 复核可提交（无 must-fix，S1 文档计数已改）；09C-D 已提交 839c3c6（0.9.0 LICENSE/CHANGELOG/README，typecheck/build 0）；09D 起服时发现 /health 仍硬编码 0.0.0，已改为 0.9.0 并加测试（66 文件/835 条，已提交 d07e13d）；单元 10A D6 多请求引擎已实现并提交 a8016c2，Qoder 只读复核可提交（无 must-fix，S1–S5 已处置），69 文件/866 条；10B 多请求界面与请求截止已提交 1ffe107，Qoder 复核可提交（无 must-fix，S1/S2 已按 Lead 裁决补强），71 文件/881 条；单元11由Codex完成11A/11B自动化，新增12条；Qoder只读复核「可提交、无must-fix」，Lead按S1–S4补强T3/I12/destroyed/T9/T10后全量73文件/893条（168.69s）、typecheck/build 0；两处破产一致性修复；已提交 7d079d1（feat）+696d7a6（docs），工作区干净）
 
 

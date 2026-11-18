@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { BOTS_MAX } from "@richman/shared";
 import { GameView } from "./GameView";
 import { LobbyView } from "./LobbyView";
 import { clearSession, loadSession, RichmanClient } from "./net/client";
@@ -41,6 +42,8 @@ export default function App() {
   const [serverError, setServerError] = useState<ServerError | null>(null);
   const [replaced, setReplaced] = useState(false);
   const [busy, setBusy] = useState(false);
+  /** 单人练习的 AI 数量（1～BOTS_MAX），默认 1 个。 */
+  const [botCount, setBotCount] = useState(1);
   /**
    * 首次进入自动打开教程。storage 完全不可用（对象都不存在）时不自动弹，
    * 因为无法记录已读；玩家仍可从入口页手动打开，避免每次进入都被挡住。
@@ -71,7 +74,10 @@ export default function App() {
     client.dispose();
   }
 
-  function startRoom(code: string, nick: string, stored: StoredSession | null): void {
+  function startRoom(code: string, nick: string, stored: StoredSession | null, options: { autoStart?: boolean } = {}): void {
+    const autoStart = options.autoStart === true;
+    let autoJoinedId: string | null = null;
+    let startedAutomatically = false;
     stopClient(joined !== null);
     leavingRef.current = false;
     setNickname(nick);
@@ -98,9 +104,24 @@ export default function App() {
       onJoined: (info) => {
         setJoined(info);
         setServerError(null);
+        autoJoinedId = info.playerId;
+        // 单人练习：入座后自动准备，等房间全员就绪再自动开局。
+        if (autoStart) clientRef.current?.sendLobby({ type: "ready", ready: true });
       },
       onRoom: (nextRoom) => {
         setRoom(nextRoom);
+        if (!autoStart || startedAutomatically || autoJoinedId === null) return;
+        const self = nextRoom.players.find((player) => player.playerId === autoJoinedId);
+        if (nextRoom.state !== "LOBBY" || nextRoom.hostId !== autoJoinedId) return;
+        if (self?.ready !== true || nextRoom.players.length < 2) return;
+        if (!nextRoom.players.every((player) => player.ready)) return;
+        const sent = clientRef.current?.sendLobby({ type: "start" });
+        if (sent === true) startedAutomatically = true;
+        else {
+          // 发送失败不能占住 autoStart：回滚后允许玩家手动点开局。
+          startedAutomatically = false;
+          setServerError({ code: "AUTO_START_FAILED", message: "自动开局失败，请手动点击「开始游戏」" });
+        }
       },
       onStarted: () => {
         // started 之后等 snapshot；服务端会在同一提交内推送到所有连接。
@@ -144,6 +165,8 @@ export default function App() {
       }),
       onServerError: (error) => {
         if (leavingRef.current) return;
+        // 自动开局被服务端拒绝/连接断开：回滚标志，让玩家可以手动重试。
+        if (autoStart) startedAutomatically = false;
         setServerError({ code: error.code, message: error.message });
         setLobbyError(
           isSessionError(error.code) && !(clientRef.current?.hasJoined ?? false)
@@ -249,6 +272,39 @@ export default function App() {
       }
       clearSession();
       startRoom(data.roomCode, nick, null);
+    } catch {
+      setEntryError("无法连接服务器，请确认服务已启动");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** 单人练习：建房时带上 AI 数量，入座后自动准备并开局（见 startRoom 的 autoStart）。 */
+  async function handlePractice(): Promise<void> {
+    const nick = nickname.trim();
+    if (nick === "") {
+      setEntryError("请先输入昵称");
+      return;
+    }
+    if (busy) return;
+    setBusy(true);
+    setEntryError(null);
+    setLobbyError(null);
+    try {
+      const response = await fetch("/api/rooms", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ nickname: nick, bots: botCount }),
+      });
+      const data = (await response.json()) as { ok?: unknown; roomCode?: unknown; error?: unknown };
+      if (!response.ok || data.ok !== true || typeof data.roomCode !== "string") {
+        setEntryError(data.error === "INVALID_BOTS"
+          ? "AI 数量不合法，请选择 1～" + String(BOTS_MAX) + " 个"
+          : "建房失败（HTTP " + String(response.status) + "）");
+        return;
+      }
+      clearSession();
+      startRoom(data.roomCode, nick, null, { autoStart: true });
     } catch {
       setEntryError("无法连接服务器，请确认服务已启动");
     } finally {
@@ -369,6 +425,28 @@ export default function App() {
             <button type="button" className="primary" onClick={() => void handleCreate()} disabled={busy}>
               建房
             </button>
+          </div>
+          <div className="practice">
+            <p className="hint">单人练习：你 + AI 对手，无需第二位玩家，入座后自动准备并开局。</p>
+            <div className="row" role="group" aria-label="AI 对手数量">
+              {Array.from({ length: BOTS_MAX }, (_unused, index) => index + 1).map((count) => (
+                <button
+                  key={count}
+                  type="button"
+                  className={"choice" + (botCount === count ? " primary" : " ghost")}
+                  aria-pressed={botCount === count}
+                  disabled={busy}
+                  onClick={() => setBotCount(count)}
+                >
+                  {count} 个 AI
+                </button>
+              ))}
+            </div>
+            <div className="row">
+              <button type="button" className="primary" onClick={() => void handlePractice()} disabled={busy}>
+                单人练习
+              </button>
+            </div>
           </div>
           <div className="divider" />
           <label className="field">

@@ -33,3 +33,8 @@ data/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# 本地冒烟数据
+.smoke-data*/
+artifacts/tmp/
+artifacts/test-logs/*.err

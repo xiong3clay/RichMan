@@ -211,6 +211,37 @@ export function advanceSystem(state: GameState, ctx: CommandContext): Transition
 }
 
 /**
+ * 无真人在线暂停后的时间线冻结：把状态里所有绝对时间整体 +pausedMs，
+ * 恢复后剩余时间与暂停那一刻完全一致，不触发任何超时/结算。
+ * 只 +version，不发事件；pausedMs 非正或非安全整数时原样返回。
+ */
+export function shiftDeadlinesForPause(state: EngineState, pausedMs: number): EngineState {
+  if (!Number.isSafeInteger(pausedMs) || pausedMs <= 0) return state;
+  const version = state.version + 1;
+  if (!Number.isSafeInteger(version)) throw new RangeError("暂停平移后的 version 超出安全整数范围");
+  const shiftTime = (value: number, field: string): number => {
+    const shifted = value + pausedMs;
+    if (!Number.isSafeInteger(shifted) || !Number.isFinite(new Date(shifted).getTime())) {
+      throw new RangeError(`暂停平移后的 ${field} 超出有效时间范围`);
+    }
+    return shifted;
+  };
+  const s: EngineState = structuredClone(state);
+  if (s.windowDeadlineMs !== null) s.windowDeadlineMs = shiftTime(s.windowDeadlineMs, "windowDeadlineMs");
+  if (s.dangerDeadlineMs !== null) s.dangerDeadlineMs = shiftTime(s.dangerDeadlineMs, "dangerDeadlineMs");
+  s.deadlineAt = s.windowDeadlineMs === null ? null : new Date(s.windowDeadlineMs).toISOString();
+  s.requests = s.requests.map(request => {
+    // 自救间隔取最近一次请求，已结束请求的创建时间也需要随游戏时间平移。
+    const shifted = { ...request, createdAtMs: shiftTime(request.createdAtMs, "requests.createdAtMs") };
+    if (request.status === "PENDING") shifted.deadlineMs = shiftTime(request.deadlineMs, "requests.deadlineMs");
+    return shifted;
+  });
+  s.version = version;
+  return s;
+}
+
+
+/**
  * 进程重启后的继续：只重建当前等待窗口，不执行计息、开奖、税收或阶段推进。
  * 返回值预留一个事件序号；调用方须将同序号的公开 GAME_RESUMED 事件与状态一起提交。
  */

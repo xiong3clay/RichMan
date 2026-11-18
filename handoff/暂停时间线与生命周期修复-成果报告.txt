@@ -1,0 +1,180 @@
+RichMan「暂停时间线与生命周期修复」成果报告
+=============================================
+日期：2026-11-17
+依据：handoff/审查/Qoder-AI人格与修复-20261117.txt
+范围：P0-1、P1-1、P2-1～P2-13（P2-7/P2-9 由 P1-1 一并解决；P2-12 只记录产品语义）。
+基线：1004 条全绿（DSH 验收）；本轮未 git add / 未 git commit；既有测试断言未放松。
+
+0. 完成度
+---------
+本轮完成了 P0-1、P1-1、P2-1、P2-2、P2-3、P2-4、P2-5、P2-6、P2-8、P2-10、P2-11、P2-13。
+P2-7、P2-9 已并入 P1-1 实现；P2-12 按用户要求只记录、不隐藏人格。
+没有新增客户端可见的 GameCommand：P0-1 用的是服务器内部状态平移 + 现有 commit 路径。
+
+1. P0-1 无真人暂停没有顺延截止时间（已修）
+------------------------------------------
+1.1 改了什么
+- game-core 新增纯函数 shiftDeadlinesForPause(state, pausedMs)（engine.ts 约 213-230）：
+  windowDeadlineMs、dangerDeadlineMs、deadlineAt、PENDING LoanRequest 的 deadlineMs 与
+  createdAtMs 整体 +pausedMs；version+1，eventSeq/events 不变；pausedMs 非正或非安全整数
+  原样返回（同一对象）。
+- command-queue.ts 新增 GameCommandProcessor.resumeFromPause(roomCode)（约 70-95）：
+  在房间队列内取 pauseSince，算 pausedMs = now - since，调用 shift，构造
+  TransitionResult{state, events: [], outcome:{ok:true}, nextDeadlineAt} 走现有 commit；
+  成功后调用 markPauseShifted。另有 resumeFromPauseInQueue 供已经持有队列的 ws join 分支使用，
+  避免嵌套 queue.run 死锁。
+- manager.ts 新增 getPauseSince / markPauseShifted（约 352-363）：
+  markPauseShifted 只清 noHumanSinceMs，保持 pausedByNoHuman，直到真人真正上线。
+- ws.ts 的 join/resume 分支（约 311-321）：
+  在 sessions.join/resume（清 pausedByNoHuman）之前先 resumeFromPauseInQueue；
+  失败时 console.error + ERROR_PAUSED 给客户端并 return，房间保持暂停。
+  重启/存档故障的 paused 房间不走平移（由 resume_game 重建窗口），避免叠加版本。
+- scheduler 的 getState 仍是 isNoHumanOnline 时返回 null；重连成功后 schedule + notify。
+
+1.2 测试
+- apps/server/tests/bots-resume-pause.test.ts（新增 8 条）：
+  「窗口/危险/请求时间整体平移，version+1 且不发事件」
+  「pausedMs 非正/非安全整数时原样返回」
+  「ACTION 离线超过原截止时间，平移后不会被立即超时」
+  「BETTING 平移后不会按 0 注立即结算」
+  「TAX 危险平移后不会立即破产」
+  「先平移后清暂停；重连后 scheduler 不会补算过期 ACTION 超时」
+  「提交失败时房间保持暂停并抛出，调用方可以拒绝重连快进」
+  「P2-13 processor 的 isPaused 包含无真人在线：暂停时拒绝新命令」
+- 语义：按暂停时长整体平移，恢复后剩余时间与暂停那一刻一致；不是重置为整段新窗口。
+
+2. P1-1 开局后 10 分钟静默删档（已修）
+--------------------------------------
+2.1 改了什么
+- lifecycle.ts：AI_LOBBY_TTL_MS=5min（纯 AI/空大厅直接删除）、
+  LOBBY_OFFLINE_ARCHIVE_MS=30min（有真人座位但全员离线的大厅归档）、
+  ROOM_PAUSE_ARCHIVE_MS=7 天（PLAYING 无人在线暂停归档）、LIFECYCLE_SWEEP_MS=30s。
+- manager.ts：
+  shouldReclaim（约 723-728）只允许 LOBBY + 0 真人 → 删除；
+  shouldArchive（约 730-742）覆盖离线大厅 30min 与 PLAYING 暂停 7 天 → 归档；
+  archiveCandidates / canArchive / archiveRoom（约 373-418）：
+  先 store.archiveRoom 成功，再从内存与会话索引移除；失败保持原样等待重试。
+  reclaimRoom 的 transact action 内再次 canReclaim（P2-9 防御）。
+  noteHumanOnline/noteHumanOffline 现在也维护 LOBBY 的最后离线起点。
+- file-store.ts archiveRoom（约 146-165）：rooms/<code>/ 整体 rename 到
+  data/archive/<code>/（重名时追加时间戳），保留 snapshot.json 与 events.ndjson，
+  warn 日志写出实际归档路径；ENOENT 视为已归档。
+- ws.ts sweep（约 550-581）：删除与归档分开处理，均在同一房间队列内二次确认；
+  归档成功后 cancelRoom scheduler/driver 并 console.warn 说明存档保留在 data/archive。
+2.2 测试
+- bots-lifecycle.test.ts（9 条）：
+  「纯 AI 大厅 5 分钟仍直接删除，且不进入归档候选」
+  「PLAYING 无人在线 10 分钟不删除；7 天后只归档，存档仍在」
+  「有真人座位的离线 LOBBY 30 分钟后归档；29:59 不动」
+  「宽限期内重连不会丢档，归档候选立即消失」
+  「sweep 与重连同房间队列顺序：先重连则 canReclaim/canArchive 都为 false」
+  「多次 transact 不会重置 createdAtMs；重启恢复沿用快照时间」
+  「旧快照缺生命周期字段时按恢复时刻重新计时」
+  「PLAYING 的离线起点随快照保存，重启后继续累计」
+  「暂停期间不提交命令，重连后恢复」
+- P2-8：RoomSnapshot 新增 createdAtMs/noHumanSinceMs/pausedByNoHuman（storage/types.ts 约 22-25），
+  exportRoom/restoreRoom 读写并校验；旧快照缺字段时从恢复时刻计时。
+- 行为：PLAYING 永远不因离线删除；最多在暂停 7 天后归档。
+
+3. P2 逐条
+----------
+P2-1 FOOL 同意私人借款未检查借款人存活（已修）
+- policy.ts FOOL 分支加入 borrowerAlive（约 105-108）。
+- 测试：bots-personality「FOOL 也会拒绝已死亡借款人的请求（P2-1）」。
+
+P2-2 TAX 催收未按出借人 MAX（已修）
+- collectibleDraft 金额加入 min(MAX_MONEY_CENTS - bot.cents)（policy.ts 约 372-377）。
+- 收不到钱时同一决策自然降级：collect 为 0 → 继续走 rescueRequestDraft / GIVE_UP。
+- 测试：bots-personality「TAX 催收金额不超过出借人 MAX；收不到钱时降级到借款/放弃（P2-2）」。
+- 说明：真实 DANGER 玩家余额为负，MAX-bot.cents > MAX，该上限是防御性约束；
+  若引擎仍因瞬时状态拒绝 COLLECT，下一秒 rescuePoll 重新决策时可降级为借款/放弃。
+
+P2-3 driver 只重试 VERSION_CONFLICT（已修）
+- RETRYABLE_CODES = {VERSION_CONFLICT, ERROR_PAUSED}（driver.ts 约 50-53、260-270）；
+  确定性非法（REQUEST_EXPIRED/INVALID_AMOUNT 等）仍 markDriven + warn。
+- 测试：bots-driver-reliability「ERROR_PAUSED 重试后成功」「REQUEST_EXPIRED 不重试」。
+- 没有引用不存在的 STALE_STATE。
+
+P2-4 driven 超限直接清空（已修）
+- 超 500 时按 Set 插入顺序淘汰最旧 1 条，保留本轮最近成功的 key（driver.ts 约 339-345）。
+- 测试：bots-driver-reliability「超过 500 时只淘汰最旧 key，保留最近成功的幂等记录」。
+
+P2-5 notify/retry 匿名 timer 未跟踪（已修）
+- notify 的 tick 与 VERSION_CONFLICT/ERROR_PAUSED retry 现在都写入 timers 表
+  （driver.ts 约 117-132、262-269）；cancelRoom 按房间前缀统一 clear 并清 pending/attempts。
+- 测试：bots-driver-reliability「cancelRoom 后排队中的 notify tick 不再执行」
+  「cancelRoom 后已经排期的重试不再提交」。
+
+P2-6 前端 AI 上限双源（已修）
+- App.tsx 从 @richman/shared 引入 BOTS_MAX；按钮用 Array.from(BOTS_MAX) 生成；
+  INVALID_BOTS 文案与注释改为 1～BOTS_MAX（当前 5）。
+- 未做浏览器 E2E；以 typecheck/build 与现有 web 测试保证编译与渲染路径。
+
+P2-7 LOBBY 有离线真人永不回收（已修）
+- 由 P1-1 的 LOBBY_OFFLINE_ARCHIVE_MS=30min 覆盖，边界测试见 P1-1。
+
+P2-8 生命周期时间戳未持久化（已修）
+- RoomSnapshot 新增三字段并校验；restoreRoom 优先使用快照值，旧快照从恢复时刻计时。
+- 测试：bots-lifecycle P2-8 三条。
+
+P2-9 reclaimRoom 事务内复查（已修）
+- reclaimRoom 的 transact action 内再次 canReclaim，未通过则不删除、返回 false。
+- 队列顺序测试见 P1-1「sweep 与重连同房间队列顺序」。
+
+P2-10 validateSnapshot 信任 isBot（便宜加固，已做）
+- AI 座位数 ≤ BOTS_MAX；isBot 的 playerId 必须是 p<seatId>；人类不得带 botPersonality；
+  sessions 不得引用 AI（原有）；生命周期字段类型校验。
+- 测试：bots-manager「P2-10 篡改快照：AI 数量超限、AI playerId 与座位不符、
+  生命周期字段非法都应拒绝」。
+- 未做签名/加密（用户明确本轮不做）。
+
+P2-11 autoStart 失败无回滚（已修）
+- onRoom 只有 sendLobby(start) 返回 true 才置 startedAutomatically；
+  失败回滚并给出可见 serverError「自动开局失败，请手动点击开始游戏」。
+  onServerError 在 autoStart 下也会回滚标志，允许手动重试。
+- 未做浏览器 E2E（无浏览器测试设施）；LOBBY 残留由 P1-1 的 30 分钟归档兜底。
+
+P2-12 人格标签公开（按用户要求不改）
+- 产品语义：人格标签对所有真人公开，透明、可被针对；本轮不隐藏、不改协议。
+
+P2-13 processor isPaused 未包含 pausedByNoHuman（已修）
+- ws.ts processor 的 isPaused 改为 manager.isPaused(code) || manager.isNoHumanOnline(code)；
+  暂停期间 execute 返回 ERROR_PAUSED（与 driver 的 ERROR_PAUSED 重试白名单配合）。
+- 测试：bots-resume-pause「P2-13 processor 的 isPaused 包含无真人在线」。
+
+4. 改动文件清单
+---------------
+- packages/game-core/src/engine.ts（shiftDeadlinesForPause）
+- apps/server/src/rooms/command-queue.ts（resumeFromPause / resumeFromPauseInQueue、pauseSince）
+- apps/server/src/rooms/manager.ts（生命周期删除/归档、pauseSince、时间戳持久化）
+- apps/server/src/rooms/lifecycle.ts（5min/30min/7天/30s 常量）
+- apps/server/src/storage/types.ts（RoomSnapshot 生命周期字段、RoomStore.archiveRoom）
+- apps/server/src/storage/file-store.ts（archiveRoom、isBot/生命周期校验）
+- apps/server/src/ws.ts（join 前平移、processor 暂停、sweep 删除/归档）
+- apps/server/src/bots/policy.ts（FOOL 存活、COLLECT MAX）
+- apps/server/src/bots/driver.ts（重试白名单、LRU、timer 跟踪）
+- apps/web/src/App.tsx（BOTS_MAX 单源、autoStart 回滚）
+- 测试：新增 bots-resume-pause.test.ts（8）；扩展 bots-lifecycle（5→9）、
+  bots-driver-reliability（5→10）、bots-personality（16→18）、bots-manager（9→10）。
+
+5. 真实命令与尾行
+------------------
+- corepack pnpm -s typecheck → exit 0（artifacts/test-logs/lifecycle-p0-typecheck.log）
+- corepack pnpm -s build → exit 0（artifacts/test-logs/lifecycle-p0-build.log）
+- corepack pnpm -s vitest run --maxWorkers=2 → 1024 条：
+    Test Files  2 failed | 83 passed (85)
+         Tests  4 failed | 1020 passed (1024)
+  失败全部是既有 junction 环境问题：backup T21/T23、scripts 两条 junction 用例
+  （本执行环境把 junction 目标重定向到 Trae shadow 路径，Node symlink 后 lstat ENOENT）。
+  本轮新增 20 条测试全部通过；crash-recovery/stability 的版本回归已修复并单独复跑 8/8 通过
+  （artifacts/test-logs/crash-stability.log）。
+  说明：DSH 的正常环境应得到 1024/1024 全绿；本机 junction 问题从上一轮起即存在且与本轮无关。
+
+6. 已知局限 / 未验证
+--------------------
+- P2-6/P2-11 没有浏览器级 E2E；只做了编译/构建与现有 web 测试。
+- P2-2 的「COLLECT 被引擎拒绝后同一 key 降级」依赖 rescuePoll 下一秒重新决策；
+  在真实 DANGER（余额为负）下 MAX 上限不会触发，未构造出引擎拒绝 COLLECT 的真实路径。
+- 生命周期归档不会自动恢复；归档目录需要人工移回 rooms/ 或后续做恢复工具。
+- 7 天归档阈值是产品选择；UI 尚未提示“离线多久归档”。
+- 未 git add / 未 git commit；未做真人真机完整一局。

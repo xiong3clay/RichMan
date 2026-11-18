@@ -1,0 +1,35 @@
+RichMan 激活补偿判据修复成果报告
+2026-11-18
+
+依据 handoff/审查/Qoder-归档残留与激活补偿-20261118.txt。
+本轮范围为 P1-1、P1-2 和归档统计两处 P2。schemaVersion 仍为 1，无新依赖。未 git add、未 commit。
+
+改动文件与行号
+
+- apps/server/src/storage/types.ts:39–51 与 apps/server/src/ws.ts:351–365 写入激活前 gameId 和本次真人 joinedPlayerId。
+- apps/server/src/storage/file-store.ts:235–268 在启动强制真人离线前检查原快照。只有同局同版本、pausedByNoHuman 为 true、该真人仍离线且 noHumanSinceMs 相同，才可回滚。旧记录缺身份字段时走过期清理；过期保留原快照并告警。
+- apps/server/src/storage/file-store.ts:270–298 分开处理回滚校验、写盘和记录清理。校验失败返回原快照并保持暂停，原存档与记录留在磁盘。写盘失败返回已校验的暂停回滚态并保留记录待重试。回滚落盘后的删除故障有独立警告。
+- apps/server/src/rooms/manager.ts:423–428 在成功激活后的记录删除失败告警中注明房间码和下次启动判过期。
+- apps/server/src/storage/file-store.ts:450–455 每次巡检按归档目录列表清掉已消失的失败计数。:497–517 将隔离目录计入数量，将 archive.json 计入字节。无清单的隔离目录仍贡献已有文件字节与目录数。隔离档继续保留，FIFO 作用于健康归档。
+- apps/server/tests/activation-undo.test.ts:124–222 追加 T1–T4。:20–89 原回滚测试夹具用真实 RoomManager 先进入离线暂停，测试名反映该前提，原断言逐项保留。共享夹具 token 调整至真实 resume 消息可接受的长度。
+
+测试证明
+
+- T1「跨局版本碰撞只清理过期记录」在相同版本、不同 gameId 时保留当前局及版本并移除旧记录。
+- T2「回滚目标校验失败保留原游戏、原磁盘快照与补偿记录」让记录元数据匹配当前局，只让 beforeGame.gameId 冲突。经真实恢复入口后，内存双 gameId 一致，完整 game 与原值相同，房间暂停，磁盘原字节与记录都保留，告警指出校验失败。
+- T3「激活成功但删除记录失败，重启与再次恢复身份不会回滚或二次平移」仅在测试 store 的删除接口注入故障。首次通过真实 WS 恢复身份，确认磁盘版本正好命中 undo、实际已在线、暂停起点已清。真实关闭并启动服务后，归档起点以本次启动时钟重建，再次 WS resume 后截止时间仍等于一次平移期望值，版本未再增加。
+- T4「缺 gameId 的旧补偿记录按过期清理并正常加载房间」用旧格式真实文件验证原游戏保留、启动暂停且记录被删除。
+
+T1–T4 先在旧实现上复现。T1 和 T2 分别读到了旧局和无效回滚目标，T3 把归档时钟从 110000 回拨到 77，T4 错误把版本 1 改成 0。日志 artifacts/test-logs/activation-criteria-red.txt，4 失败、原 4 条通过。
+修复后定向跑 activation-undo、pause-archive-atomic、archive-residue、archive-recovery，4 文件 / 40 条通过，3.28s，退出码 0。日志 artifacts/test-logs/activation-criteria-focused.txt。
+真实临时目录补充探针验证预 rename 写盘故障保留原盘、内存返回已校验的暂停回滚态且下次读盘可重试；移除坏档目录后复用同名从第一次失败计数；隔离目录数量和隔离清单字节分别触发健康档 FIFO。日志 artifacts/test-logs/activation-criteria-probes.txt。这些探针未计入全量测试数。
+
+完整验收
+
+- VITEST_MAX_WORKERS=4 pnpm test。退出码 0，尾行 `Test Files  90 passed (90)`、`Tests  1077 passed (1077)`、`Duration  147.87s (tests 93%, import 6%, transform 1%)`。原 1073 条与新增 4 条全部通过。日志 artifacts/test-logs/activation-criteria-full.txt。
+- pnpm typecheck。退出码 0，尾行 `$ tsc --noEmit -p tsconfig.json`。日志 artifacts/test-logs/activation-criteria-typecheck.txt。
+- pnpm build。退出码 0，尾行 `✓ built in 437ms`。日志 artifacts/test-logs/activation-criteria-build.txt。
+
+判据判断
+
+合法激活落盘时会原子地把本次真人置为在线并清除无人暂停和离线起点，所以即使版本相等，启动也只清理残留记录，保留已提交的激活。

@@ -1,0 +1,151 @@
+暂停时间线与归档落地修复小结
+日期 2026-11-18
+工作区 D:\Lianjunjie\biancheng\RichMan
+基线 HEAD e4011dc696c3ebb3bc2f7a403fb6b5d8c54749bb，开工时已有上一轮未提交修改。
+本轮没有 git add、commit，没有修改真实 data、8000 端口或 run 状态。
+
+一、本轮状态
+N1–N8 主路径已补实现和行为测试。保底停点为 N1 的连续补偿写盘失败后跨重启 undo，当前未解决；N7 另有两项故障清理边界，详见第七节。
+新增 43 条，包含引擎 13、真实 WS/队列/落盘 16、归档真实文件 14。
+既有测试断言语义保留。唯一调整旧测试是 bots-lifecycle.test.ts 的时钟夹具，详见第五节。
+最终全量 88 文件 / 1067 条通过，206.02s，退出码 0。连续磁盘故障边界见第七节，不能据本报告宣称任意故障均可持久回滚。
+
+二、逐项改法与行为证据
+
+N1 身份与交付成功后才平移
+apps/server/src/ws.ts:315、347、349、357、368、376。
+先以 activate=false 完成身份校验/epoch 提交，再交付 joined，最后把平移、online 与清无人暂停合在 manager.transact 的同一候选快照。
+认证失败或 joined 前断线不会平移。最终激活写盘时断线或单次 after_rename 故障走补偿事务，恢复原游戏/版本/离线起点并保持离线。
+apps/server/src/rooms/session.ts 的 join/resume 增加兼容缺省 activate=true，WS 显式 false。
+apps/server/src/rooms/manager.ts:387、401 提供原子激活与补偿，补偿保留新凭证摘要/epoch，不复活轮换前连接。
+测试 apps/server/tests/pause-archive-atomic.test.ts
+- N1 invalid resume never consumes pause or changes the game on disk
+- N1 disconnect during identity persistence leaves the timeline and archive start intact
+- N1 final activation disconnected during write restores the original pause transaction
+- N1 N3 after-rename activation failure compensates game and keeps the original archive age
+- N1 N2 concurrent token recoveries consume one offline interval exactly once
+这些测试使用真实 WebSocket、端口 0、房间队列及 FileRoomStore，比较完整 game 与磁盘 snapshot。
+
+N2 消费标志与游戏同快照提交
+apps/server/src/storage/types.ts:28、apps/server/src/rooms/manager.ts:175、216、287、379。
+RoomSnapshot 新增可选 pauseShifted，不改 schemaVersion。commitTransition 候选同时包含新 game 和 pauseShifted=true，旧快照缺失按 false。
+markPauseShifted 仅更新标志，不清离线起点。WS 最终激活候选也包含该标志。
+测试 pause-archive-atomic.test.ts
+- N1 N2 ACTION/BETTING/TAX reconnect preserves remaining time and persists consumption（三个独立用例）
+- N2 restarting the actual server then resuming a token cannot apply the consumed shift twice
+- N2 N3 committed shift persists its marker while an offline room still reaches archive eligibility
+前者逐字段检查剩余时间、版本、玩家及恢复后 processor=false，后者真实关闭/重起服务再 resume，版本和截止不再平移。
+
+N3 分离归档年龄与平移消费
+apps/server/src/rooms/manager.ts:107、208、401、756、763、780。
+pauseStartedAtMs 独立保留离线归档起点，pauseShifted 表示本次暂停已消费。重复 disconnect 不刷新年龄。
+只有最终 confirmOnline 成功才清归档起点。旧快照从 noHumanSinceMs 兼容恢复。
+测试 pause-archive-atomic.test.ts:102、177，验证已平移但仍离线的房间到 7 天仍可真实归档，失败激活保留原年龄。
+三个阶段成功重连用例同时断言 pauseStartedAtMs=null。已有 bots-lifecycle 在线/离线边界测试继续保留。
+
+N5 false 不激活
+apps/server/src/rooms/command-queue.ts:79、apps/server/src/ws.ts:357。
+WS 检查平移返回值，false 记房间警告、保持离线并 ERROR_PAUSED，返回后不会 bind/schedule/notify。
+负时差、非安全整数、缺状态或缺暂停起点继续拒绝。
+零毫秒暂停作为元数据激活成功处理，不 bump version、不改截止，避免同毫秒合法重连被拒。
+测试 pause-archive-atomic.test.ts
+- N5 a clock rollback returning false keeps the room offline without scheduler catch-up
+- N5 a zero elapsed interval activates without a version bump or deadline change
+断言真实内存与落盘游戏不变、仍暂停及实际警告，未以 mock 调用次数替代行为证据。
+
+N8 归档前复查及能力防御
+apps/server/src/rooms/manager.ts:462、apps/server/src/ws.ts 生命周期房间队列分支。
+archiveRoom 内再次 canArchive，缺 store.archiveRoom 返回 false，只有存储归档成功才删除内存及会话索引。
+测试 pause-archive-atomic.test.ts
+- N8 no archive capability refuses removal and preserves the real room snapshot
+- N8 archive rechecks eligibility after an earlier reconnect in the same queue
+- N8 a real archive filesystem error retains memory and the room file
+使用真实文件制造 archive 路径为普通文件导致归档失败，断言内存房间与 live snapshot 仍在。
+
+N7 跨盘归档、恢复及保留策略
+apps/server/src/storage/file-store.ts:240、295、337、341、393。
+新增 apps/server/src/storage/archive-policy.ts，归档默认保留 30 天、最多 100 份、最多 1 GiB，FIFO 清理。
+100 份和 1 GiB 是本轮为落实容量上限选定的可配置运维默认值，规则数值不变。
+archive.json 清单包含房间、归档时间及文件大小/SHA256。目标冲突生成独立新代，不覆盖旧档。
+EXDEV 走真实 cp 到目标根临时目录、校验和 sync、同盘 rename 发布、再校验、源目录 rename tomb 后删除。
+FileRoomStore.restoreFromArchive(archiveId) 是管理员函数入口，校验快照及清单，拒绝覆盖现存房间，发布 rooms 后再删 archive 副本。
+恢复结果 paused=true，真人 offline；通过 loadAll 及正常房主 resume_game 继续。
+cleanupArchives 在 archiveRoom、loadAll 及 WS 生命周期巡检调用。旧无清单归档可恢复，首次维护时补清单并给予完整 30 天保留期。
+新测试 apps/server/tests/archive-recovery.test.ts 共 14 条
+- N7 archive_roundtrip
+- N7 archive_EXDEV
+- N7 archive_copy_publish_failure
+- N7 archive_collision
+- N7 archive_retention
+- N7 archive_capacity
+- N7 restore_validation
+- N7 archive_single_item_capacity
+- N7 restore_publish_failure
+- N7 archive_post_publish_validation
+- N7 legacy_archive_restore
+- N7 archive_warning_failure
+- N7 legacy_archive_retention
+- N7 archive_byte_capacity
+覆盖真实临时目录内复制/发布/恢复/审计文件、30 天前后一毫秒、数量和字节 FIFO，失败时原档仍可加载。
+EXDEV 通过 archiveRename 注入系统错误触发，后续复制/校验/文件读写是真实执行；未做物理双盘拔盘实验。
+
+N4 全部请求的 createdAtMs 平移
+packages/game-core/src/engine.ts:218、233。
+所有状态请求的 createdAtMs 平移，只有 PENDING 的 deadlineMs 平移，保留已关闭请求对 TAX 最近请求 2 秒冷却的约束。
+新测试 packages/game-core/tests/pause-shift.test.ts
+- N4 all_request_creation_times_shift
+- N4 refused_rescue_keeps_two_second_interval
+后者走真实 REQUEST→REFUSE→平移，1999ms 拒绝、2000ms 才允许再自救。
+
+N6 安全整数与 Date 范围
+packages/game-core/src/engine.ts:220–239。
+每个平移后的 window/danger/createdAt/pending deadline 都必须是安全整数且 Date 有效，version+1 同样检查。
+克隆后修改，异常不触碰输入。WS 捕获异常后不解除暂停。
+测试 pause-shift.test.ts 中 N6 arithmetic validation 参数化边界、version_overflow、date_boundary_is_valid、invalid_pause_duration。
+测试 pause-archive-atomic.test.ts 的 N6 overflow during successful authentication rolls back the shift and keeps pause 同时检查真实磁盘。
+
+三、红灯与绿灯记录
+所有日志位于 artifacts/test-logs/。
+- pause-engine-red.txt，N4/N6 共 9 失败、4 通过；pause-engine-green.txt，新 13 与旧暂停 8 共 21 通过。
+- archive-fix-storage-red.txt，N7 初始 7 条失败；archive-fix-storage-green.txt，14 通过。
+- pause-archive-red.txt，第一组 11 条 10 失败、1 通过。无效 token 初版过短触发格式错误、archive 普通文件夹具初版遇 EISDIR 的记录仅作为夹具调试，未当作正确业务红灯。
+- pause-activation-red.txt，激活写盘中断及 after_rename 两条暴露版本/截止已变；补偿后通过。
+- pause-zero-red.txt，零时差合法重连曾返回 ERROR_PAUSED，修正为元数据成功后通过。
+- pause-clock-regression-red.txt，既有 security 39 在建房提前调用故障时钟，1 失败、56 通过。
+- pause-clock-regression-green.txt，修正后既有 security/resume/stability 与新原子测试合计 79 通过。
+- pause-integration-final.txt，原子测试 16、既有 stability 6、review06-crash 4，共 26 通过。
+
+四、全量真实命令
+Node v24.18.0，pnpm 11.7.0，Vitest 5.0.5。
+pnpm test 首跑实际 88 文件，8 失败、1059 通过，250.22s。
+其中 security 39 是本轮时钟接线回归，已修；其他失败为旧 5 秒测试超时及 endurance 20 秒预算超时，原断言未改。
+最终复跑仅为本命令设置 VITEST_MAX_WORKERS=4，未改 vitest 配置、超时或测试断言。
+最终 pnpm test 退出码 0，真实尾行为 Test Files 88 passed (88)，Tests 1067 passed (1067)，Duration 206.02s。
+日志 pause-archive-full-test-final.txt，旧 1024 条及本轮新增 43 条均包含在此次运行中。
+pnpm typecheck 返回 0，实际尾行 $ tsc --noEmit -p tsconfig.json，日志 pause-archive-typecheck-final.txt。
+TS7 前期两次卡死只终止本轮检查进程，重跑成功，未为此改代码。
+pnpm build 返回 0，144 modules transformed，built in 487ms，日志 pause-archive-build-final.txt。
+本轮涉及源码 git diff --check 返回 0。整个工作区 diff --check 仍报告既有 AGENTS.md:115 EOF 空行，未改该文件。
+
+五、兼容与旧测试调整
+apps/server/tests/bots-lifecycle.test.ts 的“有真人座位的离线 LOBBY 30 分钟后归档”在 archiveRoom 前推进注入时钟到 LOBBY_OFFLINE_ARCHIVE_MS。
+原夹具只用显式未来时刻查询 candidates，实际 manager 时钟仍为 0，新增内部 canArchive 防御会正确拒绝。只修夹具时间，所有原有断言原样保留。
+apps/server/src/http.ts 两处默认 manager 注入 offlineNow，与 WS 离线时钟一致；建房时钟保留原契约，避免 security 的故障时钟被提前消费。
+RoomManagerOptions.offlineNow 缺省回退原 now，旧调用者行为兼容。
+未改协议、规则数值、schemaVersion、依赖、前端或脚本。本轮入口相关源文件本来已有上一轮修改，最终 git diff 是累计工作区差异。
+
+六、本轮文件
+修改 apps/server/src/http.ts、rooms/{command-queue,manager,session}.ts、storage/{file-store,types}.ts、ws.ts。
+修改 packages/game-core/src/engine.ts，仅 shiftDeadlinesForPause。
+新增 apps/server/src/storage/archive-policy.ts。
+新增 packages/game-core/tests/pause-shift.test.ts、apps/server/tests/{pause-archive-atomic,archive-recovery}.test.ts。
+调整 apps/server/tests/bots-lifecycle.test.ts 的一处时钟夹具。
+交付本报告并同步项目当前状态摘要。
+
+七、边界与未做项
+1. 最终激活已经 rename 提交后，如果连接中断且后续补偿写盘持续在 rename 前失败，内存会回滚并暂停，但磁盘仍可能保留激活后的快照，重启无法保证恢复原 version/game。本轮验证了单次 after_rename 失败及写盘期间断线后的成功补偿，尚无跨重启的激活 undo 日志，连续磁盘故障不能宣称已完全覆盖。
+2. 坏清单或权限错误的归档保留并返回 failed/警告，容量限制约束可维护归档；故障项可使实际占用暂时超限。
+3. EXDEV 归档源 tomb 删除失败只告警，目标完整且 loadAll 不会复活源，隐藏 tomb 当前没有自动后续清理。
+4. SHA256 与 schema 校验用于完整性检查，未提供签名或防篡改认证。
+5. 按本轮范围保留 FIFO、人格公开；未实现完整 LRU、浏览器/手机人工完整一局或物理跨盘故障实验。
+独立只读复核已检查归档与恢复路径，反馈了上述连续写盘、容量故障项、tomb 三个边界，未发现正常 N7 路径阻塞。

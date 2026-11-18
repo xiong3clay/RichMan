@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { MAX_MONEY_CENTS, MAX_MONEY_DIGITS } from "./money.js";
 import { RULES, SERVER_DEFAULTS } from "./rules.js";
+import { BOT_PERSONALITIES } from "./bots.js";
 import { PHASES, ROOM_STATE } from "./types.js";
 import { ERROR_CODES } from "./errors.js";
 
@@ -140,6 +141,7 @@ export const LOBBY_ERROR_CODES = [
   "REPLACED",
   "UNAUTHORIZED",
   "RATE_LIMITED",
+  "INVALID_BOTS",
 ] as const;
 export type LobbyErrorCode = (typeof LOBBY_ERROR_CODES)[number];
 
@@ -150,6 +152,10 @@ export const LobbyPlayerSchema = z
     seatId: z.number().int().min(1).max(RULES.playerMax),
     ready: z.boolean(),
     online: z.boolean(),
+    /** 单人练习的 AI 座位；人类玩家省略此字段，保持旧消息形状。 */
+    isBot: z.boolean().optional(),
+    /** 仅 AI 座位存在的人格；人类玩家不得携带。 */
+    botPersonality: z.enum(BOT_PERSONALITIES).optional(),
   })
   .strict();
 export type LobbyPlayer = z.infer<typeof LobbyPlayerSchema>;

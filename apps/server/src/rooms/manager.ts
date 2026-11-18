@@ -1,20 +1,26 @@
 import { createHash, randomBytes, randomInt, randomUUID } from "node:crypto";
 import {
+  BOTS_MAX,
+  BOT_PERSONALITIES,
+  DEFAULT_BOT_PERSONALITY,
   DEFAULT_TIMER_MODE,
   NicknameSchema,
   RULES,
   ROOM_STATE,
   SERVER_DEFAULTS,
+  isBotPersonality,
 } from "@richman/shared";
-import type { LobbyErrorCode, LobbyPlayer, RoomConfig, RoomState } from "@richman/shared";
+import type { BotPersonality, LobbyErrorCode, LobbyPlayer, RoomConfig, RoomState } from "@richman/shared";
 import { createInitialState, RULES_VERSION, resumeFromPause } from "@richman/game-core";
 import { PROTOCOL_VERSION } from '@richman/shared';
 import type { GameEvent, TransitionResult } from '@richman/shared';
-import type { RoomSnapshot, RoomStore } from '../storage/types.js';
+import type { RoomStore } from '../storage/types.js';
 import { RoomCommitError, discardPendingDeliveries } from '../storage/types.js';
 import type { SessionRecord } from './session.js';
 import type { CommandResultRecord } from './command-queue.js';
+import type { ActivationUndo, RoomSnapshot } from '../storage/types.js';
 import type { EngineState } from "@richman/game-core";
+import { AI_LOBBY_TTL_MS, LOBBY_OFFLINE_ARCHIVE_MS, ROOM_PAUSE_ARCHIVE_MS } from './lifecycle.js';
 
 const DEFAULT_ROOM_CONFIG: RoomConfig = {
   timerMode: DEFAULT_TIMER_MODE,
@@ -60,6 +66,12 @@ export interface RoomManagerOptions {
   generateRoomCode?: (existing: ReadonlySet<string>) => string;
   generateToken?: () => string;
   generateGameId?: () => string;
+  /** 单人练习抽取 AI 人格用的随机源；测试注入固定序列。 */
+  rng?: () => number;
+  /** 生命周期计时（纯 AI 大厅 TTL、真人离线宽限）；测试注入假时钟。 */
+  now?: () => number;
+  /** 网络层的离线时钟；建房保持使用 now，不提前调用连接初始化的时钟。 */
+  offlineNow?: () => number;
 }
 
 interface RoomPlayerRecord {
@@ -69,6 +81,10 @@ interface RoomPlayerRecord {
   ready: boolean;
   online: boolean;
   tokenDigest: string;
+  /** 单人练习的 AI 座位；人类玩家不写该字段。 */
+  isBot?: boolean;
+  /** 仅 AI 座位存在；整局固定，rematch 重新抽取。 */
+  botPersonality?: BotPersonality;
 }
 
 interface RoomRecord {
@@ -83,6 +99,14 @@ interface RoomRecord {
   gameId: string | null;
   game: EngineState | null;
   usedGameIds: Set<string>;
+  /** 建房时刻，用于纯 AI 大厅 TTL。 */
+  createdAtMs: number;
+  /** 开局后最后一位在线真人离开的时刻；没有离线时为 null。 */
+  noHumanSinceMs: number | null;
+  /** 开局后无真人在线：暂停推进，等待宽限期或重连。 */
+  pausedByNoHuman: boolean;
+  pauseStartedAtMs: number | null;
+  pauseShifted: boolean;
 }
 
 function digestToken(token: string): string {
@@ -92,6 +116,20 @@ function digestToken(token: string): string {
 function defaultToken(): string {
   // 32 字节 = 256 位熵，base64url 后 43 个字符。
   return randomBytes(32).toString("base64url");
+}
+
+/** AI 座位：自动准备、永不离线；tokenDigest 用不可认领的随机串，不绑定任何真实 token。 */
+function createBotPlayer(seatId: number, personality: BotPersonality): RoomPlayerRecord {
+  return {
+    playerId: "p" + String(seatId),
+    seatId,
+    nickname: "AI 挑战者" + String(seatId),
+    ready: true,
+    online: true,
+    tokenDigest: "bot-" + randomUUID(),
+    isBot: true,
+    botPersonality: personality,
+  };
 }
 
 function defaultRoomCode(existing: ReadonlySet<string>): string {
@@ -141,16 +179,46 @@ export class RoomManager {
     return structuredClone({ schemaVersion: 1, rulesVersion: RULES_VERSION, protocolVersion: PROTOCOL_VERSION,
       savedAt: Date.now(), roomCode: code, hostId: r.hostId, roomState: r.state, paused: r.paused,
       gameId: r.gameId, usedGameIds: [...r.usedGameIds], players: r.players, sessions: r.sessionRecords,
-      game: r.game, commands: [...r.commands].map(([key, value]) => ({ key, ...value })), lastEvents: r.lastEvents });
+      game: r.game, commands: [...r.commands].map(([key, value]) => ({ key, ...value })), lastEvents: r.lastEvents,
+      createdAtMs: r.createdAtMs, noHumanSinceMs: r.noHumanSinceMs, pausedByNoHuman: r.pausedByNoHuman,
+      pauseStartedAtMs: r.pauseStartedAtMs, pauseShifted: r.pauseShifted });
   }
   restoreRoom(s: RoomSnapshot): void {
     for (const [digest, code] of this.sessions) if (code === s.roomCode) this.sessions.delete(digest);
     const copy = structuredClone(s);
+    const players = copy.players.map((player) => {
+      if (player.isBot === true) {
+        return {
+          ...player,
+          botPersonality: isBotPersonality(player.botPersonality)
+            ? player.botPersonality
+            : DEFAULT_BOT_PERSONALITY,
+        };
+      }
+      const { botPersonality: _ignored, ...human } = player;
+      return human;
+    });
+    const hasOnlineHuman = players.some((player) => player.isBot !== true && player.online);
+    // 生命周期时间戳随快照持久化；旧快照缺失字段时从恢复时刻重新计时。
+    const createdAtMs = Number.isSafeInteger(s.createdAtMs) ? s.createdAtMs! : this.now();
+    const persistedOffline = Number.isSafeInteger(s.noHumanSinceMs) ? s.noHumanSinceMs! : null;
+    const pausedByNoHuman = copy.roomState === ROOM_STATE.PLAYING && !hasOnlineHuman;
+    const noHumanSinceMs = hasOnlineHuman
+      ? null
+      : (persistedOffline ?? (copy.roomState === ROOM_STATE.PLAYING || players.some(p => p.isBot !== true) ? this.offlineNow() : null));
+    const pauseStartedAtMs = hasOnlineHuman ? null
+      : (Number.isSafeInteger(s.pauseStartedAtMs) ? s.pauseStartedAtMs! : noHumanSinceMs);
     this.rooms.set(s.roomCode, { roomCode: s.roomCode, hostId: copy.hostId, state: copy.roomState,
-      paused: copy.paused, gameId: copy.gameId, game: copy.game, players: copy.players,
+      paused: copy.paused, gameId: copy.gameId, game: copy.game, players,
       usedGameIds: new Set(copy.usedGameIds), sessionRecords: copy.sessions, lastEvents: copy.lastEvents,
-      commands: new Map(copy.commands.map(({ key, ...value }) => [key, value])) });
-    for (const p of copy.players) this.sessions.set(p.tokenDigest, s.roomCode);
+      commands: new Map(copy.commands.map(({ key, ...value }) => [key, value])),
+      createdAtMs,
+      noHumanSinceMs,
+      pausedByNoHuman, pauseStartedAtMs, pauseShifted: s.pauseShifted === true });
+    for (const p of players) {
+      // AI 座位没有可认领的会话；不要把它写进 token -> room 索引。
+      if (p.isBot !== true) this.sessions.set(p.tokenDigest, s.roomCode);
+    }
   }
   reconcileDurable(code: string): boolean {
     const pending = this.durablePending.get(code);
@@ -208,8 +276,8 @@ export class RoomManager {
       return this.storageFailed(code, before, error);
     }
   }
-  async createRoomPersisted(): Promise<string> {
-    const code = this.createRoom();
+  async createRoomPersisted(bots = 0): Promise<string> {
+    const code = this.createRoom(bots);
     try { await this.persist(code); return code; }
     catch {
       this.rooms.delete(code);
@@ -217,9 +285,10 @@ export class RoomManager {
       throw new LobbyError('ERROR_PAUSED', '存档写入失败，建房未完成');
     }
   }
-  async commitTransition(code: string, result: TransitionResult, command?: {key: string; record: CommandResultRecord}): Promise<void> {
+  async commitTransition(code: string, result: TransitionResult & {pauseShifted?: boolean}, command?: {key: string; record: CommandResultRecord}): Promise<void> {
     const before = this.exportRoom(code); if (!before) throw new Error('房间不存在');
     const candidate = structuredClone(before); candidate.game = result.state as EngineState; candidate.lastEvents = result.events;
+    if (result.pauseShifted) candidate.pauseShifted = true;
     if (command) {
       candidate.commands = [...candidate.commands.filter(c => c.key !== command.key), { key: command.key, ...command.record }].slice(-5000);
     }
@@ -227,6 +296,7 @@ export class RoomManager {
     catch (error) { this.storageFailed(code, before, error); }
     try {
       const r = this.rooms.get(code)!; Object.assign(r.game!, result.state); r.lastEvents = structuredClone(result.events);
+      if (result.pauseShifted) r.pauseShifted = true;
       if (command) this.setCommand(command.key, command.record);
     } catch (error) {
       // 快照已包含原reply，缓存/发布异常不能丢弃它或让下一次写入覆盖它。
@@ -267,6 +337,9 @@ export class RoomManager {
   private readonly generateRoomCode: NonNullable<RoomManagerOptions["generateRoomCode"]>;
   private readonly generateToken: NonNullable<RoomManagerOptions["generateToken"]>;
   private readonly generateGameId: NonNullable<RoomManagerOptions["generateGameId"]>;
+  private readonly rng: () => number;
+  private readonly now: () => number;
+  private readonly offlineNow: () => number;
 
   constructor(options: RoomManagerOptions = {}) {
     this.createGameState =
@@ -275,6 +348,9 @@ export class RoomManager {
     this.generateRoomCode = options.generateRoomCode ?? defaultRoomCode;
     this.generateToken = options.generateToken ?? defaultToken;
     this.generateGameId = options.generateGameId ?? (() => randomUUID());
+    this.rng = options.rng ?? Math.random;
+    this.now = options.now ?? (() => Date.now());
+    this.offlineNow = options.offlineNow ?? this.now;
   }
 
   subscribe(listener: (event: RoomManagerEvent) => void): () => void {
@@ -288,8 +364,129 @@ export class RoomManager {
     return this.rooms.size;
   }
 
-  /** 创建房间并返回 4～8 位数字房间码（字符串，可能带前导零）。 */
-  createRoom(): string {
+  /** 开局后没有任何在线真人时，房间应暂停推进。 */
+  isNoHumanOnline(roomCode: string): boolean {
+    return this.rooms.get(roomCode)?.pausedByNoHuman ?? false;
+  }
+
+  /** 无真人在线暂停的起点；没有暂停或已经平移过截止时间时返回 null。 */
+  getPauseSince(roomCode: string): number | null {
+    const room = this.rooms.get(roomCode);
+    if (room === undefined || !room.pausedByNoHuman || room.pauseShifted) return null;
+    return room.noHumanSinceMs;
+  }
+
+  /** 截止时间已整体平移并落盘；保留离线起点，直到真人真正上线。 */
+  markPauseShifted(roomCode: string): void {
+    const room = this.rooms.get(roomCode);
+    if (room !== undefined) room.pauseShifted = true;
+  }
+
+  isPauseShifted(roomCode: string): boolean { return this.rooms.get(roomCode)?.pauseShifted ?? false; }
+
+  /** Called inside the final connection transaction, before it exports its candidate. */
+  applyPauseShift(roomCode: string, result: TransitionResult): void {
+    const room = this.rooms.get(roomCode);
+    if (!room?.game) throw new Error("游戏状态不存在");
+    Object.assign(room.game, result.state);
+    room.lastEvents = structuredClone(result.events);
+    room.pauseShifted = true;
+  }
+
+  confirmOnline(roomCode: string, playerId: string): void {
+    const { room, player } = this.resolvePlayer(roomCode, playerId);
+    player.online = true;
+    this.noteHumanOnline(room);
+  }
+
+  async rollbackConnectionActivation(before: RoomSnapshot, playerId: string): Promise<void> {
+    this.reconcileDurable(before.roomCode);
+    const current = this.exportRoom(before.roomCode);
+    if (!current) return;
+    // Retain the newly authenticated identity and epoch while compensating only activation.
+    const rollback: RoomSnapshot = { ...current, game: before.game, lastEvents: before.lastEvents,
+      noHumanSinceMs: before.noHumanSinceMs, pauseStartedAtMs: before.pauseStartedAtMs,
+      pauseShifted: before.pauseStartedAtMs == null ? false : before.pauseShifted,
+      players: current.players.map(player => player.playerId === playerId ? { ...player, online: false } : player) };
+    try { await this.transact(before.roomCode, () => this.restoreRoom(rollback)); }
+    catch (error) { this.restoreRoom({ ...rollback, paused: true }); throw error; }
+  }
+
+  async cleanupArchives(nowMs = this.offlineNow()): Promise<void> { await this.store?.cleanupArchives?.(nowMs); }
+
+  /** 激活前写跨重启补偿记录；没有持久化存储时无需写。 */
+  async writeActivationUndo(roomCode: string, undo: ActivationUndo): Promise<void> {
+    if (this.store?.writeActivationUndo === undefined) return;
+    await this.store.writeActivationUndo(roomCode, undo);
+  }
+
+  /** 激活事务成功后的清理；删除失败由启动时的过期判据兜底。 */
+  async deleteActivationUndo(roomCode: string): Promise<void> {
+    if (this.store?.deleteActivationUndo === undefined) return;
+    try { await this.store.deleteActivationUndo(roomCode); }
+    catch (error) { console.warn('[richman] 房间 ' + roomCode + ' 激活补偿记录删除失败，下次启动将判为过期', error); }
+  }
+
+  /** 生命周期巡检（删除）：只有纯 AI/空大厅会直接删除。 */
+  reclaimCandidates(nowMs = this.now()): string[] {
+    return [...this.rooms.values()]
+      .filter((room) => this.shouldReclaim(room, nowMs))
+      .map((room) => room.roomCode)
+      .sort();
+  }
+
+  /** 生命周期巡检（归档）：有存档价值的房间只归档，不删除。 */
+  archiveCandidates(nowMs = this.offlineNow()): string[] {
+    return [...this.rooms.values()]
+      .filter((room) => this.shouldArchive(room, nowMs))
+      .map((room) => room.roomCode)
+      .sort();
+  }
+
+  /** 回收前再次确认，避免与入座/重连竞争。 */
+  canReclaim(roomCode: string, nowMs = this.now()): boolean {
+    const room = this.rooms.get(roomCode);
+    return room !== undefined && this.shouldReclaim(room, nowMs);
+  }
+
+  canArchive(roomCode: string, nowMs = this.offlineNow()): boolean {
+    const room = this.rooms.get(roomCode);
+    return room !== undefined && this.shouldArchive(room, nowMs);
+  }
+
+  /** 系统回收房间：删除内存座位、存档目录与全部会话索引。 */
+  async reclaimRoom(roomCode: string): Promise<boolean> {
+    if (!this.rooms.has(roomCode)) return false;
+    let deleted = false;
+    await this.transact(roomCode, () => {
+      // 防御：与其他入座路径共用同一队列时，事务内再确认一次。
+      if (!this.canReclaim(roomCode)) return;
+      this.rooms.delete(roomCode);
+      deleted = true;
+    });
+    if (!deleted) return false;
+    for (const [digest, code] of this.sessions) if (code === roomCode) this.sessions.delete(digest);
+    return true;
+  }
+
+  /**
+   * 归档房间：先把 data/rooms/<code>/ 移到 data/archive/<code>/（保留 snapshot 与 events），
+   * 成功后再从内存与会话索引移除。归档失败时房间保持原样，下一轮巡检重试。
+   */
+  async archiveRoom(roomCode: string): Promise<boolean> {
+    const room = this.rooms.get(roomCode);
+    if (room === undefined || !this.canArchive(roomCode) || !this.store?.archiveRoom) return false;
+    await this.store.archiveRoom(roomCode);
+    this.rooms.delete(roomCode);
+    for (const [digest, code] of this.sessions) if (code === roomCode) this.sessions.delete(digest);
+    return true;
+  }
+
+  /** 创建房间并返回 4～8 位数字房间码（字符串，可能带前导零）。bots 为 0～BOTS_MAX 个 AI 座位。 */
+  createRoom(bots = 0): string {
+    if (!Number.isInteger(bots) || bots < 0 || bots > BOTS_MAX) {
+      throw new LobbyError("INVALID_BOTS", "AI 数量必须是 0～" + String(BOTS_MAX) + " 的整数");
+    }
     const existing = new Set(this.rooms.keys());
     for (let attempt = 0; attempt < 50; attempt += 1) {
       const code = this.generateRoomCode(existing);
@@ -299,10 +496,16 @@ export class RoomManager {
           roomCode: code,
           hostId: null,
           state: ROOM_STATE.LOBBY,
-          players: [],
+          players: Array.from({ length: bots }, (_unused, index) =>
+            createBotPlayer(index + 1, this.randomPersonality())),
           gameId: null,
           game: null,
           usedGameIds: new Set(),
+          createdAtMs: this.now(),
+          noHumanSinceMs: null,
+          pausedByNoHuman: false,
+          pauseStartedAtMs: null,
+          pauseShifted: false,
         });
         return code;
       }
@@ -324,7 +527,7 @@ export class RoomManager {
    * 加入房间。同名昵称允许；座位由服务端按最小空闲座位分配。
    * 带同一 token 再次加入时返回原座位，不新增玩家。
    */
-  join(roomCode: string, nickname: string, sessionToken?: string): JoinResult {
+  join(roomCode: string, nickname: string, sessionToken?: string, activate = true): JoinResult {
     const room = this.rooms.get(roomCode);
     if (!room) throw new LobbyError("ROOM_NOT_FOUND", "房间码不存在");
     if (!NicknameSchema.safeParse(nickname).success) {
@@ -335,7 +538,7 @@ export class RoomManager {
       const digest = digestToken(sessionToken);
       const existing = room.players.find((player) => player.tokenDigest === digest);
       if (existing) {
-        existing.online = true;
+        if (activate) { existing.online = true; this.noteHumanOnline(room); }
         this.emit({ type: "room", roomCode, room: this.viewOf(room) });
         return {
           playerId: existing.playerId,
@@ -360,12 +563,13 @@ export class RoomManager {
       seatId,
       nickname,
       ready: false,
-      online: true,
+      online: activate,
       tokenDigest: digest,
     };
     room.players.push(player);
     if (room.hostId === null) room.hostId = playerId;
     this.sessions.set(digest, roomCode);
+    if (activate) this.noteHumanOnline(room);
     this.emit({ type: "room", roomCode, room: this.viewOf(room) });
     return { playerId, seatId, sessionToken: token, roomCode, room: this.viewOf(room) };
   }
@@ -410,6 +614,10 @@ export class RoomManager {
     if (room.state !== ROOM_STATE.PLAYING || room.game?.phase !== "GAME_OVER") {
       throw new LobbyError("INVALID_STATE", "本局尚未结束，不能再来一局");
     }
+    // 新一局重新抽取 AI 人格；同一局内人格保持不变。
+    for (const member of room.players) {
+      if (member.isBot === true) member.botPersonality = this.randomPersonality();
+    }
     return this.createGame(room);
   }
 
@@ -430,6 +638,10 @@ export class RoomManager {
     room.game = game;
     room.usedGameIds.add(gameId);
     room.state = ROOM_STATE.PLAYING;
+    room.pausedByNoHuman = false;
+    room.noHumanSinceMs = null;
+    room.pauseStartedAtMs = null;
+    room.pauseShifted = false;
     this.emit({ type: "room", roomCode: room.roomCode, room: this.viewOf(room) });
     this.emit({ type: "started", roomCode: room.roomCode, gameId });
     return gameId;
@@ -444,10 +656,12 @@ export class RoomManager {
     return this.disconnectFor(room.roomCode, player.playerId);
   }
 
-  /** 只标离线，保留准备状态与座位；旧连接必须由会话层先检查 epoch。 */
+  /** 只标离线，保留准备状态与座位；旧连接必须由会话层先检查 epoch。AI 座位永不掉线。 */
   disconnectFor(roomCode: string, playerId: string): string {
     const { room, player } = this.resolvePlayer(roomCode, playerId);
+    if (player.isBot === true) return player.playerId;
     player.online = false;
+    this.noteHumanOffline(room);
     this.emit({ type: "peer_left", roomCode: room.roomCode, playerId: player.playerId });
     this.emit({ type: "room", roomCode: room.roomCode, room: this.viewOf(room) });
     return player.playerId;
@@ -461,11 +675,13 @@ export class RoomManager {
     return this.leaveFor(room.roomCode, player.playerId);
   }
 
-  /** 仅供完成认证的服务端身份层调用；调用前应先解绑离开者连接。 */
+  /** 仅供完成认证的服务端身份层调用；调用前应先解绑离开者连接。AI 座位不参与离开流程。 */
   leaveFor(roomCode: string, playerId: string): string {
     const { room, player } = this.resolvePlayer(roomCode, playerId);
+    if (player.isBot === true) return player.playerId;
     if (room.state !== ROOM_STATE.LOBBY) {
       player.online = false;
+      this.noteHumanOffline(room);
       this.emit({ type: "peer_left", roomCode: room.roomCode, playerId: player.playerId });
       this.emit({ type: "room", roomCode: room.roomCode, room: this.viewOf(room) });
       return player.playerId;
@@ -474,10 +690,12 @@ export class RoomManager {
     room.players = room.players.filter((item) => item.playerId !== player.playerId);
     this.sessions.delete(player.tokenDigest);
     if (room.hostId === player.playerId) {
-      room.hostId = this.nextPlayerId(room);
+      // 真人优先接管房主；不能把房间交给永不响应的 AI 座位。
+      room.hostId = this.nextPlayerId(room, true);
     }
     this.emit({ type: "peer_left", roomCode: room.roomCode, playerId: player.playerId });
-    if (room.players.length === 0) {
+    if (room.players.length === 0 || room.players.every((item) => item.isBot === true)) {
+      // 只剩 AI 的房间没有人能准备/开局/继续，直接回收，避免僵尸房间与残留定时器。
       this.rooms.delete(room.roomCode);
     } else {
       this.emit({ type: "room", roomCode: room.roomCode, room: this.viewOf(room) });
@@ -489,12 +707,12 @@ export class RoomManager {
    * 身份层校验摘要后恢复座位；恢复码签发新 token 时同步撤销旧 token。
    * 不改游戏状态、版本、阶段或截止时间。
    */
-  restoreIdentity(roomCode: string, playerId: string, sessionToken: string): JoinResult {
+  restoreIdentity(roomCode: string, playerId: string, sessionToken: string, activate = true): JoinResult {
     const { room, player } = this.resolvePlayer(roomCode, playerId);
     this.sessions.delete(player.tokenDigest);
     player.tokenDigest = digestToken(sessionToken);
     this.sessions.set(player.tokenDigest, roomCode);
-    player.online = true;
+    if (activate) { player.online = true; this.noteHumanOnline(room); }
     this.emit({ type: "room", roomCode, room: this.viewOf(room) });
     return { playerId, seatId: player.seatId, sessionToken, roomCode, room: this.viewOf(room) };
   }
@@ -530,9 +748,61 @@ export class RoomManager {
     throw new LobbyError("ROOM_FULL", "房间已满");
   }
 
-  private nextPlayerId(room: RoomRecord): string | null {
-    const first = [...room.players].sort((a, b) => a.seatId - b.seatId)[0];
+  private nextPlayerId(room: RoomRecord, humansOnly = false): string | null {
+    const first = [...room.players]
+      .filter((player) => !humansOnly || player.isBot !== true)
+      .sort((a, b) => a.seatId - b.seatId)[0];
     return first?.playerId ?? null;
+  }
+
+  private randomPersonality(): BotPersonality {
+    const index = Math.floor(this.rng() * BOT_PERSONALITIES.length);
+    const safe = Math.min(BOT_PERSONALITIES.length - 1, Math.max(0, index));
+    return BOT_PERSONALITIES[safe]!;
+  }
+
+  private onlineHumanCount(room: RoomRecord): number {
+    return room.players.filter((player) => player.isBot !== true && player.online).length;
+  }
+
+  /** 真人上线：解除无人在线暂停；LOBBY 也清除离线计时，重连后 TTL 不再累计。 */
+  private noteHumanOnline(room: RoomRecord): void {
+    if (this.onlineHumanCount(room) === 0) return;
+    room.noHumanSinceMs = null;
+    room.pauseStartedAtMs = null;
+    if (room.state === ROOM_STATE.PLAYING && room.game !== null) room.pausedByNoHuman = false;
+  }
+
+  /** 最后一位真人离线：记录离线起点；PLAYING 同时暂停推进，重复断线不刷新起点。 */
+  private noteHumanOffline(room: RoomRecord): void {
+    if (this.onlineHumanCount(room) > 0) return;
+    if (room.pauseStartedAtMs === null) {
+      room.pauseStartedAtMs = this.offlineNow();
+      room.noHumanSinceMs = room.pauseStartedAtMs;
+      room.pauseShifted = false;
+    }
+    if (room.state === ROOM_STATE.PLAYING && room.game !== null) room.pausedByNoHuman = true;
+  }
+
+  /** 删除：只有从未有真人入座的 LOBBY（纯 AI/空房）。 */
+  private shouldReclaim(room: RoomRecord, nowMs: number): boolean {
+    const humans = room.players.filter((player) => player.isBot !== true);
+    return room.state === ROOM_STATE.LOBBY && humans.length === 0
+      && nowMs - room.createdAtMs >= AI_LOBBY_TTL_MS;
+  }
+
+  /** 归档：有真人座位的离线大厅，或开局后无真人暂停超过归档期；永不物理删除对局。 */
+  private shouldArchive(room: RoomRecord, nowMs: number): boolean {
+    const humans = room.players.filter((player) => player.isBot !== true);
+    if (room.state === ROOM_STATE.LOBBY) {
+      return humans.length > 0 && this.onlineHumanCount(room) === 0 && room.pauseStartedAtMs !== null
+        && nowMs - room.pauseStartedAtMs >= LOBBY_OFFLINE_ARCHIVE_MS;
+    }
+    if (room.state === ROOM_STATE.PLAYING) {
+      return room.pausedByNoHuman && room.pauseStartedAtMs !== null
+        && nowMs - room.pauseStartedAtMs >= ROOM_PAUSE_ARCHIVE_MS;
+    }
+    return false;
   }
 
   private viewOf(room: RoomRecord): RoomView {
@@ -546,6 +816,9 @@ export class RoomManager {
           seatId: player.seatId,
           ready: player.ready,
           online: player.online,
+          ...(player.isBot === true
+            ? { isBot: true, botPersonality: player.botPersonality ?? DEFAULT_BOT_PERSONALITY }
+            : {}),
         })),
       hostId: room.hostId,
       state: room.state,

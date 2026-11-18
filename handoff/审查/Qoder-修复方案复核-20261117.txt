@@ -1,0 +1,129 @@
+RichMan「DSH 修复方案」复核报告
+复核日期：2026-11-17
+复核对象：handoff/提示词/20261117-Trae修复P0暂停时间线+生命周期.txt
+复核方式：只读业务代码；未改源码/测试；未 git add/commit；未跑 pnpm test
+证据口径：每条结论给当前工作区 文件:行号；方案文本仅作待审设计，不作实现证据。
+
+事实校正：DSH 说“代码一行都没改”，但 git status 显示 packages/game-core/src/engine.ts、apps/server/src/rooms/command-queue.ts、apps/server/src/rooms/manager.ts、apps/server/src/ws.ts、apps/server/src/storage/* 已修改，并新增 apps/server/tests/bots-resume-pause.test.ts 与 handoff/暂停时间线与生命周期修复-成果报告.txt。当前代码已出现 shiftDeadlinesForPause（engine.ts:218-230）与 resumeFromPauseInQueue（command-queue.ts:79-95）。因此本复核仍按“方案是否可交给 Trae”回答，但用当前实现暴露的设计缺口作证据；若这些改动已是 Trae 动手结果，原方案不能直接验收。
+
+1. 逐条判定表
+
+| 编号 | 判定 | 一句话理由 | 建议最终做法 |
+|---|---|---|---|
+| P0-1 | 需调整 | 纯函数平移方向对，但当前接线在身份校验前平移（ws.ts:314-327），markPauseShifted 只改内存不落盘（manager.ts:368-371；commitTransition 只更新 game/lastEvents/commands，manager.ts:280-295），且清 noHumanSinceMs 会让归档计时失效（manager.ts:738-739）。 | 保留 shift 纯函数，但把“平移+清暂停起点+真人上线”放进成功重连的同一房间队列/同一持久化事务；持久化 pauseSince/shifted 标志；归档计时与 shift 标志分离；补失败重连/重启/并发测试。 |
+| P1-1 | 需调整 | 归档代替删除方向对，但当前 archiveRoom 不处理 EXDEV（file-store.ts:154-161），loadAll 只读 rooms/ 不读 archive/（file-store.ts:167-170），无恢复入口/磁盘上限；store 缺失时仍删内存（manager.ts:419-425）。 | PLAYING 永不物理删除；归档必须处理跨盘、原子落位、可恢复、可清理；提供最小 restore-from-archive 入口或明确手动恢复流程；加容量/保留期上限；archiveRoom 内复查 canArchive。 |
+| P2-1 | 成立要修 | FOOL accept 缺 borrowerAlive（policy.ts:105-106），engine accept 要求双方 alive（private-loans.ts:245-247）。 | 补 borrowerAlive；补“请求后借款人死亡”测试。 |
+| P2-2 | 成立要修 | collectibleDraft 未限出借人 MAX（policy.ts:363-380），engine collect 会因 nextLenderCents>MAX 拒绝（private-loans.ts collectPrivateDebt）。 | 催收金额 min(可收, MAX-bot.cents)；失败后允许重新决策/降级，不要同 key 永久占坑；补 MAX 测试。 |
+| P2-3 | 需调整 | ERROR_PAUSED 可重试但必须有上限且暂停期间不空转；当前 RETRYABLE_CODES 含 ERROR_PAUSED（driver.ts:53）且 MAX_RETRIES=3（driver.ts:50,264），tick 会拒绝 paused/noHuman（driver.ts:164-165）。 | 保留白名单+上限；ERROR_PAUSED 优先“不 markDriven、等恢复后重新决策”，不要存储故障时无限定时重试；补持续故障测试。 |
+| P2-4 | 需调整/可延后 | 当前已改成插入顺序淘汰最旧 key（driver.ts:339-345），不是真 LRU；多数成功命令会改变状态，短期风险低。 | 不必本轮做完整 LRU；至少按 phaseInstanceId/终态 key 保留或 FIFO+测试；若时间紧可延后，但不能一次清空整轮。 |
+| P2-5 | 成立要修 | 当前 notify/retry timer 已入 timers（driver.ts:124-131,266-271），cancelRoom 统一清（driver.ts:135-150）；方向正确。 | 保持统一跟踪/epoch；补 cancel 后旧 tick/retry 不行动测试。 |
+| P2-6 | 成立要修 | App 仍硬编码/文案不一致的风险成立（App.tsx:44,294,424 上一轮证据；当前 autoStart 已改但常量仍需统一）。 | 按钮/文案/注释统一引用 BOTS_MAX。 |
+| P2-7 | 成立要修 | 当前 LOBBY 离线真人已走 30min 归档（manager.ts:733-735；lifecycle.ts:10）。 | 保留；补 30min 边界与重连清除计时测试。 |
+| P2-8 | 需调整，提升为 P0 前置 | 生命周期字段已进快照（types.ts:23-25；manager.ts:178,197-202），但 shift 成功后的 noHumanSinceMs=null 未与 shifted game 原子落盘（manager.ts:280-295,368-371）。 | 必须先做/同做：持久化 pauseSince/createdAt/shifted 标志，并保证 shift commit 与标志更新同一快照；否则重启可能二次平移。 |
+| P2-9 | 成立要修 | reclaimRoom 已在 transact 内复查 canReclaim（manager.ts:404-409）；archiveRoom 还没有同等防御（manager.ts:419-425）。 | reclaim 保持；archive 也加事务内/调用内复查。 |
+| P2-10 | 需调整 | “AI playerId 必须是 p<seatId>”不能防真人被标 AI，因为真人本来就是 p<seatId>（manager.ts:119,502；createGame 映射 manager.ts:575-576）；当前校验只是 schema 卫生（file-store.ts:26,34）。 | 不要宣称这是安全修复；保留数量/人格/互斥校验即可。若要防本地篡改，需可信来源/签名或至少 AI tokenDigest 前缀+无 session；本轮可延后强安全。 |
+| P2-11 | 成立要修 | 当前 autoStart 已检查 sendLobby 并回滚（App.tsx:118-124）。 | 保持；补前端失败/手动开局测试；LOBBY 兜底由 P1-1 负责。 |
+| P2-12 | 成立，不改可接受 | 人格标签只给 AI 座位（ws.ts:184-209；manager.ts:755-757），不泄漏人类私有财务；公开策略是产品选择。 | 本轮不改；在成果报告记录“透明人格，可被针对”。 |
+| P2-13 | 成立要修 | 当前 processor.isPaused 已含 isNoHumanOnline（ws.ts:229），暂停拒绝新命令。 | 保持；补暂停时命令 ERROR_PAUSED、恢复后可命令测试。 |
+
+2. P0-1 设计结论
+
+2.1 推荐做法
+推荐“纯函数整体平移 + 成功重连事务内原子恢复”，不推荐客户端 PAUSE/RESUME 命令，也不推荐全房间时钟偏移。
+
+必须满足：
+1) shift 只改游戏内绝对时间，不改历史事件/审计元数据；version+1、eventSeq 不变、events=[] 可以接受，但必须保证快照校验与审计通过（file-store.ts:58-62,77,91,109-112；checkAudit 读 events.ndjson，file-store.ts:174-183）。
+2) 平移必须发生在“身份恢复成功之后、清除 pausedByNoHuman 之前”，并与真人上线/暂停标志更新一起持久化。当前 ws 在 sessions.resume 之前就 shift（ws.ts:314-327），失败重连也会改游戏版本并清 noHumanSince，这是设计错误。
+3) markPauseShifted 不能只改内存。当前 commitTransition 的 candidate 只替换 game/lastEvents/commands（manager.ts:282-285），不会把 noHumanSinceMs=null 写进同一快照；崩溃后重启可能拿旧 noHumanSinceMs 对已平移 state 再平移。
+4) 归档计时不能依赖被 shift 清掉的 noHumanSinceMs。当前 shouldArchive 要求 noHumanSinceMs!==null（manager.ts:738-739），而 markPauseShifted 清它（manager.ts:368-371）；若 shift 后重连失败，房间 pausedByNoHuman=true 但永远不归档。
+5) resumeFromPauseInQueue 返回 false 时 ws 不能继续清暂停/schedule。当前 ws 只 catch 异常，不检查返回值（ws.ts:314-322）；pausedMs<=0/时钟回拨/已平移等 false 分支可能带着未平移 deadline 继续。
+6) shift 后必须校验加法结果仍为安全整数且 Date 有效；当前 engine.ts:221-226 直接相加，没有溢出/Date 范围检查。
+
+2.2 绝对时间字段清单与漏掉后果
+
+| 字段 | 证据 | 是否平移 | 漏掉后果 |
+|---|---|---|---|
+| GameState.deadlineAt | packages/shared/src/types.ts:55；engine.ts:340-341；scheduler.ts:119-121 | 必须随 windowDeadlineMs 同步 | scheduler 立即 advanceDue，ACTION/BETTING/TAX 快进 |
+| EngineState.windowDeadlineMs | engine.ts:71；engine.ts:448,461；driver.ts:371 | 必须 | ACTION_TIMEOUT / BETTING 0 注结算 / driver 误判窗口 |
+| EngineState.dangerDeadlineMs | engine.ts:82；engine.ts:497；policy.ts:395,427 | 必须 | TAX 危险重连即破产 |
+| LoanRequest.deadlineMs（PENDING） | private-loans.ts:47；engine.ts:420,478,1074；policy.ts:88 | 必须 | 私人借款请求重连即过期 |
+| LoanRequest.createdAtMs | private-loans.ts:46；engine.ts:1001-1003；policy.ts:394,461；driver.ts:387 | 建议所有请求都平移，至少保证 2s 间隔语义 | 当前只平移 PENDING（engine.ts:224-227）；非 PENDING 最新请求仍用旧 createdAtMs，暂停后 2s 自救间隔被放宽 |
+| GameEvent.at | shared/types.ts:82；engine.ts:329 | 不平移 | 平移会篡改历史审计/回放时间 |
+| PlayerView.serverNow/deadlineAt | views.ts:166-167 | 不平移，派生字段 | 无需持久化平移 |
+| RoomSnapshot.savedAt | storage/types.ts:9；manager.ts:175 | 不平移 | 元数据，不是游戏时间 |
+| events.ndjson 行 at | file-store.ts:132 | 不平移 | 审计元数据 |
+| RoomRecord.createdAtMs/noHumanSinceMs | manager.ts:100-102,178,197-202 | 生命周期单独处理并持久化 | 丢失会重启二次平移/归档计时错乱 |
+| backup manifest savedAt | storage/backup.ts:35,139-140 | 不平移 | 备份元数据 |
+
+2.3 幂等/expectedGameVersion/eventSeq/回放/快照校验
+- version+1 不发事件不会破坏 eventSeq 连续性：shift 不 emit（engine.ts:218-230），validateSnapshot 只要求 lastEvents.seq<=game.eventSeq（file-store.ts:109-112），events=[] 合法。
+- expectedGameVersion 会失效：processor 对 ACTION 类命令要求 expectedGameVersion===state.version（command-queue.ts:164），旧 draft 会 VERSION_CONFLICT；driver 已有有限重试（driver.ts:50-53,264-271）。这是可接受的，但必须测试。
+- 命令幂等缓存不被 shift 清除；旧 commandId 重放仍返回旧 reply（command-queue.ts execute 的 store 逻辑）。shift 不应清 commands。
+- 回放/审计：events.ndjson 不新增行，checkAudit 以 game.eventSeq 对齐（file-store.ts:174-183）；lastEvents 被置空（manager.ts:282）不影响恢复重放，但重连 UI 可能看不到上一轮结算事件，属 UX 小风险。
+- 半更新：房间队列能串行化 processor/manager 提交；driver tick/fire 虽在队列外读 state，但最终 execute 会按最新 version 校验，不会半状态生效。真正不足是“shift commit 与生命周期标志”不是同一持久化事务，以及失败重连也触发 shift。
+
+2.4 替代方案对比
+- 房间级时钟偏移：不改 state/version，但所有 nowMs/deadline 读取点都要统一减 offset，容易漏 driver/scheduler/policy，且快照必须持久化 offset；不推荐。
+- 显式 PAUSE/RESUME GameCommand：审计最清楚，但协议膨胀、客户端可见、AI/真人队列复杂；对服务端生命周期过度设计；不推荐。
+- 恢复时按剩余时长重设 deadline：现有 resumeFromPause 是按当前时刻重建完整窗口（engine.ts:237-272），不是 preserving remaining；实现简单但会让快到期窗口重新变满，语义不符；只适合重启/存档 paused。
+- 推荐：in-process 无真人暂停用 shift 精确平移；restart/storage paused 继续用现有 resumeFromPause；两者互斥（ws.ts:314 已检查 !isPaused）。
+
+2.5 假时钟测试必须断言
+1) TAX danger：暂停时剩余 R，离线超过 rescueSec 但小于归档期，成功重连后不破产，dangerDeadlineMs≈now+R，version+1，eventSeq 不变，无 PLAYER_BANKRUPT。
+2) ACTION/BETTING：成功重连后不 ACTION_TIMEOUT、不 BET_SETTLED/0 注结算，windowDeadlineMs/deadlineAt≈now+R。
+3) PENDING 私人请求：deadlineMs 与 createdAtMs 平移；2s 自救间隔不被放宽；非 PENDING 最新请求的间隔语义也要断言。
+4) 失败重连/无效 token/commit 失败：不得平移或必须整体回滚；房间保持暂停；noHumanSince/归档计时不丢；重复尝试不二次平移。
+5) 重启/并发：快照含 pauseSince/shifted 标志；重启后不二次平移；shift 与旧 expectedGameVersion 命令并发时只产生 VERSION_CONFLICT/重试，不双生效；sweep 与重连同一队列顺序正确。
+
+3. P1-1 设计结论
+
+方向成立：PLAYING 不因离线物理删除，改为归档；LOBBY 纯 AI 5min 删除、有真人离线 30min 归档（lifecycle.ts:7,10,13；manager.ts:723-741）。但当前方案/实现还不够：
+
+1) 跨盘 rename：当前只重试 EEXIST/EPERM/ENOTEMPTY，EXDEV 直接 throw（file-store.ts:154-161）。跨盘会每 30s 失败重试，房间永远不归档。最小正确：EXDEV 时 copy 到 archive 临时目录→fsync/校验→rename 临时到最终→删除源；失败保留源。
+2) 原子性：同盘 rename 目录是原子；跨盘 copy 不是。必须用临时目录+最终 rename，崩溃后要么源房间仍在，要么归档完整；不能出现半归档。manager 应在 store.archiveRoom 成功后才删内存（当前 manager.ts:422-424 顺序对，但 store 缺失/无 archiveRoom 时仍删内存，必须 guard）。
+3) 恢复路径：当前 loadAll 只读 data/rooms（file-store.ts:167-170），archive 不会被加载；没有恢复入口等于“用户不可找回的冷丢档”。最小正确：提供 restore-from-archive CLI/管理入口，把 archive/<code> 移回 rooms/<code> 并 validateSnapshot；或至少文档化手动恢复并测试。只归档不恢复不能算完整修复。
+4) 磁盘增长：当前无 archive 数量/容量/保留期上限；7 天只是“暂停多久后归档”，不是归档保留多久。必须加 archive retention（如 30 天）与 max count/bytes，清理最旧；否则磁盘无限增长。
+5) 7 天是否合理：作为“归档前保留在内存”的期限偏长，会占房间槽位；可配置，默认建议更短内存宽限+长期归档，或明确房间上限。若产品坚持 7 天，必须有 room cap/告警。
+6) 防御复查：reclaimRoom 已事务内 canReclaim（manager.ts:404-409）；archiveRoom 也应在删除内存前复查 canArchive，避免未来绕过 ws 队列。
+7) 测试：跨盘 EXDEV fallback、目标已存在、归档后文件存在、restore 后可 loadAll、容量清理、LOBBY 30min 边界、重连先于 sweep 则 canArchive=false、归档失败房间保持。
+
+4. 建议砍掉/延后的条目 + 理由
+
+- P2-4 完整 LRU：可延后/降级。当前 FIFO 淘汰最旧 key（driver.ts:339-345）已避免一次清空；多数成功命令改变状态，重复驱动风险低。本轮只要补“超限后不重复已成功终态命令”测试；不必实现复杂 LRU。
+- P2-10 强安全修复：可延后。p<seatId> 校验不能防真人标 AI（manager.ts:119,502），本地快照篡改本来就能改任意字段；本轮保留数量/人格/session 互斥即可，不要把它当安全闭环。
+- P2-12 隐藏人格：砍。公开 AI 人格是产品透明设计，不泄漏人类隐私（ws.ts:184-209）；不改。
+- P2-3 ERROR_PAUSED 定时重试：降级。暂停期间 tick 已拒绝（driver.ts:164-165），ERROR_PAUSED 更适合不占坑、等恢复后重新决策；若保留重试必须 MAX_RETRIES 上限，避免存储持续故障时空转。
+- P2-8 不能砍，必须提前：它是 P0-1 原子恢复/重启不二次平移的前置（types.ts:23-25；manager.ts:178,197-202,280-295）。
+
+5. 建议新增的条目
+
+N1（P0）：shift 必须绑定成功重连。当前 ws.ts:314-327 在 sessions.resume 前平移；无效 token/交付失败也会 version+1 并清 noHumanSince。改为身份恢复成功后、同一事务内平移+上线；失败整体回滚。
+N2（P0）：shift commit 与生命周期标志原子落盘。当前 markPauseShifted 只改内存（manager.ts:368-371），commitTransition 不更新 noHumanSinceMs（manager.ts:282-285）。必须在同一 candidate 写入 shifted game + pauseSince/shifted 标志。
+N3（P1）：归档计时与 shift 标志分离。当前 shouldArchive 依赖 noHumanSinceMs（manager.ts:738-739），shift 清它会导致失败重连后永不归档。保留 offlineSince 用于归档，另用 deadlinesShifted 防二次平移。
+N4（P2）：平移所有请求 createdAtMs 或显式保持 2s 间隔。当前只 PENDING（engine.ts:224-227），engine 间隔检查用所有请求最新 createdAtMs（engine.ts:1001-1003）。
+N5（P1）：resumeFromPauseInQueue false 分支必须阻止继续。当前 ws.ts:314-322 不检查返回值；pausedMs<=0/时钟异常时可能未平移就 schedule。
+N6（P2）：shift 加法溢出/Date 有效性校验。当前 engine.ts:221-226 无结果校验；validateSnapshot 只查 safe integer/finite Date（file-store.ts:62,77,91,101）。
+N7（P1）：archive EXDEV/恢复入口/容量上限。见第 3 节；当前 file-store.ts:154-161,167-170 不满足。
+N8（P2）：archiveRoom store 缺失/无 archiveRoom 时不得静默删内存；并复查 canArchive（manager.ts:419-425）。
+N9（P2）：public resumeFromPause 应检查 room.paused/GAME_OVER，避免重启 paused 房间被平移而不是 resumeFromPause；当前 command-queue.ts:79-95 只看 pauseSince/state，ws 外层才有 !isPaused  guard（ws.ts:314）。
+N10（测试）：失败重连、二次平移、重启持久化、非 PENDING 请求间隔、归档恢复/EXDEV/容量、sweep 与重连顺序。当前 bots-resume-pause.test.ts 覆盖纯函数/成功队列/commit 失败，但未覆盖这些。
+
+6. 给 Trae 的最终范围
+
+必须做：
+1) P0-1 按 N1/N2/N3/N5/N6 调整：纯函数平移所有游戏绝对时间；成功重连事务内原子恢复；持久化 pauseSince/createdAt/shifted；归档计时独立；false/失败保持暂停；不新增客户端命令。
+2) P2-8 作为 P0 前置同做：生命周期字段进快照并校验，旧快照兜底，shift 标志与 game 同快照。
+3) P1-1 按 N7/N8 调整：PLAYING 永不物理删除；归档处理 EXDEV/原子/恢复入口/容量上限；LOBBY 纯 AI 5min 删除、离线真人 30min 归档；reclaim/archive 复查。
+4) P2-1、P2-2、P2-5、P2-6、P2-7、P2-9、P2-11、P2-13：按方案做，补真实行为测试。
+5) P2-3：白名单+上限；ERROR_PAUSED 不无限重试，暂停期间不空转。
+6) 新增测试：第 2.5 节 5 条 + 第 3 节归档测试 + N10。
+
+可延后：
+- P2-4 完整 LRU：本轮 FIFO/按阶段保留+测试即可。
+- P2-10 强安全：本轮只做 schema 卫生，不宣称防篡改闭环。
+- P2-12：不改，只记录产品语义。
+- 归档保留期/容量策略若产品未定，可先配置化+默认保守值，但恢复入口和 EXDEV 不能延后。
+
+验收口径：pnpm test/typecheck/build 全绿只是底线；必须新增假时钟/真实队列/真实文件归档测试证明 P0/N1-N3 与 P1 恢复路径。禁止只断言 mock；禁止放松既有断言。
+
+结论：需按上述调整后交给 Trae
