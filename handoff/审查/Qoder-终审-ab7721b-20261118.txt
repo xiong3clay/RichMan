@@ -1,0 +1,156 @@
+Qoder 终审：commit ab7721b（单机可玩 AI 对手 + 暂停时间线 + 归档 + 激活补偿）
+==========================================================================
+日期：2026-11-18
+仓库：D:\Lianjunjie\biancheng\RichMan，HEAD=ab7721b，基线 e4011dc（v1.0.1）
+范围：58 文件 +8309/−66，四轮合并（AI 对手 → 五人格局与 P1 修复 → 暂停时间线/归档 → 激活补偿判据）
+方式：只读。未改代码、未 git add/commit、未改工作树（审查用 .review-data 已删除）。
+行号均指 ab7721b 工作区实际行号。
+
+第一节 本机真实命令尾行
+------------------------
+1) VITEST_MAX_WORKERS=4 pnpm test
+   Test Files  90 passed (90)
+        Tests  1077 passed (1077)
+     Start at  18:06:31
+     Duration  153.45s
+   EXIT=0
+2) pnpm typecheck
+   首次（test 后链式）tsc.exe 整进程卡死（工作集 ~33MB 无增长，TS7 已知环境问题），
+   杀掉后单独重跑：
+   $ tsc --noEmit -p tsconfig.json
+   EXIT=0
+3) pnpm build
+   apps/web/dist/assets/index-DpDNR9df.js  430.13 kB │ gzip: 126.46 kB
+   ✓ built in 269ms
+   EXIT=0
+4) 单人可玩冒烟（PORT=8013 RICHMAN_DATA_DIR=.review-data pnpm exec tsx apps/server/src/http.ts
+   + node artifacts/test-logs/practice-smoke.mjs http://127.0.0.1:8013）
+   {"ok":true,"reason":"done","rounds":[1,2,3],"phases":["ACTION","BETTING"],
+    "humanCommands":4,"commandFailures":[],"serverErrors":[],
+    "personalities":["AGGRESSIVE","GENIUS","PASSIVE"],
+    "aiActionTypes":["ACTION_ENDED","BET_SUBMITTED"]}
+   SMOKE_EXIT=0。rounds 到 3、commandFailures 空、AI 真实行动。用完已 rm -rf .review-data。
+结论：期望的 90/1077 全绿复现；typecheck/build 通过；一个人确实能在浏览器协议层打完前三轮。
+
+第二节 测试有效性结论
+----------------------
+总判定：有效、真实、未削弱。14 个新测试文件全部是纯新增（git diff --name-status e4011dc ab7721b
+-- '*test*' 全为 A，+3052 行、145 条），e4011dc 的既有跟踪测试零改动。
+
+1. 删 expect / 放宽阈值 / 改成只断言不抛错：无。既有测试文件一个都没动；新文件断言密度高
+   （磁盘字节级比较、精确计数、边界毫秒、outcome.code 精确匹配）。
+2. activation-undo.test.ts 的 setup(true) 改动判定：修正合成夹具，不是掩盖缺陷。理由：
+   a) 第四轮判据（file-store.ts:256-268）要求磁盘呈「未激活形态」才回滚：
+      pausedByNoHuman===true、joined 真人 online===false、noHumanSinceMs 一致。
+      旧夹具 setup() 里真人在线（sessions.join 默认 activate=true），那恰恰是「已激活」
+      形态——新判据对它只删 undo 不回滚是正确行为；若强行回滚在线快照才是上轮 P1-2 的反向错杀。
+   b) 真实写 undo 的场景就是「真人重连无真人暂停的房间」（ws.ts:353-366），setup(true)
+      （clock=77 + disconnectFor）精确复现该前置状态，夹具从合成走向真实。
+   c) 原断言一条没删反而加强：内存+磁盘 version/paused、noHumanSinceMs=77、pauseStartedAtMs=70、
+      undo 文件消失（74-89 行）。掩盖缺陷的做法是删/弱断言，这里相反。
+   d) 新增 T1-T4（124-222 行）把上轮审查指出的洞全部变成对抗用例：跨局版本碰撞只清理（T1）、
+      回滚目标校验失败保留原磁盘字节+原游戏+undo（T2）、真实 WS 激活成功但注入删除失败后
+      真实重启不误回滚不二次平移（T3，RetainUndoStore 子类 + startServer 两次）、
+      缺 gameId/joinedPlayerId 的旧记录按过期清理（T4）。这是修复的证据链，不是掩盖。
+3. 新测试真实性：全部真引擎（createInitialState/applyCommand/advanceSystem）；
+   存储类真 mkdtemp+FileRoomStore（activation-undo/archive-*/bots-persistence/bots-lifecycle）；
+   bots-http 真 startServer+fetch；pause-archive-atomic 与 activation-undo T3 真 WS Peer+真重启；
+   bots-driver 把 BotDriver 接真 GameCommandProcessor+RoomScheduler+RoomManager 跑 400s 模拟时间，
+   断言 round≥4、invariants/errors 空、全部回执 ok。
+   fake timers 仅用于定时器逻辑（driver-reliability/resume-pause/lifecycle），属合法手段；
+   driver-reliability 的 manager 字面量 stub 是单元测试接缝（被测物是 BotDriver 本身），
+   其 A1 用例的 execute 回调仍跑真 applyCommand；生产接线由 bots-driver 与 ws.ts:235-241 覆盖。
+   唯一 vi.spyOn 是 pause-archive-atomic 对 console.warn 的降噪，无 vi.mock 业务逻辑。
+4. 失败分支覆盖：
+   已有断言：VERSION_CONFLICT 重试耗尽（首次+3 次=4 调用+1 warn，reliability:98-129）、
+   确定性非法不重试（REQUEST_EXPIRED calls=1）、ERROR_PAUSED 重试后成功、
+   平移提交 disk full 拒绝且不清暂停（resume-pause:164-197）、
+   激活 after_rename 失败/提交中断开（pause-archive-atomic:161-186）、
+   EXDEV 发布失败/发布后校验损坏/restore 发布失败/restore 二次校验/路径穿越
+   （archive-recovery:68-176）、undo 删除失败（T3）、回滚校验失败（T2）、坏档三振隔离（archive-residue）。
+   无断言的失败分支（P2 缺口，见第三节）：回滚写盘失败与回滚后删记录失败
+   （file-store.ts:290-296）、writeActivationUndo 失败→ws 补偿、隔离 rename 失败兜底
+   （file-store.ts:487-490）、残留 rm 失败（444-447，上轮已自认 Windows 不稳定）、
+   driver submit 的 execute 抛错（driver.ts:277-280）。
+   另一个结构性缺口：套件内没有「真 WS + AI 完整对局」的自动化用例（bots-http 只建房），
+   评委路径靠已提交的 practice-smoke.mjs 手工脚本 + processor 级集成兜底；本次终审已实跑通过。
+
+第三节 分级发现
+----------------
+P0（会坏数据/丢档/可作弊/单人玩不通）：无。
+安全屏障核对：
+- 回滚写盘前全量 validateSnapshot（file-store.ts:284），校验失败返回原快照、磁盘字节不动（T2 实证）。
+- undo 原子写 backup:false（file-store.ts:229→atomic.ts:25-28）不污染 snapshot.bak.json。
+- 激活事务 events=[]（manager.ts:259）、平移只 +version 不动 eventSeq（engine.ts:218-241），
+  回滚不产生 journal/快照 seq 背离。
+- AI 命令与真人同一 processor.execute 入口（ws.ts:237），driver/policy 只读状态、零 IO、
+  不读 drawResult、不读他人未开奖下注；AI tokenDigest="bot-"+uuid（manager.ts:129）与
+  sha256 hex 永不碰撞，AI 无会话记录，resume 必须命中 store 摘要，join 只分配空座，
+  hostId 永不落 AI（nextPlayerId(room,true)、validateSnapshot「房主无效」，bots-manager P2-10 篡改用例）。
+- PLAYING 永不物理删除（shouldReclaim 仅 LOBBY，manager.ts:788-792）；僵尸房被
+  driver tick/fire 的 isNoHumanOnline 双 guard（driver.ts:169-170,222-223）+
+  scheduler getState null（ws.ts:224）+ processor isPaused（ws.ts:229）三重停住，
+  7 天后归档（lifecycle.ts:13，bots-lifecycle:64-90 实证）。
+- 归档 EXDEV 全量复制+校验+sync 后才删源（file-store.ts:322-374）；restoreFromArchive
+  清单+文件指纹+快照三重校验、占位房拒绝、穿越拒绝（archive-recovery:123-140）。
+- schemaVersion=1、PROTOCOL_VERSION=1、RULES_VERSION=1.3.2 均未变；协议新增字段全可选。
+
+P1（可观测缺陷）：无。
+上轮两条 P1 已修复并有真实测试：
+- 跨局误回滚 → gameId 联合校验（file-store.ts:258）+ catch 分流返回原快照（283-289），T1/T2。
+- 删除失败后合法激活被误回滚 → unactivated 三指标（259-260），T3 真 WS+真重启实证
+  「不误回滚、不二次平移、pauseShifted 保持」。
+反向错杀核查（重点4）：单调时钟下不可能。合法激活提交后 online=true、pausedByNoHuman=false、
+noHumanSinceMs=null，三指标全翻；即便该真人随后断开，noHumanSinceMs=断开时刻 > undo 记录的
+原离线起点 → 不一致 → 只删 undo。唯一理论碰撞是系统时钟倒跳恰好回到原离线起点（极端异常环境，
+N5 已拒绝负 pausedMs），不构成 P1。
+catch 三分支各自安全：读/解析/校验失败 → 原快照+暂停+保留 undo（磁盘不动）；
+写盘失败 → 返回已校验的 restored+保留 undo（下次重试）；写盘后删记录失败 → warn，
+下次重启平移路径版本不等只删、普通路径幂等再回滚后重试删除，收敛。
+
+P2（卫生/准备项）：
+1. 版本号未随 v1.0.2 更新：package.json:4 与 http.ts:22 仍 "1.0.1"，CHANGELOG 最新 1.0.1。
+   打 tag 前必须机械 bump + 写 CHANGELOG 条目（发布准备，非代码缺陷）。
+2. 五个失败分支无自动化断言（第二节第 4 条清单）：file-store.ts:290-296/487-490/444-447、
+   driver.ts:277-280、ws.ts writeActivationUndo 失败路径。分支本身是 warn/兜底，风险低。
+3. 无自动化「真 WS+AI 完整对局」回归；practice-smoke.mjs 已提交在 artifacts/test-logs/，
+   建议后续把其有界变体纳入 pnpm test。
+4. 双开同一 data 目录仍无单实例锁（http.ts:298-303；serializeArchive 仅实例内互斥，
+   file-store.ts:301-305）——既有架构缺口，undo/隔离新增跨进程干涉面，建议后续加锁。
+5. archiveFailures 计数纯内存、重启归零（file-store.ts:195）；30s 巡检下约 90s 隔离，
+   频繁重启会推迟。上轮 Map 泄漏已修（452-454 清理消失目录）。
+6. 残留清理未覆盖 .tmp/deleted-* tomb、.tmp/*.json 崩溃临时文件、corrupt-*/invalid-current-*
+   （file-store.ts:217,525,530 附近）——既有遗留，三前缀产生点均为直接子级，无嵌套漏扫。
+7. ActivationUndo 不携带 lastEvents（types.ts:40-51）：平移路径回滚后磁盘 lastEvents=[]
+   而非 before.lastEvents，最近一次真实命令的审计副本丢失（恢复不重放，仅审计保真）。
+8. policy.ts 为合法性上限读取他人原始 cents（100,503-509 行）——与视图已披露的
+   lenderLimits（views.ts:41-45,63-66「已接受披露」）信息等价，无策略性偷看；
+   出借人选择仅按存活/座位序（399-403 行注释与实现一致）。记录为已接受设计。
+9. bots-http.test.ts:9 staticDir "D:/nonexistent-static-dir"：测试专用绝对路径，
+   意图即「不存在」，跨平台无害；src/ 与产物 grep 无个人/绝对路径。
+10. 重启停机区间不做截止平移（pauseShifted=true 持续阻塞 getPauseSince，直到完整
+   上线→离线循环重置）——T3/N2 断言为预期，保守不双重消费；评委体验上重启后
+   剩余时间不补，属设计取舍，文档化即可。
+11. 隔离容量已计入 bytes 与 count（file-store.ts:505,510-513，上轮 P2-2 已修），
+   但隔离区永不参与 FIFO——隔离区占满上限会挤删健康归档（规格如此，运维需知）。
+
+第四节 发布判断
+----------------
+代码层面达到 v1.0.2 发布质量：
+- 单人可玩闭环实跑通过（建房 bots=5 → 自动准备/开局 → 真人 END_ACTION/SUBMIT_BET →
+  AI 行动 → round 3，零命令失败、零服务端错误）。
+- AI 不作弊、座位不可接管、僵尸房三重暂停+7 天归档兜底、PLAYING 永不物理删除。
+- 暂停时间线字段全覆盖（deadlineAt/windowDeadlineMs/dangerDeadlineMs/请求 createdAtMs
+  全量+PENDING deadlineMs；贷款按轮、下注/玩家无时间字段，枚举无遗漏）、幂等、先平移后清标记。
+- 激活补偿判据 sound，上轮 P1 全修且对抗测试齐全；归档/隔离/残留/隐私/规则均不回退
+  （规则文件零改动，views.ts 零改动，PROTOCOL/RULES 版本不变，旧存档兼容有 T4/legacy 用例）。
+- 环境可控：只读 data 目录→清理 warn 不抛、写失败 ERROR_PAUSED 暂停、建房 503、
+  目录缺失则启动 fail-fast；磁盘满→原子写失败回滚内存+暂停、rename 后 append 失败
+  durablePending 兜底（有测试）；Node 22 无 24-only API，engines>=22，冒烟用 Node22+ 全局 WebSocket。
+打 tag 前必做（机械准备，不阻塞代码结论）：
+1) package.json 与 http.ts VERSION bump 到 1.0.2；2) CHANGELOG 增 1.0.2 条目
+（单人练习/暂停时间线/归档加固/激活补偿判据）；3) 建议把 .review-data 类临时目录加入 .gitignore。
+作为「TRAE 大赛可体验入口」：评委一人开浏览器即可建房打 AI，无需第二人；
+断线重连不丢档不双重平移；关页后房间暂停、7 天归档可恢复。体验路径已验证。
+
+结论：可以发布
