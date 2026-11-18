@@ -558,3 +558,16 @@ https://diego-rotary-inclusive-hughes.trycloudflare.com（2026-11-06 21:5x 重�
 - GitHub release：https://github.com/xiong3clay/RichMan/releases/tag/v1.0.1（asset uploaded，digest 与本机一致）。
 - 09D（2026-11-10）：用户真机确认「09D 试过了，能行」；未逐项回填 D01–D20 与设备/时间，按「用户真机验收通过、逐项证据未留」登记（handoff/单元09D-真机发布矩阵.txt 第七节）。
 - 剩余（非计划内）：build-release.ps1 压缩重试硬化（火绒短暂独占 node.exe）；Qoder 遗留 S1–S3 测试缺口；iOS 安全区/真机音频/真实 ACL 等边界仅桌面证据。
+
+
+【v1.0.2 发布与打包（2026-11-18）】
+- 触发：用户 m09316「先把AI对手加上」→ AI 对手/五人格局/暂停时间线/归档/激活补偿全部完成并合并为 ab7721b；Qoder 终审（handoff/审查/Qoder-终审-ab7721b-20261118.txt）结论「可以发布」，P0/P1 均无。
+- 版本号：根/ apps/server / apps/web / packages/shared / packages/game-core 的 package.json 与 apps/server/src/http.ts:22 VERSION 全部 1.0.2（commit 69ad09e，含 CHANGELOG [1.0.2] 段）。
+- 打包结果（commit a7dad98，gitDirty=false，node v24.21.0，protocolVersion 1）：
+  * Windows：release/RichMan-v1.0.2-win-x64.zip，45,005,650 字节，SHA256 E2F5E653B4F843ECA6378D389D52B6454802E167D1CAF8ABDE9F374BEFDCC13D；verify-release 12/12 PASS（server_runtime room 8527、backup_cli BACKUP_EMPTY、secret_scan 干净、49 文件 / 105,945,090 字节）。
+  * Linux：release/RichMan-v1.0.2-linux-x64.tar.gz，55,549,802 字节，SHA256 69DFA22133E81845347D0599528EB31C8F0B392AF8C06EEE6B624BF78406EA05；35 文件，包内 SHA256SUMS 与 build-info 齐全。
+  * release/SHA256SUMS.txt 已同时写入两个包的指纹。
+- 环境坑（重要，写进交接）：本机 DSH 会话的写入沙箱只放行「会话工作区 + D:\Lianjunjie\biancheng\RichMan」；凡不在 C:\Program Files 下的 node.exe（便携 node、复制出来的 node 副本）写 C:\Users\...\Temp 一律 EPERM（mkdir/mkdtemp/writeFile 全报 EPERM，实测同一 pwsh 里 Program Files 的 node 正常）。
+  verify-release.mjs 用 os.tmpdir() 建临时数据目录，因此打包校验必须把 TEMP/TMP 指向工作区内目录再跑：
+    $env:TEMP="$PWD\artifacts\tmp\reltmp"; $env:TMP=$env:TEMP; pnpm release:build; pnpm release:linux
+  这样 12/12 全 PASS（此前 server_runtime: fetch failed / backup_cli: INTERNAL_ERROR 均由此 EPERM 引起，不是代码缺陷）。
